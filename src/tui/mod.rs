@@ -14,7 +14,9 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    prelude::{Alignment, Color, Constraint, Direction, Frame, Layout, Line, Modifier, Span, Style},
+    prelude::{
+        Alignment, Color, Constraint, Direction, Frame, Layout, Line, Modifier, Span, Style,
+    },
     widgets::{Block, Borders, Paragraph, Sparkline},
     Terminal,
 };
@@ -126,7 +128,9 @@ async fn run_loop(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        terminal.draw(|frame| draw(frame, &app)).context("failed to draw TUI")?;
+        terminal
+            .draw(|frame| draw(frame, &app))
+            .context("failed to draw TUI")?;
 
         if let Some(error) = &app.error {
             return Err(anyhow!(error.clone()));
@@ -164,7 +168,13 @@ async fn run_loop(
 fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let outer = Block::default()
-        .title(Line::from(" SPEEDTEST ").style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))
+        .title(
+            Line::from(" SPEEDTEST ").style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
@@ -182,7 +192,10 @@ fn draw(frame: &mut Frame, app: &App) {
         ])
         .split(inner);
 
-    let value = if matches!(app.phase, TestPhase::Download | TestPhase::Upload | TestPhase::Complete) {
+    let value = if matches!(
+        app.phase,
+        TestPhase::Download | TestPhase::Upload | TestPhase::Complete
+    ) {
         format!("{:.1} Mbps", app.current_mbps)
     } else if let Some(ping) = app.ping_ms {
         format!("{ping:.1} ms")
@@ -193,7 +206,9 @@ fn draw(frame: &mut Frame, app: &App) {
     let headline = Paragraph::new(vec![
         Line::from(Span::styled(
             value,
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             app.phase.label(),
@@ -224,9 +239,17 @@ fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(left, metrics[0]);
     frame.render_widget(right, metrics[1]);
 
-    let data: Vec<u64> = app.samples.iter().map(|value| value.max(0.0) as u64).collect();
+    let data: Vec<u64> = app
+        .samples
+        .iter()
+        .map(|value| value.max(0.0) as u64)
+        .collect();
     let sparkline = Sparkline::default()
-        .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::DarkGray)))
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
         .data(&data)
         .style(Style::default().fg(ACCENT));
     frame.render_widget(sparkline, vertical[3]);
@@ -234,7 +257,10 @@ fn draw(frame: &mut Frame, app: &App) {
     let footer = Paragraph::new(Line::from(vec![
         Span::styled("Cloudflare Edge", Style::default().fg(Color::Gray)),
         Span::raw("  •  "),
-        Span::styled("q / esc / ctrl-c to cancel", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "q / esc / ctrl-c to cancel",
+            Style::default().fg(Color::DarkGray),
+        ),
     ]))
     .alignment(Alignment::Center);
     frame.render_widget(footer, vertical[4]);
@@ -242,7 +268,10 @@ fn draw(frame: &mut Frame, app: &App) {
 
 fn metric_line(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!(" {label:<10}"), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" {label:<10}"),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled(value, Style::default().fg(Color::White)),
     ])
 }
