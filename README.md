@@ -41,6 +41,7 @@ The project separates the measurement engine, canonical result model, terminal U
 - Plain terminal mode for CI, logs, and unsupported terminals
 - Graceful separation between engine, UI, model, and storage
 - Native release binaries for Windows, Linux, Intel macOS, and Apple Silicon macOS
+- Cloudflare-aware request sizing and HTTP 429 backoff
 
 Packet loss is intentionally nullable in v0.1 rather than depending on a deprecated public TURN service.
 
@@ -105,7 +106,7 @@ speedtest
 speedtest
 speedtest --plain
 speedtest --json
-speedtest --streams 6 --duration 10
+speedtest --streams 4 --duration 10
 speedtest --output result.json
 speedtest --output result.csv --format csv
 speedtest --no-save
@@ -116,7 +117,7 @@ For development from a checkout, replace `speedtest` with `cargo run --release -
 ### CLI options
 
 ```text
---streams <N>       Concurrent transfer streams (default: 4)
+--streams <N>       Concurrent transfer streams (default: 2)
 --duration <SEC>    Seconds for each throughput phase (default: 8)
 --plain             Disable the interactive TUI
 --json              Print the canonical result as JSON
@@ -124,6 +125,8 @@ For development from a checkout, replace `speedtest` with `cargo run --release -
 --format <FORMAT>   Output file format: json or csv (default: json)
 --no-save           Disable automatic result/history persistence
 ```
+
+The Cloudflare backend deliberately defaults to two streams and long transfer bodies to avoid turning a short speed test into a burst of many HTTP requests. If Cloudflare's public endpoint returns HTTP 429, the client respects numeric `Retry-After` values when available and otherwise uses bounded exponential backoff. Persistent throttling can still happen on the public service; in that case, wait before retrying or use `--streams 1`.
 
 ## Result model
 
@@ -194,7 +197,7 @@ The release workflow reads the package version from `Cargo.toml`. When a commit 
 
 ## Accuracy notes
 
-This is an independent CLI, not an official Cloudflare client. Network speed measurements vary with routing, congestion, Wi-Fi conditions, endpoint behavior, protocol overhead, and test methodology. The engine uses warm-up traffic, multiple streams, monotonic timing, and time-window sampling to reduce obvious measurement artifacts, but broader validation against controlled links is still required before treating v0.1 as a reference benchmark.
+This is an independent CLI, not an official Cloudflare client. Network speed measurements vary with routing, congestion, Wi-Fi conditions, endpoint behavior, protocol overhead, and test methodology. The Cloudflare backend uses long transfer bodies, conservative default concurrency, monotonic timing, loaded-latency sampling, and HTTP 429 backoff to reduce avoidable request churn, but broader validation against controlled links is still required before treating v0.1 as a reference benchmark.
 
 ## Roadmap
 

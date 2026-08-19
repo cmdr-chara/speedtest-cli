@@ -6,11 +6,11 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use chrono::Utc;
 use futures_util::StreamExt;
-use reqwest::Client;
+use reqwest::{header::RETRY_AFTER, Client, Response, StatusCode};
 use tokio::{
     sync::mpsc::UnboundedSender,
     task::JoinSet,
@@ -24,9 +24,14 @@ use crate::{
 
 const DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down";
 const UPLOAD_URL: &str = "https://speed.cloudflare.com/__up";
-const DOWNLOAD_CHUNK_BYTES: u64 = 25_000_000;
-const UPLOAD_CHUNK_BYTES: usize = 8_000_000;
+const DOWNLOAD_CHUNK_BYTES: u64 = 250_000_000;
+const UPLOAD_CHUNK_BYTES: usize = 50_000_000;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
+const LOADED_LATENCY_INTERVAL: Duration = Duration::from_millis(400);
+const PHASE_COOLDOWN: Duration = Duration::from_millis(750);
+const MAX_RATE_LIMIT_RETRIES: usize = 3;
+const RATE_LIMIT_BASE_DELAY_MS: u64 = 400;
+const MAX_RATE_LIMIT_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct CloudflareEngine {
@@ -64,7 +69,7 @@ impl CloudflareEngine {
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Download));
         let (download, download_loaded_ms) = self.measure_download(&tx).await?;
 
-        sleep(Duration::from_millis(350)).await;
+        sleep(PHASE_COOLDOWN).await;
 
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Upload));
         let (upload, upload_loaded_ms) = self.measure_upload(&tx).await?;
@@ -93,18 +98,34 @@ impl CloudflareEngine {
     }
 
     async fn warm_up(&self) -> Result<()> {
-        let response = self
-            .client
-            .get(DOWNLOAD_URL)
-            .query(&[("bytes", "1000000")])
-            .send()
-            .await
-            .context("warm-up request failed")?
-            .error_for_status()
-            .context("warm-up endpoint returned an error")?;
+        let mut retries = 0;
 
-        let _ = response.bytes().await.context("warm-up body failed")?;
-        Ok(())
+        loop {
+            let response = self
+                .client
+                .get(DOWNLOAD_URL)
+                .query(&[("bytes", "1000000")])
+                .send()
+                .await
+                .context("warm-up request failed")?;
+
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                retries += 1;
+                if retries > MAX_RATE_LIMIT_RETRIES {
+                    return Err(anyhow!(
+                        "Cloudflare rate limited the warm-up request; wait a moment and try again"
+                    ));
+                }
+                sleep(rate_limit_delay(&response, retries)).await;
+                continue;
+            }
+
+            let response = response
+                .error_for_status()
+                .context("warm-up endpoint returned an error")?;
+            let _ = response.bytes().await.context("warm-up body failed")?;
+            return Ok(());
+        }
     }
 
     async fn measure_idle_latency(&self, count: usize) -> Result<(f64, f64)> {
@@ -121,19 +142,36 @@ impl CloudflareEngine {
     }
 
     async fn single_latency_sample(&self) -> Result<f64> {
-        let started = Instant::now();
-        let response = self
-            .client
-            .get(DOWNLOAD_URL)
-            .query(&[("bytes", "0")])
-            .header("cache-control", "no-cache")
-            .send()
-            .await
-            .context("latency request failed")?
-            .error_for_status()
-            .context("latency endpoint returned an error")?;
-        let _ = response.bytes().await.context("latency body failed")?;
-        Ok(started.elapsed().as_secs_f64() * 1000.0)
+        let mut retries = 0;
+
+        loop {
+            let started = Instant::now();
+            let response = self
+                .client
+                .get(DOWNLOAD_URL)
+                .query(&[("bytes", "0")])
+                .header("cache-control", "no-cache")
+                .send()
+                .await
+                .context("latency request failed")?;
+
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                retries += 1;
+                if retries > MAX_RATE_LIMIT_RETRIES {
+                    return Err(anyhow!(
+                        "Cloudflare rate limited latency measurements; wait a moment and try again"
+                    ));
+                }
+                sleep(rate_limit_delay(&response, retries)).await;
+                continue;
+            }
+
+            let response = response
+                .error_for_status()
+                .context("latency endpoint returned an error")?;
+            let _ = response.bytes().await.context("latency body failed")?;
+            return Ok(started.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 
     async fn measure_download(
@@ -162,15 +200,23 @@ impl CloudflareEngine {
             worker.context("download worker panicked")??;
         }
 
+        let loaded_latency = loaded.await.context("loaded-latency task panicked")??;
+        let loaded_median = median(&loaded_latency);
         let elapsed = self.config.phase_duration.as_secs_f64();
         let bytes = total.load(Ordering::Relaxed);
+
+        if bytes == 0 {
+            return Err(anyhow!(
+                "Cloudflare did not deliver any download data; its public speed-test endpoint may be rate limiting this client"
+            ));
+        }
+
         let result = ThroughputResult {
             mbps: mbps(bytes, elapsed),
             bytes,
             seconds: elapsed,
         };
-        let loaded_latency = loaded.await.context("loaded-latency task panicked")??;
-        let loaded_median = median(&loaded_latency);
+
         if let Some(ms) = loaded_median {
             self.emit(
                 tx,
@@ -212,15 +258,23 @@ impl CloudflareEngine {
             worker.context("upload worker panicked")??;
         }
 
+        let loaded_latency = loaded.await.context("loaded-latency task panicked")??;
+        let loaded_median = median(&loaded_latency);
         let elapsed = self.config.phase_duration.as_secs_f64();
         let bytes = total.load(Ordering::Relaxed);
+
+        if bytes == 0 {
+            return Err(anyhow!(
+                "Cloudflare did not accept any upload data; its public speed-test endpoint may be rate limiting this client"
+            ));
+        }
+
         let result = ThroughputResult {
             mbps: mbps(bytes, elapsed),
             bytes,
             seconds: elapsed,
         };
-        let loaded_latency = loaded.await.context("loaded-latency task panicked")??;
-        let loaded_median = median(&loaded_latency);
+
         if let Some(ms) = loaded_median {
             self.emit(
                 tx,
@@ -278,6 +332,8 @@ impl CloudflareEngine {
 }
 
 async fn download_worker(client: Client, total: Arc<AtomicU64>, deadline: Instant) -> Result<()> {
+    let mut rate_limit_retries = 0;
+
     while Instant::now() < deadline {
         let response = tokio::select! {
             result = client
@@ -285,9 +341,25 @@ async fn download_worker(client: Client, total: Arc<AtomicU64>, deadline: Instan
                 .query(&[("bytes", DOWNLOAD_CHUNK_BYTES)])
                 .send() => result.context("download request failed")?,
             _ = sleep_until(deadline) => break,
+        };
+
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            rate_limit_retries += 1;
+            if rate_limit_retries > MAX_RATE_LIMIT_RETRIES {
+                break;
+            }
+            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline)
+                .await
+            {
+                break;
+            }
+            continue;
         }
-        .error_for_status()
-        .context("download endpoint returned an error")?;
+
+        rate_limit_retries = 0;
+        let response = response
+            .error_for_status()
+            .context("download endpoint returned an error")?;
 
         let mut body = response.bytes_stream();
         loop {
@@ -319,6 +391,8 @@ async fn upload_worker(
     payload: Bytes,
     deadline: Instant,
 ) -> Result<()> {
+    let mut rate_limit_retries = 0;
+
     while Instant::now() < deadline {
         let response = tokio::select! {
             result = client
@@ -333,6 +407,20 @@ async fn upload_worker(
             break;
         };
 
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            rate_limit_retries += 1;
+            if rate_limit_retries > MAX_RATE_LIMIT_RETRIES {
+                break;
+            }
+            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline)
+                .await
+            {
+                break;
+            }
+            continue;
+        }
+
+        rate_limit_retries = 0;
         response
             .error_for_status()
             .context("upload endpoint returned an error")?;
@@ -344,6 +432,7 @@ async fn upload_worker(
 
 async fn measure_loaded_latency(client: Client, deadline: Instant) -> Result<Vec<f64>> {
     let mut samples = Vec::new();
+    let mut rate_limit_retries = 0;
 
     while Instant::now() < deadline {
         let started = Instant::now();
@@ -362,17 +451,58 @@ async fn measure_loaded_latency(client: Client, deadline: Instant) -> Result<Vec
             break;
         };
 
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            rate_limit_retries += 1;
+            if rate_limit_retries > MAX_RATE_LIMIT_RETRIES {
+                break;
+            }
+            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline)
+                .await
+            {
+                break;
+            }
+            continue;
+        }
+
+        rate_limit_retries = 0;
         response
             .error_for_status()
             .context("loaded latency endpoint returned an error")?;
         samples.push(started.elapsed().as_secs_f64() * 1000.0);
 
-        if Instant::now() < deadline {
-            sleep(Duration::from_millis(350)).await;
+        if !sleep_before_deadline(LOADED_LATENCY_INTERVAL, deadline).await {
+            break;
         }
     }
 
     Ok(samples)
+}
+
+async fn sleep_before_deadline(delay: Duration, deadline: Instant) -> bool {
+    let now = Instant::now();
+    if now >= deadline {
+        return false;
+    }
+
+    let remaining = deadline.saturating_duration_since(now);
+    sleep(delay.min(remaining)).await;
+    Instant::now() < deadline
+}
+
+fn rate_limit_delay(response: &Response, attempt: usize) -> Duration {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| fallback_rate_limit_delay(attempt))
+        .min(MAX_RATE_LIMIT_DELAY)
+}
+
+fn fallback_rate_limit_delay(attempt: usize) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(3) as u32;
+    Duration::from_millis(RATE_LIMIT_BASE_DELAY_MS * 2_u64.pow(exponent))
 }
 
 fn mbps(bytes: u64, seconds: f64) -> f64 {
@@ -429,5 +559,14 @@ mod tests {
     fn calculates_jitter_as_mean_delta() {
         let jitter = mean_consecutive_delta(&[10.0, 12.0, 11.0, 15.0]);
         assert!((jitter - (7.0 / 3.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn rate_limit_backoff_grows_and_caps() {
+        assert_eq!(fallback_rate_limit_delay(1), Duration::from_millis(400));
+        assert_eq!(fallback_rate_limit_delay(2), Duration::from_millis(800));
+        assert_eq!(fallback_rate_limit_delay(3), Duration::from_millis(1600));
+        assert_eq!(fallback_rate_limit_delay(4), Duration::from_millis(3200));
+        assert_eq!(fallback_rate_limit_delay(8), Duration::from_millis(3200));
     }
 }
