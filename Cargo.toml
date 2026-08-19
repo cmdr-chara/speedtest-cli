@@ -1,0 +1,31 @@
+[package]
+name = "speedtest-cli"
+version = "0.1.0"
+edition = "2021"
+description = "A fast, polished terminal speed test written in Rust"
+license = "MIT"
+repository = "https://github.com/cmdr-chara/speedtest-cli"
+readme = "README.md"
+keywords = ["speedtest", "network", "cli", "tui", "ratatui"]
+categories = ["command-line-utilities", "network-programming"]
+
+[[bin]]
+name = "speedtest"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+csv = "1"
+futures-util = "0.3"
+ratatui = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
