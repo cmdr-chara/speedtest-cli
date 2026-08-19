@@ -112,8 +112,10 @@ mod tests {
 
     #[test]
     fn completion_keeps_result_and_focuses_download() {
-        let mut app = App::default();
-        app.download_peak_mbps = 812.0;
+        let mut app = App {
+            download_peak_mbps: 812.0,
+            ..Default::default()
+        };
         app.apply(EngineEvent::Complete(TestResult {
             timestamp: chrono::Utc::now(),
             backend: "cloudflare".to_string(),
