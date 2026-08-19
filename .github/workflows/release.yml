@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/scripts/package_release.py"
+      - "Cargo.toml"
+      - "src/**"
+  push:
+    branches:
+      - determination
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      should_release: ${{ steps.release.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          VERSION="$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          with Path("Cargo.toml").open("rb") as handle:
+              print(tomllib.load(handle)["package"]["version"])
+          PY
+          )"
+          TAG="v${VERSION}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+          elif gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; skipping publication."
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Release ${TAG} does not exist; it will be published after successful builds."
+            echo "should_release=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+  build:
+    name: Build ${{ matrix.artifact }}
+    needs: prepare
+    if: github.event_name == 'pull_request' || needs.prepare.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: speedtest-linux-x86_64
+            binary: target/x86_64-unknown-linux-musl/release/speedtest
+            archive: speedtest-linux-x86_64.tar.gz
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: speedtest-windows-x86_64
+            binary: target/x86_64-pc-windows-msvc/release/speedtest.exe
+            archive: speedtest-windows-x86_64.zip
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            artifact: speedtest-macos-aarch64
+            binary: target/aarch64-apple-darwin/release/speedtest
+            archive: speedtest-macos-aarch64.tar.gz
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            artifact: speedtest-macos-x86_64
+            binary: target/x86_64-apple-darwin/release/speedtest
+            archive: speedtest-macos-x86_64.tar.gz
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux musl toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package release asset
+        run: >-
+          python .github/scripts/package_release.py
+          --binary "${{ matrix.binary }}"
+          --artifact "${{ matrix.artifact }}"
+          --archive "${{ matrix.archive }}"
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.archive }}
+            dist/${{ matrix.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - prepare
+      - build
+    if: needs.prepare.outputs.should_release == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          gh release create "${RELEASE_TAG}" dist/* \
+            --target "${GITHUB_SHA}" \
+            --title "${RELEASE_TAG}" \
+            --generate-notes
