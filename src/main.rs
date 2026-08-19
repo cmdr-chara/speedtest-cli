@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
     let result = if cli.plain || cli.json {
         run_non_interactive(&engine).await?
     } else {
-        run_interactive(engine).await?
+        run_interactive(engine, cli.fps).await?
     };
 
     if cli.json {
@@ -65,7 +65,7 @@ async fn run_non_interactive(engine: &CloudflareEngine) -> Result<TestResult> {
     handle.await.context("measurement task panicked")?
 }
 
-async fn run_interactive(engine: CloudflareEngine) -> Result<TestResult> {
+async fn run_interactive(engine: CloudflareEngine, fps: u16) -> Result<TestResult> {
     let (tx, rx) = mpsc::unbounded_channel();
     let handle = tokio::spawn(async move {
         if let Err(error) = engine.run(tx.clone()).await {
@@ -75,7 +75,7 @@ async fn run_interactive(engine: CloudflareEngine) -> Result<TestResult> {
         Ok(())
     });
 
-    match tui::run(rx).await {
+    match tui::run(rx, fps).await {
         Ok(result) => {
             handle.await.context("measurement task panicked")??;
             Ok(result)

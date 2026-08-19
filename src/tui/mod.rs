@@ -20,11 +20,11 @@ use crate::{engine::EngineEvent, model::TestResult};
 
 use self::app::App;
 
-const TICK_RATE: Duration = Duration::from_millis(16);
+const PHYSICS_RATE: Duration = Duration::from_nanos(4_166_667);
 
-pub async fn run(mut rx: UnboundedReceiver<EngineEvent>) -> Result<TestResult> {
+pub async fn run(mut rx: UnboundedReceiver<EngineEvent>, render_fps: u16) -> Result<TestResult> {
     let mut terminal = enter_terminal()?;
-    let result = run_loop(&mut terminal, &mut rx).await;
+    let result = run_loop(&mut terminal, &mut rx, render_fps).await;
     restore_terminal(&mut terminal)?;
     result
 }
@@ -32,35 +32,50 @@ pub async fn run(mut rx: UnboundedReceiver<EngineEvent>) -> Result<TestResult> {
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     rx: &mut UnboundedReceiver<EngineEvent>,
+    render_fps: u16,
 ) -> Result<TestResult> {
     let mut app = App::default();
-    let mut ticker = tokio::time::interval(TICK_RATE);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut physics = tokio::time::interval(PHYSICS_RATE);
+    let mut render = tokio::time::interval(frame_interval(render_fps));
+    physics.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    render.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut dirty = true;
 
     loop {
-        terminal
-            .draw(|frame| view::draw(frame, &app))
-            .context("failed to draw TUI")?;
-
         if let Some(error) = &app.error {
             return Err(anyhow!(error.clone()));
         }
 
         tokio::select! {
-            _ = ticker.tick() => {
-                app.tick(TICK_RATE);
+            _ = physics.tick() => {
+                if app.tick(PHYSICS_RATE) {
+                    dirty = true;
+                }
                 if let Some(result) = handle_input(&app)? {
                     return Ok(result);
                 }
             }
+            _ = render.tick(), if dirty => {
+                terminal
+                    .draw(|frame| view::draw(frame, &app))
+                    .context("failed to draw TUI")?;
+                dirty = false;
+            }
             event = rx.recv(), if !app.is_complete() => {
                 match event {
-                    Some(event) => app.apply(event),
+                    Some(event) => {
+                        app.apply(event);
+                        dirty = true;
+                    }
                     None => return Err(anyhow!("measurement engine stopped unexpectedly")),
                 }
             }
         }
     }
+}
+
+fn frame_interval(fps: u16) -> Duration {
+    Duration::from_secs_f64(1.0 / f64::from(fps))
 }
 
 fn handle_input(app: &App) -> Result<Option<TestResult>> {
@@ -102,4 +117,15 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
         .context("failed to leave alternate screen")?;
     terminal.show_cursor().context("failed to restore cursor")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_interval_matches_requested_cap() {
+        assert_eq!(frame_interval(60).as_micros(), 16_666);
+        assert_eq!(frame_interval(240).as_micros(), 4_166);
+    }
 }

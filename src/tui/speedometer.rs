@@ -7,6 +7,7 @@ pub use gauge::render;
 const SPRING_STIFFNESS: f64 = 42.0;
 const SPRING_DAMPING: f64 = 12.0;
 const MAX_ANIMATION_STEP: f64 = 0.100;
+const SETTLE_EPSILON: f64 = 0.05;
 
 #[derive(Debug, Clone)]
 pub struct SpeedometerState {
@@ -55,10 +56,14 @@ impl SpeedometerState {
         self.scale_mbps = scale_for(peak);
     }
 
-    pub fn tick(&mut self, delta: Duration) {
+    pub fn tick(&mut self, delta: Duration) -> bool {
+        if !self.is_animating() {
+            return false;
+        }
+
         let dt = delta.as_secs_f64().clamp(0.0, MAX_ANIMATION_STEP);
         if dt <= f64::EPSILON {
-            return;
+            return false;
         }
 
         let error = self.target_mbps - self.displayed_mbps;
@@ -71,10 +76,17 @@ impl SpeedometerState {
             self.velocity = 0.0;
         }
 
-        if error.abs() < 0.05 && self.velocity.abs() < 0.05 {
+        if error.abs() < SETTLE_EPSILON && self.velocity.abs() < SETTLE_EPSILON {
             self.displayed_mbps = self.target_mbps;
             self.velocity = 0.0;
         }
+
+        true
+    }
+
+    fn is_animating(&self) -> bool {
+        (self.target_mbps - self.displayed_mbps).abs() >= SETTLE_EPSILON
+            || self.velocity.abs() >= SETTLE_EPSILON
     }
 
     pub const fn displayed_mbps(&self) -> f64 {
@@ -119,15 +131,25 @@ mod tests {
     }
 
     #[test]
-    fn spring_animation_converges_on_target() {
+    fn spring_animation_converges_at_240_hz() {
         let mut state = SpeedometerState::default();
         state.set_target(800.0);
 
-        for _ in 0..180 {
-            state.tick(Duration::from_millis(16));
+        for _ in 0..720 {
+            state.tick(Duration::from_nanos(4_166_667));
         }
 
         assert!((state.displayed_mbps() - 800.0).abs() < 0.1);
+        assert!(!state.tick(Duration::from_nanos(4_166_667)));
+    }
+
+    #[test]
+    fn animation_reports_redraws_only_while_moving() {
+        let mut state = SpeedometerState::default();
+        assert!(!state.tick(Duration::from_nanos(4_166_667)));
+
+        state.set_target(500.0);
+        assert!(state.tick(Duration::from_nanos(4_166_667)));
     }
 
     #[test]
@@ -140,5 +162,6 @@ mod tests {
         assert_eq!(state.displayed_mbps(), 420.0);
         assert_eq!(state.peak_mbps(), 420.0);
         assert_eq!(state.scale_mbps(), 500.0);
+        assert!(!state.tick(Duration::from_nanos(4_166_667)));
     }
 }
