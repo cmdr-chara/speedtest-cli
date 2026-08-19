@@ -128,6 +128,9 @@ fn print_plain(result: &TestResult) {
             quality.grade.label(),
             quality.confidence.label()
         );
+        if let Some(tier) = quality.tier_label() {
+            println!("  Tier:          ◆ {tier}");
+        }
         println!(
             "  Workloads:     gaming {}  calls {}  streaming {}  cloud gaming {}",
             quality.workloads.gaming.label(),

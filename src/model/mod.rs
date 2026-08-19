@@ -157,6 +157,20 @@ pub struct NetworkQuality {
     pub findings: Vec<DiagnosticFinding>,
 }
 
+impl NetworkQuality {
+    pub const S_TIER_SCORE: u8 = 98;
+
+    pub fn is_s_tier(&self) -> bool {
+        self.score >= Self::S_TIER_SCORE
+            && self.grade == QualityGrade::APlus
+            && self.confidence == QualityConfidence::High
+    }
+
+    pub fn tier_label(&self) -> Option<&'static str> {
+        self.is_s_tier().then_some("S-TIER")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkAnalysis {
     pub latency: LatencyAnalysis,
@@ -178,5 +192,43 @@ pub struct TestResult {
 impl TestResult {
     pub fn pretty_json(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quality(score: u8, confidence: QualityConfidence) -> NetworkQuality {
+        NetworkQuality {
+            score,
+            grade: QualityGrade::APlus,
+            confidence,
+            bufferbloat: BufferbloatAssessment {
+                download_increase_ms: Some(1.0),
+                upload_increase_ms: Some(1.0),
+                worst_increase_ms: Some(1.0),
+                grade: Some(QualityGrade::APlus),
+            },
+            workloads: WorkloadGrades {
+                gaming: QualityGrade::APlus,
+                video_calls: QualityGrade::APlus,
+                streaming: QualityGrade::APlus,
+                cloud_gaming: QualityGrade::APlus,
+            },
+            findings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn s_tier_requires_exceptional_score_and_high_confidence() {
+        assert!(quality(98, QualityConfidence::High).is_s_tier());
+        assert!(quality(100, QualityConfidence::High).is_s_tier());
+        assert!(!quality(97, QualityConfidence::High).is_s_tier());
+        assert!(!quality(100, QualityConfidence::Moderate).is_s_tier());
+        assert_eq!(
+            quality(99, QualityConfidence::High).tier_label(),
+            Some("S-TIER")
+        );
     }
 }

@@ -12,6 +12,7 @@ use super::{app::App, speedometer};
 const DOWNLOAD_ACCENT: Color = Color::Cyan;
 const UPLOAD_ACCENT: Color = Color::Magenta;
 const COMPLETE_ACCENT: Color = Color::Green;
+const S_TIER_ACCENT: Color = Color::LightCyan;
 const COMPACT_WIDTH: u16 = 72;
 const COMPACT_HEIGHT: u16 = 23;
 
@@ -193,20 +194,33 @@ fn completion_panel(app: &App) -> Paragraph<'static> {
         .as_ref()
         .map_or(0.0, |jitter| jitter.p95_ms);
     let finding = quality.findings.first();
+    let quality_color = if quality.is_s_tier() {
+        S_TIER_ACCENT
+    } else {
+        grade_color(quality.grade)
+    };
+
+    let mut quality_line = vec![Span::styled(
+        format!(" QUALITY {}/100 {} ", quality.score, quality.grade.label()),
+        Style::default()
+            .fg(quality_color)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if quality.is_s_tier() {
+        quality_line.push(Span::styled(
+            " ◆ S-TIER ",
+            Style::default()
+                .fg(S_TIER_ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    quality_line.push(Span::styled(
+        format!("{} confidence", quality.confidence.label()),
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!(" QUALITY {}/100 {} ", quality.score, quality.grade.label()),
-                Style::default()
-                    .fg(grade_color(quality.grade))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{} confidence", quality.confidence.label()),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
+        Line::from(quality_line),
         Line::from(vec![
             Span::styled(" Gaming ", Style::default().fg(Color::DarkGray)),
             Span::styled(
@@ -279,12 +293,25 @@ fn compact_quality(app: &App) -> Paragraph<'static> {
         return legacy_completion(app);
     };
 
+    let quality_color = if quality.is_s_tier() {
+        S_TIER_ACCENT
+    } else {
+        grade_color(quality.grade)
+    };
+    let tier = quality
+        .tier_label()
+        .map_or(String::new(), |tier| format!(" ◆ {tier}"));
+
     Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
-                format!("QUALITY {}/100 {}", quality.score, quality.grade.label()),
+                format!(
+                    "QUALITY {}/100 {}{tier}",
+                    quality.score,
+                    quality.grade.label()
+                ),
                 Style::default()
-                    .fg(grade_color(quality.grade))
+                    .fg(quality_color)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  •  "),
