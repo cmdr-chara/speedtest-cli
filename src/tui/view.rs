@@ -200,14 +200,12 @@ fn completion_panel(app: &App) -> Paragraph<'static> {
         grade_color(quality.grade)
     };
 
-    let mut quality_line = vec![
-        Span::styled(
-            format!(" QUALITY {}/100 {} ", quality.score, quality.grade.label()),
-            Style::default()
-                .fg(quality_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let mut quality_line = vec![Span::styled(
+        format!(" QUALITY {}/100 {} ", quality.score, quality.grade.label()),
+        Style::default()
+            .fg(quality_color)
+            .add_modifier(Modifier::BOLD),
+    )];
     if quality.is_s_tier() {
         quality_line.push(Span::styled(
             " ◆ S-TIER ",
@@ -300,7 +298,9 @@ fn compact_quality(app: &App) -> Paragraph<'static> {
     } else {
         grade_color(quality.grade)
     };
-    let tier = quality.tier_label().map_or(String::new(), |tier| format!(" ◆ {tier}"));
+    let tier = quality
+        .tier_label()
+        .map_or(String::new(), |tier| format!(" ◆ {tier}"));
 
     Paragraph::new(vec![
         Line::from(vec![
