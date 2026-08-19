@@ -103,7 +103,11 @@ fn draw_ticks(ctx: &mut ratatui::widgets::canvas::Context<'_>, ratio: f64, accen
         let inner_radius = if major { 0.80 } else { 0.865 };
         let outer_radius = if major { 1.065 } else { 1.025 };
         let color = if fraction <= ratio {
-            if major { accent } else { Color::Gray }
+            if major {
+                accent
+            } else {
+                Color::Gray
+            }
         } else if major {
             Color::Gray
         } else {
@@ -120,11 +124,7 @@ fn draw_ticks(ctx: &mut ratatui::widgets::canvas::Context<'_>, ratio: f64, accen
     }
 }
 
-fn draw_needle(
-    ctx: &mut ratatui::widgets::canvas::Context<'_>,
-    needle_angle: f64,
-    accent: Color,
-) {
+fn draw_needle(ctx: &mut ratatui::widgets::canvas::Context<'_>, needle_angle: f64, accent: Color) {
     ctx.draw(&CanvasLine {
         x1: 0.0,
         y1: 0.0,
@@ -324,15 +324,16 @@ mod tests {
             .draw(|frame| render(frame, frame.area(), &state, Color::Cyan, true))
             .expect("render speedometer");
 
-        let text = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .fold(String::new(), |mut text, cell| {
-                text.push_str(cell.symbol());
-                text
-            });
+        let text =
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .fold(String::new(), |mut text, cell| {
+                    text.push_str(cell.symbol());
+                    text
+                });
         assert!(text.contains("742.8"));
         assert!(text.contains("Mbps"));
     }

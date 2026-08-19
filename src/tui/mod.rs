@@ -75,9 +75,7 @@ fn handle_input(app: &App) -> Result<Option<TestResult>> {
         return Ok(None);
     }
 
-    if app.is_complete()
-        && matches!(key.code, KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc)
-    {
+    if app.is_complete() && matches!(key.code, KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc) {
         return Ok(app.result.clone());
     }
 
