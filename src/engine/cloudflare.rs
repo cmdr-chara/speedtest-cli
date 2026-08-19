@@ -348,7 +348,8 @@ async fn download_worker(client: Client, total: Arc<AtomicU64>, deadline: Instan
             if rate_limit_retries > MAX_RATE_LIMIT_RETRIES {
                 break;
             }
-            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline).await
+            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline)
+                .await
             {
                 break;
             }
@@ -411,7 +412,8 @@ async fn upload_worker(
             if rate_limit_retries > MAX_RATE_LIMIT_RETRIES {
                 break;
             }
-            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline).await
+            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline)
+                .await
             {
                 break;
             }
@@ -454,7 +456,8 @@ async fn measure_loaded_latency(client: Client, deadline: Instant) -> Result<Vec
             if rate_limit_retries > MAX_RATE_LIMIT_RETRIES {
                 break;
             }
-            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline).await
+            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline)
+                .await
             {
                 break;
             }
