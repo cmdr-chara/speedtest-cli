@@ -13,7 +13,7 @@ pub enum OutputFormat {
 #[command(version, about = "A fast, polished terminal speed test")]
 pub struct Cli {
     /// Number of concurrent transfer streams.
-    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=16))]
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=16))]
     pub streams: u8,
 
     /// Duration of each throughput phase in seconds.
