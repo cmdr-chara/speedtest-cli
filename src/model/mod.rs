@@ -172,7 +172,7 @@ pub struct TestResult {
     pub download: ThroughputResult,
     pub upload: ThroughputResult,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub analysis: Option<NetworkAnalysis>,
+    pub analysis: Option<Box<NetworkAnalysis>>,
 }
 
 impl TestResult {

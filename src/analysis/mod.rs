@@ -32,7 +32,7 @@ pub fn build_network_analysis(
     latency: &LatencyResult,
     download: &ThroughputResult,
     upload: &ThroughputResult,
-) -> NetworkAnalysis {
+) -> Box<NetworkAnalysis> {
     let jitter_values = consecutive_deltas(idle_samples);
     let latency_analysis = LatencyAnalysis {
         idle: distribution(idle_samples).unwrap_or_default(),
@@ -42,10 +42,10 @@ pub fn build_network_analysis(
     };
     let quality = assess_quality(&latency_analysis, latency, download, upload);
 
-    NetworkAnalysis {
+    Box::new(NetworkAnalysis {
         latency: latency_analysis,
         quality,
-    }
+    })
 }
 
 pub fn distribution(values: &[f64]) -> Option<LatencyDistribution> {

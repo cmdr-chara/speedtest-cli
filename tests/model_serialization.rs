@@ -31,7 +31,7 @@ fn canonical_result_round_trips_through_json() {
             bytes: 293_400_000,
             seconds: 8.0,
         },
-        analysis: Some(NetworkAnalysis {
+        analysis: Some(Box::new(NetworkAnalysis {
             latency: LatencyAnalysis {
                 idle: LatencyDistribution {
                     samples: 24,
@@ -75,7 +75,7 @@ fn canonical_result_round_trips_through_json() {
                     recommendation: None,
                 }],
             },
-        }),
+        })),
     };
 
     let json = serde_json::to_string(&result).unwrap();
