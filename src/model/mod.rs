@@ -226,6 +226,9 @@ mod tests {
         assert!(quality(100, QualityConfidence::High).is_s_tier());
         assert!(!quality(97, QualityConfidence::High).is_s_tier());
         assert!(!quality(100, QualityConfidence::Moderate).is_s_tier());
-        assert_eq!(quality(99, QualityConfidence::High).tier_label(), Some("S-TIER"));
+        assert_eq!(
+            quality(99, QualityConfidence::High).tier_label(),
+            Some("S-TIER")
+        );
     }
 }
