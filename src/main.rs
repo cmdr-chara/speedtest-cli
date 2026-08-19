@@ -75,11 +75,16 @@ async fn run_interactive(engine: CloudflareEngine) -> Result<TestResult> {
         Ok(())
     });
 
-    let result = tui::run(rx).await;
-    if result.is_err() {
-        handle.abort();
+    match tui::run(rx).await {
+        Ok(result) => {
+            handle.await.context("measurement task panicked")??;
+            Ok(result)
+        }
+        Err(error) => {
+            handle.abort();
+            Err(error)
+        }
     }
-    result
 }
 
 fn print_plain(result: &TestResult) {
