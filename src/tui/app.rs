@@ -97,8 +97,8 @@ impl App {
         }
     }
 
-    pub(super) fn tick(&mut self, delta: Duration) {
-        self.speedometer.tick(delta);
+    pub(super) fn tick(&mut self, delta: Duration) -> bool {
+        self.speedometer.tick(delta)
     }
 
     pub(super) fn is_complete(&self) -> bool {

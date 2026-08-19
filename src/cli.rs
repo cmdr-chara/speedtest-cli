@@ -20,6 +20,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u64).range(3..=30))]
     pub duration: u64,
 
+    /// Maximum interactive TUI render rate. The animation physics always run at 240 Hz.
+    #[arg(long, default_value_t = 240, value_parser = clap::value_parser!(u16).range(30..=240))]
+    pub fps: u16,
+
     /// Disable the interactive terminal UI.
     #[arg(long)]
     pub plain: bool,

@@ -35,7 +35,8 @@ The project separates the measurement engine, canonical result model, terminal U
 - Idle latency and jitter
 - Loaded latency during download and upload
 - Download and upload throughput sampling
-- Animated Ratatui speedometer and live sparkline
+- Layered animated Ratatui speedometer and live sparkline
+- 240 Hz speedometer physics with a configurable 30–240 FPS render cap
 - JSON output for scripts
 - Automatic per-test JSON files and JSONL history
 - Plain terminal mode for CI, logs, and unsupported terminals
@@ -104,6 +105,7 @@ speedtest
 
 ```bash
 speedtest
+speedtest --fps 144
 speedtest --plain
 speedtest --json
 speedtest --streams 4 --duration 10
@@ -119,12 +121,15 @@ For development from a checkout, replace `speedtest` with `cargo run --release -
 ```text
 --streams <N>       Concurrent transfer streams (default: 2)
 --duration <SEC>    Seconds for each throughput phase (default: 8)
+--fps <N>           Interactive render cap, 30–240 FPS (default: 240)
 --plain             Disable the interactive TUI
 --json              Print the canonical result as JSON
 --output <PATH>     Also write the result to this path
 --format <FORMAT>   Output file format: json or csv (default: json)
 --no-save           Disable automatic result/history persistence
 ```
+
+The speedometer spring simulation always advances at 240 Hz. `--fps` only caps terminal redraws, so lowering it reduces terminal/CPU work without changing network measurements or animation physics. Redraws are suppressed once the gauge is settled and no UI data has changed.
 
 The Cloudflare backend deliberately defaults to two streams and long transfer bodies to avoid turning a short speed test into a burst of many HTTP requests. If Cloudflare's public endpoint returns HTTP 429, the client respects numeric `Retry-After` values when available and otherwise uses bounded exponential backoff. Persistent throttling can still happen on the public service; in that case, wait before retrying or use `--streams 1`.
 
@@ -183,8 +188,12 @@ src/
 ├── storage/
 │   └── mod.rs
 ├── tui/
+│   ├── app.rs
 │   ├── mod.rs
-│   └── speedometer.rs
+│   ├── speedometer.rs
+│   ├── speedometer/
+│   │   └── gauge.rs
+│   └── view.rs
 ├── lib.rs
 └── main.rs
 ```
