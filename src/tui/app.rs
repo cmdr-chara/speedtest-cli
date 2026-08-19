@@ -140,6 +140,7 @@ mod tests {
                 bytes: 1,
                 seconds: 1.0,
             },
+            analysis: None,
         }));
 
         assert!(app.is_complete());

@@ -2,10 +2,10 @@ use ratatui::{
     prelude::{
         Alignment, Color, Constraint, Direction, Frame, Layout, Line, Modifier, Rect, Span, Style,
     },
-    widgets::{Block, Borders, Paragraph, Sparkline},
+    widgets::{Block, Borders, Paragraph, Sparkline, Wrap},
 };
 
-use crate::model::TestPhase;
+use crate::model::{FindingSeverity, QualityGrade, TestPhase};
 
 use super::{app::App, speedometer};
 
@@ -30,13 +30,14 @@ fn draw_full(frame: &mut Frame, app: &App) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
+    let lower_height = if app.is_complete() { 6 } else { 3 };
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Min(11),
+            Constraint::Min(10),
             Constraint::Length(4),
-            Constraint::Length(3),
+            Constraint::Length(lower_height),
             Constraint::Length(1),
         ])
         .split(inner);
@@ -54,7 +55,7 @@ fn draw_full(frame: &mut Frame, app: &App) {
 
     render_metrics(frame, app, vertical[2]);
     if app.is_complete() {
-        frame.render_widget(completion_strip(app), vertical[3]);
+        frame.render_widget(completion_panel(app), vertical[3]);
     } else {
         render_sparkline(frame, app, vertical[3], accent);
     }
@@ -67,26 +68,49 @@ fn draw_compact(frame: &mut Frame, app: &App) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(7),
-            Constraint::Length(4),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    frame.render_widget(phase_header(app), vertical[0]);
-    speedometer::render(
-        frame,
-        vertical[1],
-        &app.speedometer,
-        gauge_accent(app.phase),
-        shows_speed(app.phase),
-    );
-    render_metrics(frame, app, vertical[2]);
-    frame.render_widget(footer(app), vertical[3]);
+    if app.is_complete() {
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(7),
+                Constraint::Length(4),
+                Constraint::Length(2),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+        frame.render_widget(phase_header(app), vertical[0]);
+        speedometer::render(
+            frame,
+            vertical[1],
+            &app.speedometer,
+            gauge_accent(app.phase),
+            shows_speed(app.phase),
+        );
+        render_metrics(frame, app, vertical[2]);
+        frame.render_widget(compact_quality(app), vertical[3]);
+        frame.render_widget(footer(app), vertical[4]);
+    } else {
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(7),
+                Constraint::Length(4),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+        frame.render_widget(phase_header(app), vertical[0]);
+        speedometer::render(
+            frame,
+            vertical[1],
+            &app.speedometer,
+            gauge_accent(app.phase),
+            shows_speed(app.phase),
+        );
+        render_metrics(frame, app, vertical[2]);
+        frame.render_widget(footer(app), vertical[3]);
+    }
 }
 
 fn shell() -> Block<'static> {
@@ -105,7 +129,7 @@ fn shell() -> Block<'static> {
 
 fn phase_header(app: &App) -> Paragraph<'static> {
     let (label, color) = match app.phase {
-        TestPhase::Complete => ("TEST COMPLETE", COMPLETE_ACCENT),
+        TestPhase::Complete => ("NETWORK ANALYSIS COMPLETE", COMPLETE_ACCENT),
         phase => (phase.label(), gauge_accent(phase)),
     };
 
@@ -153,7 +177,141 @@ fn render_sparkline(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
     frame.render_widget(sparkline, area);
 }
 
-fn completion_strip(app: &App) -> Paragraph<'static> {
+fn completion_panel(app: &App) -> Paragraph<'static> {
+    let Some(result) = app.result.as_ref() else {
+        return legacy_completion(app);
+    };
+    let Some(analysis) = result.analysis.as_ref() else {
+        return legacy_completion(app);
+    };
+
+    let quality = &analysis.quality;
+    let buffer_grade = quality
+        .bufferbloat
+        .grade
+        .map_or("—", QualityGrade::label);
+    let jitter_p95 = analysis
+        .latency
+        .jitter
+        .as_ref()
+        .map_or(0.0, |jitter| jitter.p95_ms);
+    let finding = quality.findings.first();
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(" QUALITY {}/100 {} ", quality.score, quality.grade.label()),
+                Style::default()
+                    .fg(grade_color(quality.grade))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} confidence", quality.confidence.label()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" Gaming ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                quality.workloads.gaming.label(),
+                Style::default().fg(grade_color(quality.workloads.gaming)),
+            ),
+            Span::styled("   Calls ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                quality.workloads.video_calls.label(),
+                Style::default().fg(grade_color(quality.workloads.video_calls)),
+            ),
+            Span::styled("   Streaming ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                quality.workloads.streaming.label(),
+                Style::default().fg(grade_color(quality.workloads.streaming)),
+            ),
+            Span::styled("   Cloud gaming ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                quality.workloads.cloud_gaming.label(),
+                Style::default().fg(grade_color(quality.workloads.cloud_gaming)),
+            ),
+        ]),
+        Line::from(format!(
+            " tails  idle p95 {:.1} ms  p99 {:.1} ms  •  jitter p95 {:.1} ms",
+            analysis.latency.idle.p95_ms, analysis.latency.idle.p99_ms, jitter_p95
+        )),
+        Line::from(format!(
+            " bufferbloat {buffer_grade}  ↓ {}  ↑ {}",
+            format_delta(quality.bufferbloat.download_increase_ms),
+            format_delta(quality.bufferbloat.upload_increase_ms)
+        )),
+    ];
+
+    if let Some(finding) = finding {
+        let recommendation = finding
+            .recommendation
+            .as_deref()
+            .unwrap_or(finding.evidence.as_str());
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} ", finding.severity.label()),
+                Style::default()
+                    .fg(severity_color(finding.severity))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} — {recommendation}", finding.title),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+    }
+
+    Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
+}
+
+fn compact_quality(app: &App) -> Paragraph<'static> {
+    let Some(quality) = app
+        .result
+        .as_ref()
+        .and_then(|result| result.analysis.as_ref())
+        .map(|analysis| &analysis.quality)
+    else {
+        return legacy_completion(app);
+    };
+
+    Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                format!("QUALITY {}/100 {}", quality.score, quality.grade.label()),
+                Style::default()
+                    .fg(grade_color(quality.grade))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  •  "),
+            Span::raw(format!(
+                "game {}  calls {}  stream {}",
+                quality.workloads.gaming.label(),
+                quality.workloads.video_calls.label(),
+                quality.workloads.streaming.label()
+            )),
+        ]),
+        Line::from(format!(
+            "buffer {}  ↓ {}  ↑ {}",
+            quality
+                .bufferbloat
+                .grade
+                .map_or("—", QualityGrade::label),
+            format_delta(quality.bufferbloat.download_increase_ms),
+            format_delta(quality.bufferbloat.upload_increase_ms)
+        )),
+    ])
+    .alignment(Alignment::Center)
+}
+
+fn legacy_completion(app: &App) -> Paragraph<'static> {
     let download = app.download_mbps.unwrap_or_default();
     let upload = app.upload_mbps.unwrap_or_default();
     Paragraph::new(Line::from(Span::styled(
@@ -197,6 +355,23 @@ fn gauge_accent(phase: TestPhase) -> Color {
     }
 }
 
+fn grade_color(grade: QualityGrade) -> Color {
+    match grade {
+        QualityGrade::APlus | QualityGrade::A => Color::Green,
+        QualityGrade::B => Color::Cyan,
+        QualityGrade::C | QualityGrade::D => Color::Yellow,
+        QualityGrade::F => Color::Red,
+    }
+}
+
+fn severity_color(severity: FindingSeverity) -> Color {
+    match severity {
+        FindingSeverity::Info => Color::Cyan,
+        FindingSeverity::Warning => Color::Yellow,
+        FindingSeverity::Critical => Color::Red,
+    }
+}
+
 fn metric_line(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -213,4 +388,8 @@ fn format_speed(value: Option<f64>) -> String {
 
 fn format_ms(value: Option<f64>) -> String {
     value.map_or_else(|| "—".to_string(), |value| format!("{value:.1} ms"))
+}
+
+fn format_delta(value: Option<f64>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| format!("+{value:.1} ms"))
 }
