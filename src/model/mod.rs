@@ -45,6 +45,124 @@ pub struct ThroughputResult {
     pub seconds: f64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LatencyDistribution {
+    pub samples: usize,
+    pub min_ms: f64,
+    pub median_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencyAnalysis {
+    pub idle: LatencyDistribution,
+    pub jitter: Option<LatencyDistribution>,
+    pub download_loaded: Option<LatencyDistribution>,
+    pub upload_loaded: Option<LatencyDistribution>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityGrade {
+    APlus,
+    A,
+    B,
+    C,
+    D,
+    F,
+}
+
+impl QualityGrade {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::APlus => "A+",
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+            Self::D => "D",
+            Self::F => "F",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityConfidence {
+    High,
+    Moderate,
+    Limited,
+}
+
+impl QualityConfidence {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Moderate => "moderate",
+            Self::Limited => "limited",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+impl FindingSeverity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Warning => "WARNING",
+            Self::Critical => "CRITICAL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BufferbloatAssessment {
+    pub download_increase_ms: Option<f64>,
+    pub upload_increase_ms: Option<f64>,
+    pub worst_increase_ms: Option<f64>,
+    pub grade: Option<QualityGrade>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkloadGrades {
+    pub gaming: QualityGrade,
+    pub video_calls: QualityGrade,
+    pub streaming: QualityGrade,
+    pub cloud_gaming: QualityGrade,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticFinding {
+    pub severity: FindingSeverity,
+    pub title: String,
+    pub evidence: String,
+    pub recommendation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkQuality {
+    pub score: u8,
+    pub grade: QualityGrade,
+    pub confidence: QualityConfidence,
+    pub bufferbloat: BufferbloatAssessment,
+    pub workloads: WorkloadGrades,
+    pub findings: Vec<DiagnosticFinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkAnalysis {
+    pub latency: LatencyAnalysis,
+    pub quality: NetworkQuality,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
     pub timestamp: DateTime<Utc>,
@@ -53,6 +171,8 @@ pub struct TestResult {
     pub latency: LatencyResult,
     pub download: ThroughputResult,
     pub upload: ThroughputResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<Box<NetworkAnalysis>>,
 }
 
 impl TestResult {

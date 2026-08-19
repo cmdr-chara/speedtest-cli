@@ -76,15 +76,34 @@ struct CsvRecord<'a> {
     upload_mbps: f64,
     idle_latency_ms: f64,
     jitter_ms: f64,
+    idle_p95_ms: Option<f64>,
+    idle_p99_ms: Option<f64>,
+    jitter_p95_ms: Option<f64>,
+    jitter_p99_ms: Option<f64>,
     download_loaded_ms: Option<f64>,
     upload_loaded_ms: Option<f64>,
     packet_loss_percent: Option<f64>,
+    quality_score: Option<u8>,
+    quality_grade: Option<&'static str>,
+    quality_confidence: Option<&'static str>,
+    bufferbloat_grade: Option<&'static str>,
+    download_bufferbloat_ms: Option<f64>,
+    upload_bufferbloat_ms: Option<f64>,
+    gaming_grade: Option<&'static str>,
+    video_calls_grade: Option<&'static str>,
+    streaming_grade: Option<&'static str>,
+    cloud_gaming_grade: Option<&'static str>,
+    primary_diagnosis: Option<&'a str>,
     download_bytes: u64,
     upload_bytes: u64,
 }
 
 impl<'a> From<&'a TestResult> for CsvRecord<'a> {
     fn from(result: &'a TestResult) -> Self {
+        let analysis = result.analysis.as_ref();
+        let latency_analysis = analysis.map(|analysis| &analysis.latency);
+        let quality = analysis.map(|analysis| &analysis.quality);
+
         Self {
             timestamp: result.timestamp.to_rfc3339(),
             backend: &result.backend,
@@ -94,9 +113,34 @@ impl<'a> From<&'a TestResult> for CsvRecord<'a> {
             upload_mbps: result.upload.mbps,
             idle_latency_ms: result.latency.idle_ms,
             jitter_ms: result.latency.jitter_ms,
+            idle_p95_ms: latency_analysis.map(|latency| latency.idle.p95_ms),
+            idle_p99_ms: latency_analysis.map(|latency| latency.idle.p99_ms),
+            jitter_p95_ms: latency_analysis
+                .and_then(|latency| latency.jitter.as_ref())
+                .map(|jitter| jitter.p95_ms),
+            jitter_p99_ms: latency_analysis
+                .and_then(|latency| latency.jitter.as_ref())
+                .map(|jitter| jitter.p99_ms),
             download_loaded_ms: result.latency.download_loaded_ms,
             upload_loaded_ms: result.latency.upload_loaded_ms,
             packet_loss_percent: result.latency.packet_loss_percent,
+            quality_score: quality.map(|quality| quality.score),
+            quality_grade: quality.map(|quality| quality.grade.label()),
+            quality_confidence: quality.map(|quality| quality.confidence.label()),
+            bufferbloat_grade: quality
+                .and_then(|quality| quality.bufferbloat.grade)
+                .map(|grade| grade.label()),
+            download_bufferbloat_ms: quality
+                .and_then(|quality| quality.bufferbloat.download_increase_ms),
+            upload_bufferbloat_ms: quality
+                .and_then(|quality| quality.bufferbloat.upload_increase_ms),
+            gaming_grade: quality.map(|quality| quality.workloads.gaming.label()),
+            video_calls_grade: quality.map(|quality| quality.workloads.video_calls.label()),
+            streaming_grade: quality.map(|quality| quality.workloads.streaming.label()),
+            cloud_gaming_grade: quality.map(|quality| quality.workloads.cloud_gaming.label()),
+            primary_diagnosis: quality
+                .and_then(|quality| quality.findings.first())
+                .map(|finding| finding.title.as_str()),
             download_bytes: result.download.bytes,
             upload_bytes: result.upload.bytes,
         }
@@ -166,6 +210,7 @@ mod tests {
                 bytes: 500,
                 seconds: 1.0,
             },
+            analysis: None,
         }
     }
 
@@ -184,6 +229,7 @@ mod tests {
         let path = dir.path().join("result.csv");
         write_csv(&path, &result()).unwrap();
         let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("quality_score"));
         assert!(content.contains("download_mbps"));
         assert!(content.contains("100"));
     }

@@ -111,4 +111,55 @@ fn print_plain(result: &TestResult) {
             .upload_loaded_ms
             .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"))
     );
+
+    if let Some(analysis) = &result.analysis {
+        println!(
+            "  Idle p95/p99:  {:.1} / {:.1} ms",
+            analysis.latency.idle.p95_ms, analysis.latency.idle.p99_ms
+        );
+        if let Some(jitter) = &analysis.latency.jitter {
+            println!("  Jitter p95:    {:.1} ms", jitter.p95_ms);
+        }
+
+        let quality = &analysis.quality;
+        println!(
+            "  Quality:       {}/100 {} ({} confidence)",
+            quality.score,
+            quality.grade.label(),
+            quality.confidence.label()
+        );
+        println!(
+            "  Workloads:     gaming {}  calls {}  streaming {}  cloud gaming {}",
+            quality.workloads.gaming.label(),
+            quality.workloads.video_calls.label(),
+            quality.workloads.streaming.label(),
+            quality.workloads.cloud_gaming.label()
+        );
+        if let Some(grade) = quality.bufferbloat.grade {
+            println!(
+                "  Bufferbloat:   {} (down {} / up {})",
+                grade.label(),
+                format_delta(quality.bufferbloat.download_increase_ms),
+                format_delta(quality.bufferbloat.upload_increase_ms)
+            );
+        } else {
+            println!("  Bufferbloat:   n/a (insufficient loaded-latency data)");
+        }
+
+        if let Some(finding) = quality.findings.first() {
+            println!(
+                "  Diagnosis:     {}: {}",
+                finding.severity.label(),
+                finding.title
+            );
+            println!("                 {}", finding.evidence);
+            if let Some(recommendation) = &finding.recommendation {
+                println!("  Try:           {recommendation}");
+            }
+        }
+    }
+}
+
+fn format_delta(value: Option<f64>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| format!("+{value:.1} ms"))
 }

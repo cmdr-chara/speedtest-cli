@@ -18,8 +18,9 @@ use tokio::{
 };
 
 use crate::{
+    analysis,
     engine::{EngineConfig, EngineEvent},
-    model::{LatencyResult, ServerInfo, TestPhase, TestResult, ThroughputResult},
+    model::{ServerInfo, TestPhase, TestResult, ThroughputResult},
 };
 
 const DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down";
@@ -29,6 +30,7 @@ const UPLOAD_CHUNK_BYTES: usize = 50_000_000;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 const LOADED_LATENCY_INTERVAL: Duration = Duration::from_millis(400);
 const PHASE_COOLDOWN: Duration = Duration::from_millis(750);
+const IDLE_LATENCY_SAMPLES: usize = 24;
 const MAX_RATE_LIMIT_RETRIES: usize = 3;
 const RATE_LIMIT_BASE_DELAY_MS: u64 = 400;
 const MAX_RATE_LIMIT_DELAY: Duration = Duration::from_secs(5);
@@ -57,23 +59,38 @@ impl CloudflareEngine {
         self.warm_up().await?;
 
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Latency));
-        let (idle_ms, jitter_ms) = self.measure_idle_latency(12).await?;
+        let idle_samples = self.measure_idle_latency(IDLE_LATENCY_SAMPLES).await?;
+        let latency_preview = analysis::summarize_latency(&idle_samples, &[], &[], None);
         self.emit(
             &tx,
             EngineEvent::IdleLatency {
-                ping_ms: idle_ms,
-                jitter_ms,
+                ping_ms: latency_preview.idle_ms,
+                jitter_ms: latency_preview.jitter_ms,
             },
         );
 
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Download));
-        let (download, download_loaded_ms) = self.measure_download(&tx).await?;
+        let (download, download_loaded_samples) = self.measure_download(&tx).await?;
 
         sleep(PHASE_COOLDOWN).await;
 
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Upload));
-        let (upload, upload_loaded_ms) = self.measure_upload(&tx).await?;
+        let (upload, upload_loaded_samples) = self.measure_upload(&tx).await?;
 
+        let latency = analysis::summarize_latency(
+            &idle_samples,
+            &download_loaded_samples,
+            &upload_loaded_samples,
+            None,
+        );
+        let network_analysis = analysis::build_network_analysis(
+            &idle_samples,
+            &download_loaded_samples,
+            &upload_loaded_samples,
+            &latency,
+            &download,
+            &upload,
+        );
         let result = TestResult {
             timestamp: Utc::now(),
             backend: "cloudflare".to_string(),
@@ -81,15 +98,10 @@ impl CloudflareEngine {
                 host: "speed.cloudflare.com".to_string(),
                 name: "Cloudflare Edge".to_string(),
             },
-            latency: LatencyResult {
-                idle_ms,
-                jitter_ms,
-                download_loaded_ms,
-                upload_loaded_ms,
-                packet_loss_percent: None,
-            },
+            latency,
             download,
             upload,
+            analysis: Some(network_analysis),
         };
 
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Complete));
@@ -128,7 +140,7 @@ impl CloudflareEngine {
         }
     }
 
-    async fn measure_idle_latency(&self, count: usize) -> Result<(f64, f64)> {
+    async fn measure_idle_latency(&self, count: usize) -> Result<Vec<f64>> {
         let mut samples = Vec::with_capacity(count);
 
         for _ in 0..count {
@@ -136,9 +148,7 @@ impl CloudflareEngine {
             sleep(Duration::from_millis(75)).await;
         }
 
-        let ping = median(&samples).unwrap_or(0.0);
-        let jitter = mean_consecutive_delta(&samples);
-        Ok((ping, jitter))
+        Ok(samples)
     }
 
     async fn single_latency_sample(&self) -> Result<f64> {
@@ -177,7 +187,7 @@ impl CloudflareEngine {
     async fn measure_download(
         &self,
         tx: &UnboundedSender<EngineEvent>,
-    ) -> Result<(ThroughputResult, Option<f64>)> {
+    ) -> Result<(ThroughputResult, Vec<f64>)> {
         let total = Arc::new(AtomicU64::new(0));
         let started = Instant::now();
         let deadline = started + self.config.phase_duration;
@@ -201,7 +211,7 @@ impl CloudflareEngine {
         }
 
         let loaded_latency = loaded.await.context("loaded-latency task panicked")??;
-        let loaded_median = median(&loaded_latency);
+        let loaded_median = analysis::distribution(&loaded_latency).map(|stats| stats.median_ms);
         let elapsed = self.config.phase_duration.as_secs_f64();
         let bytes = total.load(Ordering::Relaxed);
 
@@ -227,13 +237,13 @@ impl CloudflareEngine {
             );
         }
 
-        Ok((result, loaded_median))
+        Ok((result, loaded_latency))
     }
 
     async fn measure_upload(
         &self,
         tx: &UnboundedSender<EngineEvent>,
-    ) -> Result<(ThroughputResult, Option<f64>)> {
+    ) -> Result<(ThroughputResult, Vec<f64>)> {
         let total = Arc::new(AtomicU64::new(0));
         let payload = Bytes::from(vec![0_u8; UPLOAD_CHUNK_BYTES]);
         let started = Instant::now();
@@ -259,7 +269,7 @@ impl CloudflareEngine {
         }
 
         let loaded_latency = loaded.await.context("loaded-latency task panicked")??;
-        let loaded_median = median(&loaded_latency);
+        let loaded_median = analysis::distribution(&loaded_latency).map(|stats| stats.median_ms);
         let elapsed = self.config.phase_duration.as_secs_f64();
         let bytes = total.load(Ordering::Relaxed);
 
@@ -285,7 +295,7 @@ impl CloudflareEngine {
             );
         }
 
-        Ok((result, loaded_median))
+        Ok((result, loaded_latency))
     }
 
     async fn sample_transfer(
@@ -512,34 +522,6 @@ fn mbps(bytes: u64, seconds: f64) -> f64 {
     bytes as f64 * 8.0 / seconds / 1_000_000.0
 }
 
-fn median(values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-
-    let mut sorted = values.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    let middle = sorted.len() / 2;
-
-    if sorted.len().is_multiple_of(2) {
-        Some((sorted[middle - 1] + sorted[middle]) / 2.0)
-    } else {
-        Some(sorted[middle])
-    }
-}
-
-fn mean_consecutive_delta(values: &[f64]) -> f64 {
-    if values.len() < 2 {
-        return 0.0;
-    }
-
-    let total: f64 = values
-        .windows(2)
-        .map(|pair| (pair[1] - pair[0]).abs())
-        .sum();
-    total / (values.len() - 1) as f64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,18 +529,6 @@ mod tests {
     #[test]
     fn calculates_mbps() {
         assert!((mbps(125_000_000, 1.0) - 1000.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn calculates_median_for_odd_and_even_sets() {
-        assert_eq!(median(&[3.0, 1.0, 2.0]), Some(2.0));
-        assert_eq!(median(&[4.0, 1.0, 2.0, 3.0]), Some(2.5));
-    }
-
-    #[test]
-    fn calculates_jitter_as_mean_delta() {
-        let jitter = mean_consecutive_delta(&[10.0, 12.0, 11.0, 15.0]);
-        assert!((jitter - (7.0 / 3.0)).abs() < 0.001);
     }
 
     #[test]

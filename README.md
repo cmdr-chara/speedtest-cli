@@ -1,32 +1,32 @@
 # speedtest-cli
 
-A fast, polished terminal speed test written in Rust.
+A fast, polished terminal network quality analyzer written in Rust.
 
-The project separates the measurement engine, canonical result model, terminal UI, and persistence layer so each can evolve independently. The initial backend measures against Cloudflare's public speed-test endpoints.
+It measures throughput and latency, then explains how the connection behaves under load: tail latency, jitter, bufferbloat, workload grades, and concrete diagnostic findings. The measurement engine, analysis model, terminal UI, and persistence layer are intentionally separated so each can evolve independently.
 
 ## Preview
 
 ```text
-┌────────────────────────── SPEEDTEST ──────────────────────────┐
-│                                                               │
-│                          842.6 Mbps                            │
-│                                                               │
-│                    ╭────────────────╮                         │
-│                ╭───╯                ╰───╮                     │
-│              ╭─╯           ╱            ╰─╮                   │
-│             │             ╱                │                  │
-│             │            ●                 │                  │
-│              ╰─╮                        ╭─╯                   │
-│                ╰───╮                ╭───╯                     │
-│                    ╰────────────────╯                         │
-│                                                               │
-│   DOWNLOAD  842.6 Mbps             UPLOAD  293.4 Mbps         │
-│   PING        8.2 ms               JITTER    1.1 ms           │
-│   LOADED ↓   19.4 ms               LOADED ↑ 17.8 ms           │
-│                                                               │
-│   ▁▂▄▆▇██████▇████████▇▆▆▇████                            │
-│                                                               │
-└───────────────────────────────────────────────────────────────┘
+┌──────────────────────────── SPEEDTEST ────────────────────────────┐
+│                     NETWORK ANALYSIS COMPLETE                     │
+│                                                                   │
+│                         ⣿⣿⣿⣿⣿⣿⣷⣄                        │
+│                    ⣠⣿⠟          ⠻⣿⣄                     │
+│                  ⣰⣿⠃       ╱       ⠹⣿⡄                   │
+│                 ⣿⡏        ╱          ⢹⣿                  │
+│                            ●                                      │
+│                         842.6 Mbps                                │
+│                                                                   │
+│   DOWNLOAD  842.6 Mbps             UPLOAD  193.4 Mbps             │
+│   PING        8.2 ms               JITTER    1.1 ms               │
+│   LOADED ↓   19.4 ms               LOADED ↑ 82.7 ms               │
+│                                                                   │
+│ QUALITY 88/100 A  high confidence                                 │
+│ Gaming A   Calls B   Streaming A+   Cloud gaming A                │
+│ tails  idle p95 10.1 ms  p99 11.0 ms  •  jitter p95 2.0 ms       │
+│ bufferbloat C  ↓ +11.2 ms  ↑ +74.5 ms                             │
+│ WARNING High upload bufferbloat — enable SQM/CAKE/FQ-CoDel        │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
@@ -35,16 +35,44 @@ The project separates the measurement engine, canonical result model, terminal U
 - Idle latency and jitter
 - Loaded latency during download and upload
 - Download and upload throughput sampling
+- **p95/p99 latency and jitter tails** from retained probe distributions
+- **Transparent 0–100 network quality score** with A+–F grade and confidence level
+- **Bufferbloat grading** with measured download/upload latency increase
+- **Gaming, video-call, streaming, and cloud-gaming grades**
+- **Human-readable diagnostic findings and recommendations**
 - Layered animated Ratatui speedometer and live sparkline
 - 240 Hz speedometer physics with a configurable 30–240 FPS render cap
 - JSON output for scripts
+- CSV export including quality/percentile fields
 - Automatic per-test JSON files and JSONL history
 - Plain terminal mode for CI, logs, and unsupported terminals
-- Graceful separation between engine, UI, model, and storage
 - Native release binaries for Windows, Linux, Intel macOS, and Apple Silicon macOS
 - Cloudflare-aware request sizing and HTTP 429 backoff
 
-Packet loss is intentionally nullable in v0.1 rather than depending on a deprecated public TURN service.
+Packet loss is intentionally nullable rather than depending on a deprecated public TURN service. When it is unavailable, real-time workload grades say so instead of pretending the measurement exists.
+
+## Network intelligence
+
+The v0.2 analysis is deliberately **explainable rather than authoritative**. It uses documented-in-code heuristic bands over the measurements collected by this client. The score is not an industry standard and is not presented as one.
+
+A completed result contains:
+
+```text
+Quality            88/100 A
+Confidence         high
+Bufferbloat        C
+Gaming             A
+Video calls        B
+Streaming          A+
+Cloud gaming       A
+Idle p95/p99       10.1 / 11.0 ms
+Jitter p95         2.0 ms
+Diagnosis          High upload bufferbloat
+Evidence           idle 8.2 ms → loaded upload 82.7 ms (+74.5 ms)
+Recommendation     enable SQM/CAKE/FQ-CoDel or shape upstream traffic
+```
+
+Confidence is based on measurement coverage. If loaded-latency probes are missing or sparse, the client lowers confidence and leaves the bufferbloat grade unavailable rather than fabricating one.
 
 ## Installation
 
@@ -135,6 +163,8 @@ The Cloudflare backend deliberately defaults to two streams and long transfer bo
 
 ## Result model
 
+The existing summary fields remain stable and v0.2 adds an optional `analysis` object, so older saved results can still be deserialized.
+
 ```json
 {
   "timestamp": "2026-08-19T17:00:00Z",
@@ -147,7 +177,7 @@ The Cloudflare backend deliberately defaults to two streams and long transfer bo
     "idle_ms": 8.2,
     "jitter_ms": 1.1,
     "download_loaded_ms": 19.4,
-    "upload_loaded_ms": 17.8,
+    "upload_loaded_ms": 82.7,
     "packet_loss_percent": null
   },
   "download": {
@@ -156,9 +186,32 @@ The Cloudflare backend deliberately defaults to two streams and long transfer bo
     "seconds": 8.0
   },
   "upload": {
-    "mbps": 293.4,
-    "bytes": 293400000,
+    "mbps": 193.4,
+    "bytes": 193400000,
     "seconds": 8.0
+  },
+  "analysis": {
+    "latency": {
+      "idle": {
+        "samples": 24,
+        "min_ms": 7.9,
+        "median_ms": 8.2,
+        "p95_ms": 10.1,
+        "p99_ms": 11.0,
+        "max_ms": 11.2
+      }
+    },
+    "quality": {
+      "score": 88,
+      "grade": "a",
+      "confidence": "high",
+      "bufferbloat": {
+        "download_increase_ms": 11.2,
+        "upload_increase_ms": 74.5,
+        "worst_increase_ms": 74.5,
+        "grade": "d"
+      }
+    }
   }
 }
 ```
@@ -179,6 +232,8 @@ speedtest/
 
 ```text
 src/
+├── analysis/
+│   └── mod.rs
 ├── cli.rs
 ├── engine/
 │   ├── mod.rs
@@ -198,7 +253,7 @@ src/
 └── main.rs
 ```
 
-The UI never measures the network directly. It consumes `EngineEvent`s and renders them. The storage layer only consumes `TestResult`, which keeps scripting and future alternate frontends straightforward.
+The UI never measures the network directly. It consumes `EngineEvent`s and renders them. The analysis layer consumes completed measurements and sample distributions. The storage layer only consumes `TestResult`, which keeps scripting and future alternate frontends straightforward.
 
 ## Releases
 
@@ -206,16 +261,18 @@ The release workflow reads the package version from `Cargo.toml`. When a commit 
 
 ## Accuracy notes
 
-This is an independent CLI, not an official Cloudflare client. Network speed measurements vary with routing, congestion, Wi-Fi conditions, endpoint behavior, protocol overhead, and test methodology. The Cloudflare backend uses long transfer bodies, conservative default concurrency, monotonic timing, loaded-latency sampling, and HTTP 429 backoff to reduce avoidable request churn, but broader validation against controlled links is still required before treating v0.1 as a reference benchmark.
+This is an independent CLI, not an official Cloudflare client. Network measurements vary with routing, congestion, Wi-Fi conditions, endpoint behavior, protocol overhead, and test methodology. Percentiles become more informative with more samples; v0.2 uses 24 idle probes and retains loaded-latency samples throughout both transfer phases. Quality and workload grades are local heuristics built from those measurements, not standardized certifications.
 
 ## Roadmap
 
+- Historical `speedtest history` and `speedtest stats` commands
+- Baseline and anomaly detection across saved results
+- Long-running stability tests with spike/loss distributions
 - Adaptive stream count and payload sizing
 - Pluggable measurement backends / server discovery
-- Historical `speedtest history` and `speedtest stats` commands
+- Ethernet/Wi-Fi, VPN, and IPv4/IPv6 comparison workflows
 - Better packet-loss implementation without deprecated infrastructure
 - Configurable but restrained themes
-- Additional terminal compatibility fallbacks
 - Homebrew and WinGet packages
 
 ## License
