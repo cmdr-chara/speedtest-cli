@@ -152,7 +152,8 @@ impl CloudflareEngine {
         }
 
         let loaded_client = self.client.clone();
-        let loaded = tokio::spawn(async move { measure_loaded_latency(loaded_client, deadline).await });
+        let loaded =
+            tokio::spawn(async move { measure_loaded_latency(loaded_client, deadline).await });
 
         self.sample_transfer(TestPhase::Download, Arc::clone(&total), deadline, tx)
             .await;
@@ -201,7 +202,8 @@ impl CloudflareEngine {
         }
 
         let loaded_client = self.client.clone();
-        let loaded = tokio::spawn(async move { measure_loaded_latency(loaded_client, deadline).await });
+        let loaded =
+            tokio::spawn(async move { measure_loaded_latency(loaded_client, deadline).await });
 
         self.sample_transfer(TestPhase::Upload, Arc::clone(&total), deadline, tx)
             .await;
@@ -389,7 +391,7 @@ fn median(values: &[f64]) -> Option<f64> {
     sorted.sort_by(f64::total_cmp);
     let middle = sorted.len() / 2;
 
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         Some((sorted[middle - 1] + sorted[middle]) / 2.0)
     } else {
         Some(sorted[middle])
@@ -401,7 +403,10 @@ fn mean_consecutive_delta(values: &[f64]) -> f64 {
         return 0.0;
     }
 
-    let total: f64 = values.windows(2).map(|pair| (pair[1] - pair[0]).abs()).sum();
+    let total: f64 = values
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .sum();
     total / (values.len() - 1) as f64
 }
 

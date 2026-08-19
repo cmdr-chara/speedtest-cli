@@ -37,7 +37,9 @@ pub fn write_csv(path: &Path, result: &TestResult) -> Result<()> {
     ensure_parent(path)?;
     let mut writer = csv::Writer::from_path(path)
         .with_context(|| format!("failed to create {}", path.display()))?;
-    writer.serialize(CsvRecord::from(result)).context("failed to serialize CSV result")?;
+    writer
+        .serialize(CsvRecord::from(result))
+        .context("failed to serialize CSV result")?;
     writer.flush().context("failed to flush CSV result")?;
     Ok(())
 }
@@ -59,7 +61,8 @@ fn append_jsonl(path: &Path, result: &TestResult) -> Result<()> {
         .open(path)
         .with_context(|| format!("failed to open {}", path.display()))?;
     serde_json::to_writer(&mut file, result).context("failed to serialize history record")?;
-    file.write_all(b"\n").context("failed to append history record")?;
+    file.write_all(b"\n")
+        .context("failed to append history record")?;
     Ok(())
 }
 

@@ -39,7 +39,8 @@ async fn main() -> Result<()> {
     }
 
     if !cli.no_save {
-        let _ = storage::persist_default(&result).context("failed to persist speed-test history")?;
+        let _ =
+            storage::persist_default(&result).context("failed to persist speed-test history")?;
     }
 
     Ok(())
@@ -83,7 +84,10 @@ async fn run_interactive(engine: CloudflareEngine) -> Result<TestResult> {
 
 fn print_plain(result: &TestResult) {
     println!("Speedtest");
-    println!("  Server:        {} ({})", result.server.name, result.server.host);
+    println!(
+        "  Server:        {} ({})",
+        result.server.name, result.server.host
+    );
     println!("  Download:      {:.1} Mbps", result.download.mbps);
     println!("  Upload:        {:.1} Mbps", result.upload.mbps);
     println!("  Ping:          {:.1} ms", result.latency.idle_ms);
