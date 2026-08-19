@@ -113,7 +113,10 @@ fn print_plain(result: &TestResult) {
     );
 
     if let Some(analysis) = &result.analysis {
-        println!("  Idle p95/p99:  {:.1} / {:.1} ms", analysis.latency.idle.p95_ms, analysis.latency.idle.p99_ms);
+        println!(
+            "  Idle p95/p99:  {:.1} / {:.1} ms",
+            analysis.latency.idle.p95_ms, analysis.latency.idle.p99_ms
+        );
         if let Some(jitter) = &analysis.latency.jitter {
             println!("  Jitter p95:    {:.1} ms", jitter.p95_ms);
         }
@@ -144,7 +147,11 @@ fn print_plain(result: &TestResult) {
         }
 
         if let Some(finding) = quality.findings.first() {
-            println!("  Diagnosis:     {}: {}", finding.severity.label(), finding.title);
+            println!(
+                "  Diagnosis:     {}: {}",
+                finding.severity.label(),
+                finding.title
+            );
             println!("                 {}", finding.evidence);
             if let Some(recommendation) = &finding.recommendation {
                 println!("  Try:           {recommendation}");

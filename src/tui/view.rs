@@ -186,10 +186,7 @@ fn completion_panel(app: &App) -> Paragraph<'static> {
     };
 
     let quality = &analysis.quality;
-    let buffer_grade = quality
-        .bufferbloat
-        .grade
-        .map_or("—", QualityGrade::label);
+    let buffer_grade = quality.bufferbloat.grade.map_or("—", QualityGrade::label);
     let jitter_p95 = analysis
         .latency
         .jitter
@@ -300,10 +297,7 @@ fn compact_quality(app: &App) -> Paragraph<'static> {
         ]),
         Line::from(format!(
             "buffer {}  ↓ {}  ↑ {}",
-            quality
-                .bufferbloat
-                .grade
-                .map_or("—", QualityGrade::label),
+            quality.bufferbloat.grade.map_or("—", QualityGrade::label),
             format_delta(quality.bufferbloat.download_increase_ms),
             format_delta(quality.bufferbloat.upload_increase_ms)
         )),

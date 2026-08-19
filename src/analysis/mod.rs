@@ -190,7 +190,10 @@ fn workload_grades(
     }
 
     let mut streaming = vec![
-        (higher_is_better(download_mbps, &STREAMING_DOWNLOAD_BANDS), 0.75),
+        (
+            higher_is_better(download_mbps, &STREAMING_DOWNLOAD_BANDS),
+            0.75,
+        ),
         (lower_is_better(jitter_p95, &STREAMING_JITTER_BANDS), 0.10),
     ];
     if let Some(increase) = download_increase_ms {
@@ -258,7 +261,10 @@ fn diagnostic_findings(
             let download_increase = bufferbloat.download_increase_ms.unwrap_or_default();
             let upload_increase = bufferbloat.upload_increase_ms.unwrap_or_default();
             let (direction, loaded_ms) = if upload_increase >= download_increase {
-                ("upload", latency.upload_loaded_ms.unwrap_or(latency.idle_ms))
+                (
+                    "upload",
+                    latency.upload_loaded_ms.unwrap_or(latency.idle_ms),
+                )
             } else {
                 (
                     "download",
