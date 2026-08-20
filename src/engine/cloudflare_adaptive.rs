@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -10,7 +11,10 @@ use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use chrono::Utc;
 use futures_util::StreamExt;
-use reqwest::{header::RETRY_AFTER, Client, Response, StatusCode};
+use reqwest::{
+    header::{CONTENT_LENGTH, RETRY_AFTER},
+    Body, Client, Response, StatusCode,
+};
 use tokio::{
     sync::mpsc::UnboundedSender,
     task::JoinSet,
@@ -29,7 +33,10 @@ const DOWNLOAD_LADDER: [u64; 4] = [95_000_000, 25_000_000, 10_000_000, 1_000_000
 const DOWNLOAD_START_INDEX: usize = 1;
 const UPLOAD_START_BYTES: usize = 25_000_000;
 const UPLOAD_MIN_BYTES: usize = 1_000_000;
+const UPLOAD_BODY_CHUNK_BYTES: usize = 64 * 1024;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
+const THROUGHPUT_WINDOW: Duration = Duration::from_millis(900);
+const DISPLAY_WARMUP: Duration = Duration::from_millis(400);
 const LOADED_LATENCY_INTERVAL: Duration = Duration::from_millis(400);
 const PHASE_COOLDOWN: Duration = Duration::from_millis(500);
 const IDLE_LATENCY_SAMPLES: usize = 24;
@@ -181,13 +188,12 @@ impl CloudflareEngine {
     ) -> Result<(ThroughputResult, Vec<f64>)> {
         let total = Arc::new(AtomicU64::new(0));
         let deadline = Instant::now() + self.config.phase_duration;
-        let payload = Bytes::from(vec![0_u8; UPLOAD_START_BYTES]);
         let mut workers = JoinSet::new();
         for _ in 0..self.config.streams.max(1) {
             workers.spawn(upload_worker(
                 self.client.clone(),
                 Arc::clone(&total),
-                payload.clone(),
+                UPLOAD_START_BYTES,
                 deadline,
             ));
         }
@@ -218,26 +224,41 @@ impl CloudflareEngine {
         deadline: Instant,
         tx: &UnboundedSender<EngineEvent>,
     ) {
+        let started = Instant::now();
         let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut previous_bytes = 0_u64;
-        let mut previous_at = Instant::now();
+        let mut history = VecDeque::with_capacity(8);
+
         loop {
             interval.tick().await;
             let now = Instant::now();
             let current = total.load(Ordering::Relaxed);
-            let elapsed = now.duration_since(previous_at).as_secs_f64();
-            if elapsed > 0.0 {
-                self.emit(
-                    tx,
-                    EngineEvent::ThroughputSample {
-                        phase,
-                        mbps: mbps(current.saturating_sub(previous_bytes), elapsed),
-                    },
-                );
+            history.push_back((now, current));
+
+            while history.len() > 2 {
+                let second = history.get(1).expect("history contains two samples");
+                if now.duration_since(second.0) >= THROUGHPUT_WINDOW {
+                    history.pop_front();
+                } else {
+                    break;
+                }
             }
-            previous_bytes = current;
-            previous_at = now;
+
+            if now.duration_since(started) >= DISPLAY_WARMUP {
+                if let Some((window_start, window_bytes)) = history.front().copied() {
+                    let elapsed = now.duration_since(window_start).as_secs_f64();
+                    if elapsed >= SAMPLE_INTERVAL.as_secs_f64() {
+                        self.emit(
+                            tx,
+                            EngineEvent::ThroughputSample {
+                                phase,
+                                mbps: mbps(current.saturating_sub(window_bytes), elapsed),
+                            },
+                        );
+                    }
+                }
+            }
+
             if now >= deadline {
                 break;
             }
@@ -330,10 +351,10 @@ async fn download_worker(client: Client, total: Arc<AtomicU64>, deadline: Instan
 async fn upload_worker(
     client: Client,
     total: Arc<AtomicU64>,
-    initial_payload: Bytes,
+    initial_payload_len: usize,
     deadline: Instant,
 ) -> Result<()> {
-    let mut payload = initial_payload;
+    let mut payload_len = initial_payload_len;
     let mut rate_limit_retries = 0_usize;
     while Instant::now() < deadline {
         let response = tokio::select! {
@@ -342,7 +363,8 @@ async fn upload_worker(
                 .query(&[("r", cache_buster())])
                 .header("content-type", "application/octet-stream")
                 .header("cache-control", "no-store")
-                .body(payload.clone())
+                .header(CONTENT_LENGTH, payload_len.to_string())
+                .body(counted_upload_body(Arc::clone(&total), payload_len))
                 .send() => response.context("Cloudflare upload request failed")?,
             _ = sleep_until(deadline) => break,
         };
@@ -357,9 +379,8 @@ async fn upload_worker(
             }
             continue;
         }
-        if is_size_rejection(response.status()) && payload.len() > UPLOAD_MIN_BYTES {
-            let next_len = (payload.len() / 2).max(UPLOAD_MIN_BYTES);
-            payload = payload.slice(..next_len);
+        if is_size_rejection(response.status()) && payload_len > UPLOAD_MIN_BYTES {
+            payload_len = (payload_len / 2).max(UPLOAD_MIN_BYTES);
             continue;
         }
 
@@ -367,9 +388,25 @@ async fn upload_worker(
         response
             .error_for_status()
             .context("Cloudflare upload endpoint returned an error")?;
-        total.fetch_add(payload.len() as u64, Ordering::Relaxed);
     }
     Ok(())
+}
+
+fn counted_upload_body(total: Arc<AtomicU64>, payload_len: usize) -> Body {
+    let chunk = Bytes::from(vec![0_u8; UPLOAD_BODY_CHUNK_BYTES]);
+    let stream = futures_util::stream::unfold(
+        (payload_len, chunk, total),
+        |(remaining, chunk, total)| async move {
+            if remaining == 0 {
+                return None;
+            }
+            let len = remaining.min(chunk.len());
+            total.fetch_add(len as u64, Ordering::Relaxed);
+            let item = Ok::<Bytes, std::io::Error>(chunk.slice(..len));
+            Some((item, (remaining - len, chunk, total)))
+        },
+    );
+    Body::wrap_stream(stream)
 }
 
 async fn latency_probe(client: &Client) -> Result<f64> {
