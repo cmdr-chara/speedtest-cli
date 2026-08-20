@@ -75,7 +75,7 @@ fn inspect_windows(interface: Option<&str>) -> Result<WifiSnapshot> {
     for line in text.lines() {
         if line.trim_start().starts_with("Name") && line.contains(':') && !current.is_empty() {
             if block_matches(&current, requested.as_deref()) {
-                selected = current;
+                selected = std::mem::take(&mut current);
                 break;
             }
             current = Vec::new();
