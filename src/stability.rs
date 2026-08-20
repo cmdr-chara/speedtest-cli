@@ -4,8 +4,10 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::time::{sleep_until, Instant};
-use tokio::{sync::mpsc::UnboundedSender, time};
+use tokio::{
+    sync::mpsc::UnboundedSender,
+    time::{sleep_until, Instant},
+};
 
 use crate::{
     analysis,
@@ -132,7 +134,10 @@ pub fn summarize(
     duration: Duration,
     interval: Duration,
 ) -> StabilityResult {
-    let successful: Vec<f64> = samples.iter().filter_map(|sample| sample.latency_ms).collect();
+    let successful: Vec<f64> = samples
+        .iter()
+        .filter_map(|sample| sample.latency_ms)
+        .collect();
     let jitter_values: Vec<f64> = samples
         .windows(2)
         .filter_map(|pair| match (pair[0].latency_ms, pair[1].latency_ms) {
