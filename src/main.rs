@@ -98,6 +98,7 @@ fn run_history_command(args: HistoryArgs) -> Result<()> {
     }
 
     let summary = history::summarize(&results, args.days).expect("non-empty history has summary");
+    let limit = usize::from(args.limit);
     println!(
         "SPEEDTEST HISTORY · {} DAYS · {} RUNS",
         args.days,
@@ -106,7 +107,7 @@ fn run_history_command(args: HistoryArgs) -> Result<()> {
     println!();
     println!("  DATE / UTC         DOWNLOAD     UPLOAD       PING      QUALITY");
     println!("  ─────────────────  ───────────  ───────────  ────────  ─────────────");
-    for result in results.iter().rev().take(args.limit) {
+    for result in results.iter().rev().take(limit) {
         let quality = result.analysis.as_ref().map_or_else(
             || "—".to_string(),
             |analysis| {
@@ -129,7 +130,7 @@ fn run_history_command(args: HistoryArgs) -> Result<()> {
     println!();
     println!("  Download trend  {}", summary.download_sparkline);
     println!("  Trend           {}", summary.trend.label());
-    if results.len() > args.limit {
+    if results.len() > limit {
         println!("  Showing latest {} of {} runs.", args.limit, results.len());
     }
     Ok(())
