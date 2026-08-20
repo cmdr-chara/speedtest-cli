@@ -76,7 +76,8 @@ async fn run_stability_command(args: StabilityArgs) -> Result<()> {
         storage::write_stability_json(path, &result)?;
     }
     if !args.no_save {
-        let _ = storage::persist_stability(&result).context("failed to persist stability history")?;
+        let _ =
+            storage::persist_stability(&result).context("failed to persist stability history")?;
     }
     Ok(())
 }
@@ -89,12 +90,19 @@ fn run_history_command(args: HistoryArgs) -> Result<()> {
     }
 
     if results.is_empty() {
-        println!("No saved speed-test results in the last {} days.", args.days);
+        println!(
+            "No saved speed-test results in the last {} days.",
+            args.days
+        );
         return Ok(());
     }
 
     let summary = history::summarize(&results, args.days).expect("non-empty history has summary");
-    println!("SPEEDTEST HISTORY · {} DAYS · {} RUNS", args.days, results.len());
+    println!(
+        "SPEEDTEST HISTORY · {} DAYS · {} RUNS",
+        args.days,
+        results.len()
+    );
     println!();
     println!("  DATE / UTC         DOWNLOAD     UPLOAD       PING      QUALITY");
     println!("  ─────────────────  ───────────  ───────────  ────────  ─────────────");
@@ -133,7 +141,10 @@ fn run_stats_command(args: StatsArgs) -> Result<()> {
         if args.json {
             println!("null");
         } else {
-            println!("No saved speed-test results in the last {} days.", args.days);
+            println!(
+                "No saved speed-test results in the last {} days.",
+                args.days
+            );
         }
         return Ok(());
     };
@@ -298,13 +309,20 @@ fn print_stability(result: &StabilityResult) {
     println!("  Failure bursts: {}", result.failure_bursts);
     if let Some(latency) = &result.latency {
         println!("  Median:         {:.1} ms", latency.median_ms);
-        println!("  p95 / p99:      {:.1} / {:.1} ms", latency.p95_ms, latency.p99_ms);
+        println!(
+            "  p95 / p99:      {:.1} / {:.1} ms",
+            latency.p95_ms, latency.p99_ms
+        );
         println!("  Max:            {:.1} ms", latency.max_ms);
     }
     if let Some(jitter) = &result.jitter {
         println!("  Jitter p95:     {:.1} ms", jitter.p95_ms);
     }
-    println!("  Stability:      {}/100 {}", result.score, result.grade.label());
+    println!(
+        "  Stability:      {}/100 {}",
+        result.score,
+        result.grade.label()
+    );
     if let Some(tier) = result.tier_label() {
         println!("  Tier:           ◆ {tier}");
     }
@@ -329,7 +347,10 @@ fn print_stats(summary: &HistorySummary) {
     if let Some(score) = summary.median_quality_score {
         println!("  Quality median:    {score:.0}/100");
     }
-    println!("  S-tier runs:       {} / {}", summary.s_tier_runs, summary.runs);
+    println!(
+        "  S-tier runs:       {} / {}",
+        summary.s_tier_runs, summary.runs
+    );
     println!("  Trend:             {}", summary.trend.label());
     println!("  Download history:  {}", summary.download_sparkline);
 
