@@ -621,6 +621,7 @@ fn checked_output(command: &mut Command, description: &str) -> Result<Output> {
     Ok(output)
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn parse_ip_list<'a>(values: impl Iterator<Item = &'a str>) -> Vec<IpAddr> {
     dedup_ips(
         values
@@ -642,6 +643,7 @@ fn command_available(command: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+#[cfg(target_os = "macos")]
 fn value_after_colon(text: &str, key: &str) -> Option<String> {
     text.lines().find_map(|line| {
         let (left, right) = line.split_once(':')?;
@@ -674,6 +676,7 @@ mod tests {
         assert_eq!(token_after(route, "via").as_deref(), Some("192.168.1.1"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn parses_colon_values() {
         let route = "   gateway: 192.168.1.1\n interface: en0\n";
