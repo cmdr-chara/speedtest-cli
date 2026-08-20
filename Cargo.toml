@@ -11,7 +11,7 @@ categories = ["command-line-utilities", "network-programming"]
 
 [[bin]]
 name = "speedtest"
-path = "src/main.rs"
+path = "src/bin/speedtest.rs"
 
 [dependencies]
 anyhow = "1"
