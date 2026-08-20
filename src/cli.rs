@@ -65,7 +65,7 @@ pub struct StabilityArgs {
     pub duration: u64,
 
     /// Time between probes. Supports ms or s suffixes (for example 750ms or 1s).
-    #[arg(long, default_value = "1s", value_parser = parse_probe_interval)]
+    #[arg(long = "interval", default_value = "1s", value_parser = parse_probe_interval)]
     pub interval_ms: u64,
 
     /// Maximum TUI render rate.
@@ -96,8 +96,8 @@ pub struct HistoryArgs {
     pub days: u64,
 
     /// Maximum number of runs displayed in the table.
-    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(usize).range(1..=200))]
-    pub limit: usize,
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=200))]
+    pub limit: u16,
 
     /// Print matching history as a JSON array.
     #[arg(long)]
