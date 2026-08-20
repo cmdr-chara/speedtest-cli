@@ -5,9 +5,16 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use tokio::{net::UdpSocket, time::{timeout, Instant}};
+use tokio::{
+    net::UdpSocket,
+    time::{timeout, Instant},
+};
 
-use crate::{analysis, dns::{DnsCategory, DnsProviderBenchmark}, model::QualityGrade};
+use crate::{
+    analysis,
+    dns::{DnsCategory, DnsProviderBenchmark},
+    model::QualityGrade,
+};
 
 const TIMEOUT: Duration = Duration::from_millis(1_500);
 const DOMAINS: [&str; 8] = [
@@ -40,9 +47,9 @@ pub async fn test_servers(servers: Vec<IpAddr>, queries: usize) -> Result<DnsPro
     let latency = analysis::distribution(&samples);
     let median = latency.as_ref().map_or(1_500.0, |stats| stats.median_ms);
     let p95 = latency.as_ref().map_or(1_500.0, |stats| stats.p95_ms);
-    let spread = latency.as_ref().map_or(1_500.0, |stats| {
-        (stats.p95_ms - stats.median_ms).max(0.0)
-    });
+    let spread = latency
+        .as_ref()
+        .map_or(1_500.0, |stats| (stats.p95_ms - stats.median_ms).max(0.0));
     let latency_score = absolute_latency_score(median) * 0.60 + absolute_latency_score(p95) * 0.25;
     let stability_score = (100.0 - spread / median.max(1.0) * 100.0).clamp(15.0, 100.0);
     let score = (latency_score + success_rate_percent * 0.10 + stability_score * 0.05)
@@ -72,7 +79,9 @@ async fn query(server: IpAddr, domain: &str) -> Result<f64> {
         IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
     };
-    let socket = UdpSocket::bind(bind).await.context("failed to bind DNS socket")?;
+    let socket = UdpSocket::bind(bind)
+        .await
+        .context("failed to bind DNS socket")?;
     socket
         .connect(SocketAddr::new(server, 53))
         .await
@@ -80,7 +89,9 @@ async fn query(server: IpAddr, domain: &str) -> Result<f64> {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let packet = build_query(domain, id)?;
     let started = Instant::now();
-    timeout(TIMEOUT, socket.send(&packet)).await.context("DNS send timed out")??;
+    timeout(TIMEOUT, socket.send(&packet))
+        .await
+        .context("DNS send timed out")??;
     let mut response = [0_u8; 4096];
     let size = timeout(TIMEOUT, socket.recv(&mut response))
         .await

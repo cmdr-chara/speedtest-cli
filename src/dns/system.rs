@@ -71,7 +71,9 @@ pub fn inspect(interface_override: Option<&str>) -> Result<DnsSystemState> {
         return inspect_linux(interface_override);
     }
     #[allow(unreachable_code)]
-    Err(anyhow!("DNS system inspection is not supported on this platform"))
+    Err(anyhow!(
+        "DNS system inspection is not supported on this platform"
+    ))
 }
 
 pub fn apply_servers(state: &DnsSystemState, servers: &[IpAddr]) -> Result<()> {
@@ -91,7 +93,9 @@ pub fn apply_servers(state: &DnsSystemState, servers: &[IpAddr]) -> Result<()> {
         return apply_linux(state, servers);
     }
     #[allow(unreachable_code)]
-    Err(anyhow!("DNS configuration is not supported on this platform"))
+    Err(anyhow!(
+        "DNS configuration is not supported on this platform"
+    ))
 }
 
 pub fn reset(state: &DnsSystemState) -> Result<()> {
@@ -141,14 +145,18 @@ pub fn flush_cache() {
     #[cfg(target_os = "macos")]
     {
         let _ = Command::new("dscacheutil").arg("-flushcache").output();
-        let _ = Command::new("killall").args(["-HUP", "mDNSResponder"]).output();
+        let _ = Command::new("killall")
+            .args(["-HUP", "mDNSResponder"])
+            .output();
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         if command_available("resolvectl") {
             let _ = Command::new("resolvectl").arg("flush-caches").output();
         } else if command_available("systemd-resolve") {
-            let _ = Command::new("systemd-resolve").arg("--flush-caches").output();
+            let _ = Command::new("systemd-resolve")
+                .arg("--flush-caches")
+                .output();
         }
     }
 }
@@ -186,7 +194,11 @@ fn inspect_windows(interface_override: Option<&str>) -> Result<DnsSystemState> {
         interface: parsed.interface_alias,
         device: None,
         interface_index: Some(parsed.interface_index),
-        configured_servers: if parsed.automatic { Vec::new() } else { servers.clone() },
+        configured_servers: if parsed.automatic {
+            Vec::new()
+        } else {
+            servers.clone()
+        },
         servers,
         mode: if parsed.automatic {
             DnsConfigMode::Automatic
@@ -242,8 +254,7 @@ fn reset_windows(state: &DnsSystemState) -> Result<()> {
 #[cfg(target_os = "windows")]
 fn powershell(script: &str) -> Result<Output> {
     checked_output(
-        Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script]),
+        Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", script]),
         "PowerShell DNS command",
     )
 }
@@ -275,7 +286,9 @@ fn inspect_macos(interface_override: Option<&str>) -> Result<DnsSystemState> {
             .iter()
             .find(|(_, device)| device == &default_device)
             .cloned()
-            .ok_or_else(|| anyhow!("could not map device {default_device} to a macOS network service"))?
+            .ok_or_else(|| {
+                anyhow!("could not map device {default_device} to a macOS network service")
+            })?
     };
 
     let configured = checked_output(
@@ -426,9 +439,7 @@ fn inspect_linux(interface_override: Option<&str>) -> Result<DnsSystemState> {
                 configured_servers.extend(nmcli_ips(&connection, "ipv6.dns"));
                 let ignore4 = nmcli_value(&connection, "ipv4.ignore-auto-dns").unwrap_or_default();
                 let ignore6 = nmcli_value(&connection, "ipv6.ignore-auto-dns").unwrap_or_default();
-                mode = if configured_servers.is_empty()
-                    && !is_true(&ignore4)
-                    && !is_true(&ignore6)
+                mode = if configured_servers.is_empty() && !is_true(&ignore4) && !is_true(&ignore6)
                 {
                     DnsConfigMode::Automatic
                 } else {
@@ -611,7 +622,11 @@ fn checked_output(command: &mut Command, description: &str) -> Result<Output> {
 }
 
 fn parse_ip_list<'a>(values: impl Iterator<Item = &'a str>) -> Vec<IpAddr> {
-    dedup_ips(values.filter_map(|value| value.trim().parse::<IpAddr>().ok()).collect())
+    dedup_ips(
+        values
+            .filter_map(|value| value.trim().parse::<IpAddr>().ok())
+            .collect(),
+    )
 }
 
 fn dedup_ips(mut values: Vec<IpAddr>) -> Vec<IpAddr> {
@@ -642,7 +657,10 @@ fn token_after(text: &str, key: &str) -> Option<String> {
 }
 
 fn is_true(value: &str) -> bool {
-    matches!(value.trim().to_ascii_lowercase().as_str(), "yes" | "true" | "1")
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "yes" | "true" | "1"
+    )
 }
 
 #[cfg(test)]
@@ -659,7 +677,10 @@ mod tests {
     #[test]
     fn parses_colon_values() {
         let route = "   gateway: 192.168.1.1\n interface: en0\n";
-        assert_eq!(value_after_colon(route, "interface").as_deref(), Some("en0"));
+        assert_eq!(
+            value_after_colon(route, "interface").as_deref(),
+            Some("en0")
+        );
     }
 
     #[test]

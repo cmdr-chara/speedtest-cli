@@ -5,7 +5,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::{net::TcpStream, time::timeout};
 
-use crate::{dns, model::{FindingSeverity, TestResult}};
+use crate::{
+    dns,
+    model::{FindingSeverity, TestResult},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -61,7 +64,10 @@ impl DoctorReport {
         if let Some(result) = &self.speedtest {
             if let Some(analysis) = &result.analysis {
                 if let Some(finding) = analysis.quality.findings.iter().find(|finding| {
-                    matches!(finding.severity, FindingSeverity::Warning | FindingSeverity::Critical)
+                    matches!(
+                        finding.severity,
+                        FindingSeverity::Warning | FindingSeverity::Critical
+                    )
                 }) {
                     self.diagnosis = finding.title.clone();
                     self.recommendation = finding.recommendation.clone();
@@ -75,7 +81,8 @@ impl DoctorReport {
             .iter()
             .find(|check| check.name == "DNS resolver" && check.status != DoctorStatus::Pass)
         {
-            self.diagnosis = "DNS resolution is the clearest problem in this diagnostic pass".to_string();
+            self.diagnosis =
+                "DNS resolution is the clearest problem in this diagnostic pass".to_string();
             self.recommendation = Some(format!(
                 "{} Run `speedtest dns benchmark` to compare alternative resolvers before changing configuration.",
                 check.detail
@@ -100,7 +107,8 @@ impl DoctorReport {
             check.name == "Gateway latency"
                 && matches!(check.status, DoctorStatus::Warning | DoctorStatus::Fail)
         }) {
-            self.diagnosis = "Latency is already elevated on the local path to the gateway".to_string();
+            self.diagnosis =
+                "Latency is already elevated on the local path to the gateway".to_string();
             self.recommendation = Some(format!(
                 "{} Compare Ethernet and Wi-Fi and inspect local wireless contention before blaming the ISP.",
                 check.detail

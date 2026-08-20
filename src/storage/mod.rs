@@ -61,8 +61,8 @@ pub fn load_history_since(days: u64) -> Result<Vec<TestResult>> {
 }
 
 pub fn read_result(path: &Path) -> Result<TestResult> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_str(&content)
         .with_context(|| format!("failed to parse speed-test result from {}", path.display()))
 }

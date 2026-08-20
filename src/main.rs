@@ -1,4 +1,7 @@
-use std::{io::{self, Write}, time::Duration};
+use std::{
+    io::{self, Write},
+    time::Duration,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
@@ -302,7 +305,10 @@ async fn run_dns_set(args: DnsSetArgs) -> Result<()> {
     }
     let servers = provider.addresses(state.ipv6_default_route);
     if servers.is_empty() {
-        bail!("{} does not expose DNS53 addresses", provider.display_name());
+        bail!(
+            "{} does not expose DNS53 addresses",
+            provider.display_name()
+        );
     }
 
     let preflight = dns_custom::test_servers(servers.clone(), 6).await?;
@@ -360,7 +366,8 @@ async fn run_dns_optimize(args: DnsOptimizeArgs) -> Result<()> {
     if let Some(current) = benchmark.entries.iter().find(|entry| entry.is_current) {
         if let (Some(current_latency), Some(winner_latency)) = (&current.latency, &winner.latency) {
             if current_latency.median_ms > f64::EPSILON {
-                let improvement = (1.0 - winner_latency.median_ms / current_latency.median_ms) * 100.0;
+                let improvement =
+                    (1.0 - winner_latency.median_ms / current_latency.median_ms) * 100.0;
                 println!("  Median change:  {improvement:+.0}% versus current DNS");
             }
         }
@@ -390,7 +397,10 @@ async fn run_dns_reset(args: DnsResetArgs) -> Result<()> {
         return Ok(());
     }
     if !state.can_configure() {
-        bail!("{} does not support safe automatic DNS reset", state.backend);
+        bail!(
+            "{} does not support safe automatic DNS reset",
+            state.backend
+        );
     }
     if !args.yes && !confirm("Reset this interface to automatic DNS?")? {
         println!("No changes made.");
@@ -729,7 +739,10 @@ fn print_stats(summary: &HistorySummary) {
 fn print_dns_test(result: &DnsProviderBenchmark) {
     println!("DNS HEALTH / SPEED TEST");
     println!();
-    println!("  Resolver:       {} {}", result.provider_name, result.profile_name);
+    println!(
+        "  Resolver:       {} {}",
+        result.provider_name, result.profile_name
+    );
     println!("  Servers:        {}", format_servers(&result.servers));
     println!(
         "  Queries:        {} / {} successful ({:.0}%)",
@@ -737,10 +750,17 @@ fn print_dns_test(result: &DnsProviderBenchmark) {
     );
     if let Some(latency) = &result.latency {
         println!("  Median:         {:.1} ms", latency.median_ms);
-        println!("  p95 / p99:      {:.1} / {:.1} ms", latency.p95_ms, latency.p99_ms);
+        println!(
+            "  p95 / p99:      {:.1} / {:.1} ms",
+            latency.p95_ms, latency.p99_ms
+        );
         println!("  Max:            {:.1} ms", latency.max_ms);
     }
-    println!("  DNS score:      {}/100 {}", result.score, result.grade.label());
+    println!(
+        "  DNS score:      {}/100 {}",
+        result.score,
+        result.grade.label()
+    );
     if let Some(tier) = result.tier_label() {
         println!("  Tier:           ◆ {tier}");
     }
@@ -753,14 +773,14 @@ fn print_dns_benchmark(result: &DnsBenchmarkResult) {
     println!("  ─  ───────────────────────────────  ───────  ───────  ───────  ─────────────");
     for (index, entry) in result.entries.iter().enumerate() {
         let name = dns_result_name(entry);
-        let median = entry
-            .latency
-            .as_ref()
-            .map_or_else(|| "—".to_string(), |latency| format!("{:.1}ms", latency.median_ms));
-        let p95 = entry
-            .latency
-            .as_ref()
-            .map_or_else(|| "—".to_string(), |latency| format!("{:.1}ms", latency.p95_ms));
+        let median = entry.latency.as_ref().map_or_else(
+            || "—".to_string(),
+            |latency| format!("{:.1}ms", latency.median_ms),
+        );
+        let p95 = entry.latency.as_ref().map_or_else(
+            || "—".to_string(),
+            |latency| format!("{:.1}ms", latency.p95_ms),
+        );
         let tier = entry
             .tier_label()
             .map_or(String::new(), |tier| format!(" ◆{tier}"));
@@ -779,7 +799,12 @@ fn print_dns_benchmark(result: &DnsBenchmarkResult) {
     if let Some(winner) = result.winner() {
         println!();
         println!("  {}", score_bar(winner.score));
-        println!("  ◆ WINNER: {} · {}/100 {}", dns_result_name(winner), winner.score, winner.grade.label());
+        println!(
+            "  ◆ WINNER: {} · {}/100 {}",
+            dns_result_name(winner),
+            winner.score,
+            winner.grade.label()
+        );
     }
 }
 
@@ -811,14 +836,20 @@ fn print_comparison(result: &comparison::CompareResult) {
         result.quality_score.after,
         result.quality_score.absolute_change,
     ) {
-        println!("  {:<16}  {:>10.0}/100  {:>10.0}/100  {change:+.0} pts", "Quality", before, after);
+        println!(
+            "  {:<16}  {:>10.0}/100  {:>10.0}/100  {change:+.0} pts",
+            "Quality", before, after
+        );
     }
     if let (Some(before), Some(after), Some(change)) = (
         result.bufferbloat_ms.before,
         result.bufferbloat_ms.after,
         result.bufferbloat_ms.absolute_change,
     ) {
-        println!("  {:<16}  {:>10.1} ms  {:>10.1} ms  {change:+.1} ms", "Bufferbloat", before, after);
+        println!(
+            "  {:<16}  {:>10.1} ms  {:>10.1} ms  {change:+.1} ms",
+            "Bufferbloat", before, after
+        );
     }
     println!();
     println!("  VERDICT    {}", result.verdict.to_ascii_uppercase());
@@ -845,7 +876,12 @@ fn print_doctor(report: &DoctorReport) {
     }
     println!();
     for check in &report.checks {
-        println!("  {} {:<20} {}", check.status.symbol(), check.name, check.detail);
+        println!(
+            "  {} {:<20} {}",
+            check.status.symbol(),
+            check.name,
+            check.detail
+        );
     }
     if let Some(speedtest) = &report.speedtest {
         println!();
@@ -892,14 +928,22 @@ fn dns_result_name(entry: &DnsProviderBenchmark) -> String {
 
 fn score_bar(score: u8) -> String {
     let filled = usize::from(score) / 5;
-    format!("{}{} {score}/100", "█".repeat(filled), "░".repeat(20_usize.saturating_sub(filled)))
+    format!(
+        "{}{} {score}/100",
+        "█".repeat(filled),
+        "░".repeat(20_usize.saturating_sub(filled))
+    )
 }
 
 fn truncate(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
     }
-    value.chars().take(width.saturating_sub(1)).collect::<String>() + "…"
+    value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>()
+        + "…"
 }
 
 fn format_servers(servers: &[std::net::IpAddr]) -> String {
@@ -915,17 +959,26 @@ fn format_servers(servers: &[std::net::IpAddr]) -> String {
 }
 
 fn yes(value: bool) -> &'static str {
-    if value { "✓" } else { "—" }
+    if value {
+        "✓"
+    } else {
+        "—"
+    }
 }
 
 fn confirm(prompt: &str) -> Result<bool> {
     print!("{prompt} [y/N] ");
-    io::stdout().flush().context("failed to flush confirmation prompt")?;
+    io::stdout()
+        .flush()
+        .context("failed to flush confirmation prompt")?;
     let mut answer = String::new();
     io::stdin()
         .read_line(&mut answer)
         .context("failed to read confirmation")?;
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 fn format_delta(value: Option<f64>) -> String {

@@ -16,7 +16,11 @@ use tokio::{
     time::{timeout, Instant},
 };
 
-use crate::{analysis, model::{LatencyDistribution, QualityGrade}, storage};
+use crate::{
+    analysis,
+    model::{LatencyDistribution, QualityGrade},
+    storage,
+};
 
 const DNS_TIMEOUT: Duration = Duration::from_millis(1_500);
 const DNS_PORT: u16 = 53;
@@ -417,7 +421,9 @@ pub struct DnsBenchmarkResult {
 impl DnsBenchmarkResult {
     pub fn winner(&self) -> Option<&DnsProviderBenchmark> {
         let winner = self.winner_id.as_deref()?;
-        self.entries.iter().find(|entry| entry.provider_id == winner)
+        self.entries
+            .iter()
+            .find(|entry| entry.provider_id == winner)
     }
 
     pub fn pretty_json(&self) -> Result<String> {
@@ -464,7 +470,9 @@ pub fn providers_for_profile(profile: BenchmarkProfile) -> Vec<&'static DnsProvi
 pub async fn test_current(queries: usize) -> Result<DnsProviderBenchmark> {
     let state = system::inspect(None)?;
     if state.servers.is_empty() {
-        return Err(anyhow!("the active interface did not expose any DNS servers"));
+        return Err(anyhow!(
+            "the active interface did not expose any DNS servers"
+        ));
     }
     let raw = benchmark_servers(
         "current",
@@ -666,9 +674,8 @@ fn score_entries(raw_entries: Vec<RawBenchmark>) -> Vec<DnsProviderBenchmark> {
                 .round()
                 .clamp(0.0, 100.0) as u8;
             let grade = grade_for_score(score);
-            let s_tier = score >= 98
-                && success_rate_percent >= 100.0
-                && median <= best_median * 1.10 + 0.25;
+            let s_tier =
+                score >= 98 && success_rate_percent >= 100.0 && median <= best_median * 1.10 + 0.25;
 
             DnsProviderBenchmark {
                 provider_id: raw.provider_id,
@@ -826,8 +833,11 @@ pub fn save_backup(state: &system::DnsSystemState) -> Result<std::path::PathBuf>
         timestamp: Utc::now(),
         state: state.clone(),
     };
-    fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&backup)?))
-        .context("failed to write DNS rollback snapshot")?;
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&backup)?),
+    )
+    .context("failed to write DNS rollback snapshot")?;
     Ok(path)
 }
 
@@ -857,7 +867,10 @@ mod tests {
 
     #[test]
     fn provider_registry_has_unique_ids_and_multiple_leagues() {
-        let mut ids = PROVIDERS.iter().map(|provider| provider.id).collect::<Vec<_>>();
+        let mut ids = PROVIDERS
+            .iter()
+            .map(|provider| provider.id)
+            .collect::<Vec<_>>();
         let original_len = ids.len();
         ids.sort_unstable();
         ids.dedup();

@@ -221,7 +221,11 @@ fn push_percent_highlight(
     higher: bool,
 ) {
     if let Some(change) = metric.percent_change {
-        let direction = if change >= 0.0 { "increased" } else { "decreased" };
+        let direction = if change >= 0.0 {
+            "increased"
+        } else {
+            "decreased"
+        };
         let desirable = if higher { change >= 0.0 } else { change <= 0.0 };
         candidates.push((
             change.abs(),
