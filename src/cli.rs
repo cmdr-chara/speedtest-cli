@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{net::IpAddr, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -56,6 +56,12 @@ pub enum Command {
     History(HistoryArgs),
     /// Summarize saved runs and flag unusual recent performance.
     Stats(StatsArgs),
+    /// Inspect, benchmark, optimize, and configure DNS resolvers.
+    Dns(DnsArgs),
+    /// Compare two saved results, or the two most recent history entries.
+    Compare(CompareArgs),
+    /// Diagnose routing, DNS, IP connectivity, HTTPS, and optionally throughput.
+    Doctor(DoctorArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -111,6 +117,186 @@ pub struct StatsArgs {
     pub days: u64,
 
     /// Print the history summary as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DnsArgs {
+    #[command(subcommand)]
+    pub command: DnsCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum DnsCommand {
+    /// List built-in resolver profiles and protocol capabilities.
+    List(DnsListArgs),
+    /// Show DNS configuration for the active or selected interface.
+    Show(DnsShowArgs),
+    /// Test the current resolver or one or more explicit DNS server IPs.
+    Test(DnsTestArgs),
+    /// Race DNS providers and rank latency, tail latency, reliability, and stability.
+    #[command(alias = "speedtest")]
+    Benchmark(DnsBenchmarkArgs),
+    /// Configure a specific built-in resolver profile.
+    Set(DnsSetArgs),
+    /// Benchmark a resolver league and configure the best eligible provider.
+    Optimize(DnsOptimizeArgs),
+    /// Return the selected interface to automatic/DHCP-managed DNS.
+    Reset(DnsResetArgs),
+    /// Restore the exact DNS snapshot saved before the most recent change when possible.
+    Rollback(DnsRollbackArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DnsListArgs {
+    /// Print provider metadata as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DnsShowArgs {
+    /// Interface alias, network service, or device. Defaults to the active route.
+    #[arg(long)]
+    pub interface: Option<String>,
+
+    /// Print configuration as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DnsTestArgs {
+    /// DNS server IP to test. May be supplied multiple times; defaults to current system DNS.
+    #[arg(long = "resolver", value_name = "IP")]
+    pub resolvers: Vec<IpAddr>,
+
+    /// Number of DNS queries in the test.
+    #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u16).range(3..=100))]
+    pub queries: u16,
+
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DnsBenchmarkProfileArg {
+    Fastest,
+    Privacy,
+    Security,
+    Adblock,
+    Family,
+    All,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DnsBenchmarkArgs {
+    /// Resolver league to benchmark.
+    #[arg(long, value_enum, default_value_t = DnsBenchmarkProfileArg::Fastest)]
+    pub profile: DnsBenchmarkProfileArg,
+
+    /// Queries sent to each resolver profile.
+    #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u16).range(3..=100))]
+    pub queries: u16,
+
+    /// Print the full benchmark as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DnsSetArgs {
+    /// Built-in resolver profile ID, for example cloudflare, quad9, adguard, or controld-ads.
+    pub provider: String,
+
+    /// Interface alias, network service, or device. Defaults to the active route.
+    #[arg(long)]
+    pub interface: Option<String>,
+
+    /// Apply without the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Show the proposed change without modifying DNS.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DnsOptimizeArgs {
+    /// Resolver league to optimize for.
+    #[arg(long, value_enum, default_value_t = DnsBenchmarkProfileArg::Fastest)]
+    pub profile: DnsBenchmarkProfileArg,
+
+    /// Queries sent to each resolver profile before selecting a winner.
+    #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u16).range(3..=100))]
+    pub queries: u16,
+
+    /// Interface alias, network service, or device. Defaults to the active route.
+    #[arg(long)]
+    pub interface: Option<String>,
+
+    /// Apply without the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Benchmark and recommend only; do not modify DNS.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DnsResetArgs {
+    /// Interface alias, network service, or device. Defaults to the active route.
+    #[arg(long)]
+    pub interface: Option<String>,
+
+    /// Reset without the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Show what would be reset without modifying DNS.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DnsRollbackArgs {
+    /// Roll back without the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Show the saved snapshot without modifying DNS.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CompareArgs {
+    /// Baseline JSON result. If omitted with AFTER, the two newest saved runs are compared.
+    pub before: Option<PathBuf>,
+
+    /// New JSON result. Supply together with BEFORE.
+    pub after: Option<PathBuf>,
+
+    /// Print the comparison as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DoctorArgs {
+    /// Also run the full throughput/bufferbloat test after lightweight diagnostics.
+    #[arg(long)]
+    pub full: bool,
+
+    /// Interface alias, network service, or device. Defaults to the active route.
+    #[arg(long)]
+    pub interface: Option<String>,
+
+    /// Print the complete diagnostic report as JSON.
     #[arg(long)]
     pub json: bool,
 }
