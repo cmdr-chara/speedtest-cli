@@ -4,7 +4,9 @@ use anyhow::{anyhow, Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::CrosstermBackend,
-    prelude::{Alignment, Color, Constraint, Direction, Frame, Layout, Line, Modifier, Rect, Span, Style},
+    prelude::{
+        Alignment, Color, Constraint, Direction, Frame, Layout, Line, Modifier, Rect, Span, Style,
+    },
     widgets::{Block, Borders, Gauge, Paragraph, Sparkline},
     Terminal,
 };
@@ -232,13 +234,48 @@ fn render_metrics(frame: &mut Frame, app: &StabilityApp, area: Rect) {
 
     let left = Paragraph::new(vec![
         metric_line("CURRENT", format_ms(app.current_ms)),
-        metric_line("MEDIAN", stats.as_ref().map(|stats| stats.median_ms).map(format_ms_value).unwrap_or_else(|| "—".to_string())),
-        metric_line("P95", stats.as_ref().map(|stats| stats.p95_ms).map(format_ms_value).unwrap_or_else(|| "—".to_string())),
+        metric_line(
+            "MEDIAN",
+            stats
+                .as_ref()
+                .map(|stats| stats.median_ms)
+                .map(format_ms_value)
+                .unwrap_or_else(|| "—".to_string()),
+        ),
+        metric_line(
+            "P95",
+            stats
+                .as_ref()
+                .map(|stats| stats.p95_ms)
+                .map(format_ms_value)
+                .unwrap_or_else(|| "—".to_string()),
+        ),
     ]);
     let right = Paragraph::new(vec![
-        metric_line("P99", stats.as_ref().map(|stats| stats.p99_ms).map(format_ms_value).unwrap_or_else(|| "—".to_string())),
-        metric_line("MAX", stats.as_ref().map(|stats| stats.max_ms).map(format_ms_value).unwrap_or_else(|| "—".to_string())),
-        metric_line("PROBES", format!("{} ok / {} failed", app.probes.saturating_sub(app.failed), app.failed)),
+        metric_line(
+            "P99",
+            stats
+                .as_ref()
+                .map(|stats| stats.p99_ms)
+                .map(format_ms_value)
+                .unwrap_or_else(|| "—".to_string()),
+        ),
+        metric_line(
+            "MAX",
+            stats
+                .as_ref()
+                .map(|stats| stats.max_ms)
+                .map(format_ms_value)
+                .unwrap_or_else(|| "—".to_string()),
+        ),
+        metric_line(
+            "PROBES",
+            format!(
+                "{} ok / {} failed",
+                app.probes.saturating_sub(app.failed),
+                app.failed
+            ),
+        ),
     ]);
     frame.render_widget(left, halves[0]);
     frame.render_widget(right, halves[1]);
@@ -256,7 +293,11 @@ fn render_status(frame: &mut Frame, app: &StabilityApp, area: Rect) {
             .map_or(String::new(), |tier| format!("  ◆ {tier}"));
         Paragraph::new(vec![
             Line::from(Span::styled(
-                format!("STABILITY {}/100 {}{tier}", result.score, result.grade.label()),
+                format!(
+                    "STABILITY {}/100 {}{tier}",
+                    result.score,
+                    result.grade.label()
+                ),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )),
             Line::from(format!(
@@ -274,7 +315,9 @@ fn render_status(frame: &mut Frame, app: &StabilityApp, area: Rect) {
         Paragraph::new(vec![
             Line::from(Span::styled(
                 "LIVE STABILITY PROBE",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(format!("probe availability {availability:.2}%")),
         ])
@@ -302,10 +345,7 @@ fn render_footer(frame: &mut Frame, app: &StabilityApp, area: Rect) {
 
 fn metric_line(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!(" {label:<9}"),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(format!(" {label:<9}"), Style::default().fg(Color::DarkGray)),
         Span::styled(value, Style::default().fg(Color::White)),
     ])
 }
