@@ -71,7 +71,10 @@ pub fn summarize(results: &[TestResult], period_days: u64) -> Option<HistorySumm
 
     let downloads: Vec<f64> = results.iter().map(|result| result.download.mbps).collect();
     let uploads: Vec<f64> = results.iter().map(|result| result.upload.mbps).collect();
-    let pings: Vec<f64> = results.iter().map(|result| result.latency.idle_ms).collect();
+    let pings: Vec<f64> = results
+        .iter()
+        .map(|result| result.latency.idle_ms)
+        .collect();
     let quality_scores: Vec<f64> = results
         .iter()
         .filter_map(|result| {
