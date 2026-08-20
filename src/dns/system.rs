@@ -166,7 +166,7 @@ fn inspect_windows(interface_override: Option<&str>) -> Result<DnsSystemState> {
         ipv6_default: bool,
     }
 
-    let requested = interface_override.unwrap_or_default().replace(''', "''");
+    let requested = interface_override.unwrap_or_default().replace('\'', "''");
     let script = format!(
         "$ErrorActionPreference='Stop';\
          $requested='{requested}';\
