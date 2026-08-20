@@ -1,0 +1,64 @@
+name: Fix v0.4 cfg branch
+
+on:
+  push:
+    branches:
+      - agent/v0.4-dns-doctor-compare
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v0.4-dns-doctor-compare
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Scope platform helpers to their OSes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/dns/system.rs")
+          source = path.read_text()
+
+          source = source.replace(
+              "fn parse_ip_list<'a>(values: impl Iterator<Item = &'a str>) -> Vec<IpAddr> {",
+              "#[cfg(any(target_os = \"windows\", target_os = \"macos\"))]\nfn parse_ip_list<'a>(values: impl Iterator<Item = &'a str>) -> Vec<IpAddr> {",
+              1,
+          )
+          source = source.replace(
+              "fn value_after_colon(text: &str, key: &str) -> Option<String> {",
+              "#[cfg(target_os = \"macos\")]\nfn value_after_colon(text: &str, key: &str) -> Option<String> {",
+              1,
+          )
+          source = source.replace(
+              "    #[test]\n    fn parses_colon_values() {",
+              "    #[cfg(target_os = \"macos\")]\n    #[test]\n    fn parses_colon_values() {",
+              1,
+          )
+          path.write_text(source)
+          PY
+
+      - name: Format Rust sources
+        run: cargo fmt --all
+
+      - name: Commit correction
+        shell: bash
+        run: |
+          if git diff --quiet -- src/dns/system.rs; then
+            echo "No cfg correction needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- src/dns/system.rs
+          git commit -m "Scope DNS helpers to supported platforms"
+          git push origin HEAD:agent/v0.4-dns-doctor-compare
