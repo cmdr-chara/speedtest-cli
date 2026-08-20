@@ -2,84 +2,220 @@
 
 A fast, polished terminal network quality analyzer written in Rust.
 
-It measures throughput and latency, then explains how the connection behaves under load: tail latency, jitter, bufferbloat, workload grades, stability, historical trends, and concrete diagnostic findings. The measurement engine, analysis model, terminal UI, and persistence layer are intentionally separated so each can evolve independently.
+`speedtest-cli` measures throughput and latency, then explains how the connection behaves under load. It includes network-quality scoring, bufferbloat analysis, stability monitoring, historical intelligence, DNS diagnostics/configuration, multiple Internet backends, real ICMP loss testing, Wi-Fi inspection, and a self-hosted LAN mode.
 
-## Preview
+## Highlights
 
-```text
-┌──────────────────────────── SPEEDTEST ────────────────────────────┐
-│                     NETWORK ANALYSIS COMPLETE                     │
-│                                                                   │
-│                         ⣿⣿⣿⣿⣿⣿⣷⣄                        │
-│                    ⣠⣿⠟          ⠻⣿⣄                     │
-│                  ⣰⣿⠃       ╱       ⠹⣿⡄                   │
-│                 ⣿⡏        ╱          ⢹⣿                  │
-│                            ●                                      │
-│                         842.6 Mbps                                │
-│                                                                   │
-│   DOWNLOAD  842.6 Mbps             UPLOAD  193.4 Mbps             │
-│   PING        8.2 ms               JITTER    1.1 ms               │
-│   LOADED ↓   19.4 ms               LOADED ↑ 82.7 ms               │
-│                                                                   │
-│ QUALITY 99/100 A+  ◆ S-TIER  high confidence                      │
-│ Gaming A+  Calls A   Streaming A+  Cloud gaming A                 │
-│ tails  idle p95 10.1 ms  p99 11.0 ms  •  jitter p95 2.0 ms       │
-│ bufferbloat A  ↓ +11.2 ms  ↑ +6.5 ms                              │
-└───────────────────────────────────────────────────────────────────┘
-```
-
-## Features
-
-- Async Rust measurement engine with concurrent transfer streams
-- Idle latency and jitter
-- Loaded latency during download and upload
-- Download and upload throughput sampling
-- **p95/p99 latency and jitter tails** from retained probe distributions
-- **Transparent 0–100 network quality score** with A+–F grade and confidence level
-- Rare **◆ S-TIER** distinction for exceptional high-confidence runs
-- **Bufferbloat grading** with measured download/upload latency increase
-- **Gaming, video-call, streaming, and cloud-gaming grades**
-- **Human-readable diagnostic findings and recommendations**
-- **Long-running stability mode** with rolling latency trace, tail latency, probe availability, and failure bursts
-- **Historical run browser** with quality/S-tier context and terminal sparkline
-- **Historical statistics and anomaly detection** against the saved baseline
-- Layered animated Ratatui speedometer and live sparkline
-- 240 Hz speedometer physics with a configurable 30–240 FPS render cap
-- JSON output for scripts
-- CSV export including quality/percentile fields
-- Automatic per-test JSON files and JSONL history
-- Plain terminal mode for CI, logs, and unsupported terminals
+- Download/upload throughput with concurrent streams
+- Idle and loaded latency, jitter, p95/p99 tails
+- Explainable 0–100 quality score with A+–F grades
+- Rare `◆ S-TIER` distinction for exceptional high-confidence runs
+- Bufferbloat and workload analysis for gaming, calls, streaming, and cloud gaming
+- Long-running stability mode
+- History, trends, sparklines, and anomaly detection
+- DNS inspection, health testing, benchmarking, configuration, rollback, and optimization
+- 20 built-in DNS resolver profiles across multiple providers
+- DNS-over-UDP and real DNS-over-HTTPS benchmarking
+- Cloudflare and LibreSpeed Internet backends
+- Backend cross-checking with `speedtest verify`
+- Real ICMP echo response-loss measurement with `speedtest loss`
+- Native Wi-Fi diagnostics on Windows, macOS, and Linux
+- Built-in self-hosted LAN speed-test server/client
+- JSON output, CSV export, per-run JSON, and JSONL history
 - Native release binaries for Windows, Linux, Intel macOS, and Apple Silicon macOS
-- Cloudflare-aware request sizing and HTTP 429 backoff
 
-Packet loss is intentionally nullable rather than depending on a deprecated public TURN service. When it is unavailable, real-time workload grades say so instead of pretending the measurement exists.
+## v0.5 Network Lab
 
-## Network intelligence
+### Adaptive Cloudflare backend
 
-The quality analysis is deliberately **explainable rather than authoritative**. It uses documented-in-code heuristic bands over the measurements collected by this client. The score is not an industry standard and is not presented as one.
-
-A completed result can include:
+The Cloudflare backend no longer depends on one fixed request such as:
 
 ```text
-Quality            88/100 A
-Confidence         high
-Bufferbloat        C
-Gaming             A
-Video calls        B
-Streaming          A+
-Cloud gaming       A
-Idle p95/p99       10.1 / 11.0 ms
-Jitter p95         2.0 ms
-Diagnosis          High upload bufferbloat
-Evidence           idle 8.2 ms → loaded upload 82.7 ms (+74.5 ms)
-Recommendation     enable SQM/CAKE/FQ-CoDel or shape upstream traffic
+https://speed.cloudflare.com/__down?bytes=250000000
 ```
 
-Confidence is based on measurement coverage. If loaded-latency probes are missing or sparse, the client lowers confidence and leaves the bufferbloat grade unavailable rather than fabricating one.
+Large requests to the public endpoint can be rejected depending on endpoint policy, edge behavior, network, or request size. v0.5 uses a time-based adaptive download strategy instead: it starts with a moderate payload, scales up when responses complete quickly, and automatically downshifts when Cloudflare returns size/rejection statuses such as HTTP 403, 413, or 400. HTTP 429 still uses bounded `Retry-After`/backoff handling.
 
-## Stability mode
+The objective is to measure sustained throughput without making a successful test depend on one 250 MB response.
 
-`speedtest stability` continuously sends conservative zero-byte HTTP probes instead of repeatedly saturating the link. It is designed to expose latency spikes and short disruptions that a normal short speed test can miss.
+### Multiple Internet backends
+
+Cloudflare remains the default:
+
+```bash
+speedtest
+speedtest --backend cloudflare
+```
+
+LibreSpeed is also available:
+
+```bash
+speedtest --backend librespeed
+```
+
+A compatible custom LibreSpeed installation can be selected with:
+
+```bash
+speedtest --backend librespeed --librespeed-server https://speed.example.com
+```
+
+The custom URL is treated as the LibreSpeed base URL and standard `garbage.php` / `empty.php` endpoints are assumed.
+
+### Backend verification
+
+Use both Internet engines to check whether a result is strongly backend/path dependent:
+
+```bash
+speedtest verify
+speedtest verify --duration 8 --streams 2
+speedtest verify --json
+```
+
+`verify` compares Cloudflare and LibreSpeed results rather than assuming a single public endpoint is ground truth.
+
+### Real ICMP response loss
+
+```bash
+speedtest loss
+speedtest loss --target 1.1.1.1 --count 50
+speedtest loss --json
+```
+
+This is a real ICMP echo response-loss measurement. It is deliberately separate from HTTP probe availability: HTTP failures, DNS failures, and endpoint throttling are **not** labeled packet loss.
+
+ICMP still has an important limitation: some hosts, routers, and firewalls block or deprioritize echo traffic, so ICMP loss can look worse than application traffic.
+
+### Wi-Fi diagnostics
+
+```bash
+speedtest wifi
+speedtest wifi --json
+speedtest wifi --interface Wi-Fi
+```
+
+Depending on the OS and driver/tooling, the report can include:
+
+- active interface
+- SSID
+- signal strength / estimated dBm
+- band
+- channel
+- PHY/link rate
+- radio metadata
+
+PHY/link rate is not presented as Internet throughput.
+
+### Self-hosted LAN mode
+
+Run a server on another machine in the LAN:
+
+```bash
+speedtest serve
+```
+
+Default bind address:
+
+```text
+0.0.0.0:9876
+```
+
+Then from another machine:
+
+```bash
+speedtest lan 192.168.1.50:9876
+speedtest lan 192.168.1.50:9876 --duration 10 --streams 4
+speedtest lan 192.168.1.50:9876 --json
+```
+
+This gives you a local throughput/latency baseline. If LAN performance is poor, the problem is likely local before the ISP/WAN path is even involved.
+
+## DNS suite
+
+Inspect the current resolver configuration:
+
+```bash
+speedtest dns show
+speedtest dns list
+```
+
+Test the active resolver or explicit DNS server IPs:
+
+```bash
+speedtest dns test
+speedtest dns test --resolver 1.1.1.1 --resolver 8.8.8.8
+```
+
+Benchmark comparable resolver leagues over classic UDP/53:
+
+```bash
+speedtest dns benchmark
+speedtest dns benchmark --profile privacy
+speedtest dns benchmark --profile security
+speedtest dns benchmark --profile adblock
+speedtest dns benchmark --profile family
+```
+
+Benchmark providers using real DNS-over-HTTPS wire-format requests:
+
+```bash
+speedtest dns benchmark --protocol doh
+speedtest dns benchmark --profile privacy --protocol doh
+```
+
+DoH benchmarking performs connection warm-up separately so the measured query distribution is not simply the first TCP/TLS handshake time.
+
+Configure a known resolver profile:
+
+```bash
+speedtest dns set cloudflare --dry-run
+speedtest dns set cloudflare
+speedtest dns set quad9
+```
+
+Automatically benchmark a league and select the best eligible resolver:
+
+```bash
+speedtest dns optimize --dry-run
+speedtest dns optimize
+speedtest dns optimize --profile privacy
+speedtest dns optimize --profile security
+```
+
+Recovery:
+
+```bash
+speedtest dns rollback
+speedtest dns reset
+```
+
+DNS writes snapshot the existing configuration before applying changes, verify resolution afterward, and attempt automatic rollback if post-change validation fails. On Linux, persistent automatic configuration currently requires NetworkManager; unmanaged resolver setups remain read-only.
+
+## Network Doctor and comparison
+
+```bash
+speedtest doctor
+speedtest doctor --full
+speedtest doctor --json
+```
+
+The lightweight doctor checks route/interface state, gateway latency where available, IPv4/IPv6 reachability, DNS health, HTTPS, and platform network context. `--full` also runs throughput/bufferbloat analysis.
+
+Compare the two latest saved runs:
+
+```bash
+speedtest compare
+```
+
+Or compare explicit canonical JSON results:
+
+```bash
+speedtest compare before.json after.json
+speedtest compare before.json after.json --json
+```
+
+## Stability
+
+`speedtest stability` continuously sends conservative HTTP probes instead of repeatedly saturating the connection:
 
 ```bash
 speedtest stability
@@ -87,37 +223,14 @@ speedtest stability --duration 5m
 speedtest stability --duration 5m --interval 750ms
 speedtest stability --plain
 speedtest stability --json
-speedtest stability --output stability.json
 ```
 
-The default run lasts one minute with one probe per second. Supported durations range from 10 seconds to 24 hours, and probe intervals range from 500 ms to 10 seconds.
+**HTTP probe availability is not packet loss.** A failed stability probe can be caused by endpoint throttling, route/server behavior, or the local connection. Use `speedtest loss` when you specifically want ICMP echo response-loss measurement.
 
-Example plain result:
-
-```text
-Network Stability
-  Duration:       300s
-  Probe interval: 1000 ms
-  Probes:         300 successful / 0 failed
-  Availability:   100.00% (HTTP probe availability, not packet loss)
-  Failure bursts: 0
-  Median:         8.3 ms
-  p95 / p99:      10.8 / 14.2 ms
-  Max:            18.1 ms
-  Jitter p95:     2.2 ms
-  Stability:      99/100 A+
-  Tier:           ◆ S-TIER
-```
-
-**Probe availability is not packet loss.** A failed HTTP probe may result from endpoint throttling, a transient route/server issue, or the local network. Consecutive failures are grouped into failure bursts so one disruption is not presented as several unrelated incidents.
-
-## History and stats
-
-Completed normal speed tests are already saved locally. v0.3 makes that history queryable without external scripts.
+## History and statistics
 
 ```bash
 speedtest history
-speedtest history --days 7
 speedtest history --days 30 --limit 50
 speedtest history --json
 
@@ -126,25 +239,13 @@ speedtest stats --days 90
 speedtest stats --json
 ```
 
-`history` displays recent runs newest-first, including download/upload, idle latency, quality grade, and S-tier status when available.
-
-`stats` calculates:
-
-- median and best download/upload
-- median and p95 idle latency
-- median quality score
-- S-tier run count
-- an overall download trend
-- a Unicode throughput history sparkline
-- latest-run anomaly detection against the previous saved baseline
-
-Anomaly detection requires at least five prior runs before evaluating the latest result. It currently flags material download/upload regressions, significantly elevated idle latency, and large quality-score drops.
+History/statistics include median/best throughput, latency statistics, quality context, S-tier counts, trend detection, a Unicode throughput sparkline, and latest-run anomaly detection against prior saved results.
 
 ## Installation
 
 ### Prebuilt binaries
 
-GitHub Releases are the recommended installation path; Rust is not required.
+GitHub Releases are the recommended installation method; Rust is not required.
 
 #### Windows x86_64
 
@@ -154,11 +255,7 @@ Expand-Archive .\speedtest.zip -DestinationPath . -Force
 .\speedtest-windows-x86_64\speedtest.exe
 ```
 
-Move `speedtest.exe` into a directory on your `PATH` if you want to run `speedtest` from anywhere.
-
 #### Linux x86_64
-
-The Linux release uses musl for broad distribution compatibility.
 
 ```bash
 curl -L "https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-linux-x86_64.tar.gz" -o speedtest.tar.gz
@@ -167,9 +264,9 @@ sudo install -m 0755 speedtest-linux-x86_64/speedtest /usr/local/bin/speedtest
 speedtest
 ```
 
-#### macOS
+The Linux release uses musl for broad distribution compatibility.
 
-The command below automatically selects Apple Silicon or Intel:
+#### macOS
 
 ```bash
 case "$(uname -m)" in
@@ -181,25 +278,23 @@ esac
 curl -L "https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-macos-${ASSET}.tar.gz" -o speedtest.tar.gz
 tar -xzf speedtest.tar.gz
 sudo install -m 0755 "speedtest-macos-${ASSET}/speedtest" /usr/local/bin/speedtest
-speedtest
 ```
 
-Each release also includes a `.sha256` file for every archive.
+Each packaged release includes SHA-256 checksum files.
 
 ### Install from source
 
-With Rust installed:
-
 ```bash
-cargo install --git https://github.com/cmdr-chara/speedtest-cli --branch determination
-speedtest
+cargo install --git https://github.com/cmdr-chara/speedtest-cli --branch determination --force
+speedtest --version
 ```
 
-## Usage
+## Normal speed-test usage
 
 ```bash
-# Normal speed / network-quality analysis
 speedtest
+speedtest --backend cloudflare
+speedtest --backend librespeed
 speedtest --fps 144
 speedtest --plain
 speedtest --json
@@ -207,41 +302,32 @@ speedtest --streams 4 --duration 10
 speedtest --output result.json
 speedtest --output result.csv --format csv
 speedtest --no-save
-
-# Stability
-speedtest stability --duration 5m --interval 1s
-
-# Historical intelligence
-speedtest history --days 30
-speedtest stats --days 30
 ```
 
-For development from a checkout, replace `speedtest` with `cargo run --release --`.
-
-### Normal-test options
+Main options:
 
 ```text
---streams <N>       Concurrent transfer streams (default: 2)
---duration <SEC>    Seconds for each throughput phase (default: 8)
---fps <N>           Interactive render cap, 30–240 FPS (default: 240)
---plain             Disable the interactive TUI
---json              Print the canonical result as JSON
---output <PATH>     Also write the result to this path
---format <FORMAT>   Output file format: json or csv (default: json)
---no-save           Disable automatic result/history persistence
+--backend <BACKEND>          cloudflare or librespeed
+--librespeed-server <URL>    custom LibreSpeed base URL
+--streams <N>                concurrent transfer streams (default: 2)
+--duration <SEC>             seconds for each throughput phase (default: 8)
+--fps <N>                    interactive render cap, 30–240 FPS
+--plain                      disable interactive TUI
+--json                       print canonical JSON
+--output <PATH>              also write completed result
+--format <FORMAT>            json or csv
+--no-save                    disable automatic history/result persistence
 ```
 
-The speedometer spring simulation always advances at 240 Hz. `--fps` only caps terminal redraws, so lowering it reduces terminal/CPU work without changing network measurements or animation physics. Redraws are suppressed once the gauge is settled and no UI data has changed.
+The speedometer physics run independently of the render cap, so lowering `--fps` reduces terminal work without changing network measurements.
 
-The Cloudflare backend deliberately defaults to two streams and long transfer bodies to avoid turning a short speed test into a burst of many HTTP requests. If Cloudflare's public endpoint returns HTTP 429, the client respects numeric `Retry-After` values when available and otherwise uses bounded exponential backoff. Persistent throttling can still happen on the public service; in that case, wait before retrying or use `--streams 1`.
+## Result semantics
 
-## Result model
-
-The existing summary fields remain stable and newer releases add an optional `analysis` object, so older saved results can still be deserialized.
+Normal Internet and LAN tests use the existing canonical result structure:
 
 ```json
 {
-  "timestamp": "2026-08-19T17:00:00Z",
+  "timestamp": "2026-08-20T14:00:00Z",
   "backend": "cloudflare",
   "server": {
     "host": "speed.cloudflare.com",
@@ -263,48 +349,25 @@ The existing summary fields remain stable and newer releases add an optional `an
     "mbps": 193.4,
     "bytes": 193400000,
     "seconds": 8.0
-  },
-  "analysis": {
-    "latency": {
-      "idle": {
-        "samples": 24,
-        "min_ms": 7.9,
-        "median_ms": 8.2,
-        "p95_ms": 10.1,
-        "p99_ms": 11.0,
-        "max_ms": 11.2
-      }
-    },
-    "quality": {
-      "score": 88,
-      "grade": "a",
-      "confidence": "high",
-      "bufferbloat": {
-        "download_increase_ms": 11.2,
-        "upload_increase_ms": 74.5,
-        "worst_increase_ms": 74.5,
-        "grade": "d"
-      }
-    }
   }
 }
 ```
 
+Standalone `speedtest loss` does not silently inject ICMP loss into an unrelated saved throughput run. That separation keeps protocol semantics explicit.
+
 ## Data storage
 
-Completed tests are saved to the platform data directory unless `--no-save` is used.
+Completed tests are stored in the platform data directory unless `--no-save` is used.
 
 ```text
 speedtest/
 ├── history.jsonl
 ├── results/
-│   ├── 20260819T170000Z.json
-│   └── ...
+├── dns/
+│   └── last-backup.json
 └── stability/
     ├── history.jsonl
     └── results/
-        ├── 20260820T105000Z.json
-        └── ...
 ```
 
 ## Architecture
@@ -312,49 +375,53 @@ speedtest/
 ```text
 src/
 ├── analysis/
-│   └── mod.rs
-├── cli.rs
-├── engine/
+├── bin/
+│   └── speedtest.rs
+├── dns/
+│   ├── doh.rs
 │   ├── mod.rs
-│   └── cloudflare.rs
-├── history.rs
-├── model/
+│   └── system.rs
+├── engine/
+│   ├── cloudflare_adaptive.rs
+│   ├── internet.rs
+│   ├── librespeed.rs
 │   └── mod.rs
+├── compare.rs
+├── doctor.rs
+├── history.rs
+├── lan.rs
+├── loss.rs
+├── model/
 ├── stability.rs
 ├── storage/
-│   └── mod.rs
 ├── tui/
-│   ├── app.rs
-│   ├── mod.rs
-│   ├── speedometer.rs
-│   ├── speedometer/
-│   │   └── gauge.rs
-│   ├── stability.rs
-│   └── view.rs
-├── lib.rs
-└── main.rs
+├── verify.rs
+├── wifi.rs
+└── lib.rs
 ```
 
-The normal TUI never measures the network directly; it consumes `EngineEvent`s. Stability follows the same event-driven approach with `StabilityEvent`s. History analysis consumes persisted canonical results. This keeps measurement, rendering, analysis, and storage independently testable.
-
-## Releases
-
-The release workflow reads the package version from `Cargo.toml`. When a commit reaches `determination` and `v<version>` has not been released yet, GitHub Actions builds all supported targets, generates SHA-256 checksums, creates the version tag, and publishes the assets to a GitHub Release. Pull requests that touch release-sensitive files build the same packages without publishing them.
+Measurement, analysis, UI, persistence, DNS, local-network diagnostics, and backend implementations are kept separate so they can evolve independently.
 
 ## Accuracy notes
 
-This is an independent CLI, not an official Cloudflare client. Network measurements vary with routing, congestion, Wi-Fi conditions, endpoint behavior, protocol overhead, and test methodology. Percentiles become more informative with more samples. Quality, workload, stability, trend, and anomaly grades are local heuristics built from the measurements collected by this client, not standardized certifications.
+This is an independent CLI, not an official Cloudflare or LibreSpeed client. Results vary with routing, congestion, Wi-Fi conditions, endpoint behavior, protocol overhead, server capacity, and test methodology.
 
-Stability mode deliberately avoids calling failed HTTP probes packet loss. A proper packet-loss implementation remains a separate future measurement problem.
+The quality score, workload grades, stability grades, history trend, anomaly flags, and DNS scores are local heuristics rather than standardized certifications.
+
+A public speed-test server is part of the path being measured. Use `speedtest verify` when you need cross-backend evidence and `speedtest lan` when you need to isolate the local network from the WAN.
+
+ICMP echo loss measures ICMP echo response behavior; it does not prove every transport/application experiences identical loss.
 
 ## Roadmap
 
-- Adaptive stream count and payload sizing
-- Pluggable measurement backends / server discovery
-- Ethernet/Wi-Fi, VPN, and IPv4/IPv6 comparison workflows
-- Dedicated packet-loss implementation without deprecated infrastructure
-- Local/self-hosted LAN measurement mode
-- Configurable but restrained themes
+- deeper IPv4 vs IPv6 A/B workflow
+- VPN on/off comparison workflow
+- MTU and fragmentation diagnostics
+- TCP/TLS handshake decomposition
+- HTTP/2 vs HTTP/3 / QUIC diagnostics
+- DoT and DoQ active benchmarks
+- additional Internet measurement backends and server discovery
+- configurable but restrained TUI themes
 - Homebrew and WinGet packages
 
 ## License
