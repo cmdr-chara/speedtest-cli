@@ -1,3 +1,4 @@
+#[path = "cloudflare_adaptive.rs"]
 pub mod cloudflare;
 pub mod internet;
 pub mod librespeed;
