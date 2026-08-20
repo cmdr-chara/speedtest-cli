@@ -1,0 +1,496 @@
+name: Patch v0.5.1 upload and TUI
+
+on:
+  push:
+    branches:
+      - agent/v0.5.1-upload-ui
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v0.5.1-upload-ui
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply v0.5.1 changes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              if old not in text:
+                  if new in text:
+                      return text
+                  raise SystemExit(f"missing patch anchor: {label}")
+              return text.replace(old, new, 1)
+
+          def replace_between(text, start, end, replacement, label):
+              a = text.find(start)
+              b = text.find(end, a + len(start))
+              if a < 0 or b < 0:
+                  raise SystemExit(f"missing range anchor: {label}")
+              return text[:a] + replacement.rstrip() + "\n\n" + text[b:]
+
+          # Cloudflare upload accounting + rolling throughput display.
+          path = Path("src/engine/cloudflare_adaptive.rs")
+          text = path.read_text()
+          text = replace_once(
+              text,
+              "use std::{\n    sync::{",
+              "use std::{\n    collections::VecDeque,\n    sync::{",
+              "VecDeque import",
+          )
+          text = replace_once(
+              text,
+              "use reqwest::{header::RETRY_AFTER, Client, Response, StatusCode};",
+              "use reqwest::{\n    header::{CONTENT_LENGTH, RETRY_AFTER},\n    Body, Client, Response, StatusCode,\n};",
+              "reqwest body imports",
+          )
+          text = replace_once(
+              text,
+              "const UPLOAD_MIN_BYTES: usize = 1_000_000;\nconst SAMPLE_INTERVAL: Duration = Duration::from_millis(200);",
+              "const UPLOAD_MIN_BYTES: usize = 1_000_000;\nconst UPLOAD_BODY_CHUNK_BYTES: usize = 64 * 1024;\nconst SAMPLE_INTERVAL: Duration = Duration::from_millis(200);\nconst THROUGHPUT_WINDOW: Duration = Duration::from_millis(900);\nconst DISPLAY_WARMUP: Duration = Duration::from_millis(400);",
+              "upload/display constants",
+          )
+
+          new_measure_upload = r'''    async fn measure_upload(
+              &self,
+              tx: &UnboundedSender<EngineEvent>,
+          ) -> Result<(ThroughputResult, Vec<f64>)> {
+              let total = Arc::new(AtomicU64::new(0));
+              let deadline = Instant::now() + self.config.phase_duration;
+              let mut workers = JoinSet::new();
+              for _ in 0..self.config.streams.max(1) {
+                  workers.spawn(upload_worker(
+                      self.client.clone(),
+                      Arc::clone(&total),
+                      UPLOAD_START_BYTES,
+                      deadline,
+                  ));
+              }
+              let loaded = tokio::spawn(measure_loaded_latency(self.client.clone(), deadline));
+              self.sample_transfer(TestPhase::Upload, Arc::clone(&total), deadline, tx)
+                  .await;
+              while let Some(result) = workers.join_next().await {
+                  result.context("Cloudflare upload worker panicked")??;
+              }
+              let loaded_samples = loaded.await.context("loaded-latency task panicked")?;
+              let bytes = total.load(Ordering::Relaxed);
+              if bytes == 0 {
+                  return Err(anyhow!(
+                      "Cloudflare accepted no upload data; try `--backend librespeed`"
+                  ));
+              }
+              emit_loaded(&loaded_samples, TestPhase::Upload, tx);
+              Ok((
+                  throughput(bytes, self.config.phase_duration),
+                  loaded_samples,
+              ))
+          }'''
+          text = replace_between(
+              text,
+              "    async fn measure_upload(",
+              "    async fn sample_transfer(",
+              new_measure_upload,
+              "measure_upload",
+          )
+
+          new_sampler = r'''    async fn sample_transfer(
+              &self,
+              phase: TestPhase,
+              total: Arc<AtomicU64>,
+              deadline: Instant,
+              tx: &UnboundedSender<EngineEvent>,
+          ) {
+              let started = Instant::now();
+              let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
+              interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+              let mut history = VecDeque::with_capacity(8);
+
+              loop {
+                  interval.tick().await;
+                  let now = Instant::now();
+                  let current = total.load(Ordering::Relaxed);
+                  history.push_back((now, current));
+
+                  while history.len() > 2 {
+                      let second = history.get(1).expect("history contains two samples");
+                      if now.duration_since(second.0) >= THROUGHPUT_WINDOW {
+                          history.pop_front();
+                      } else {
+                          break;
+                      }
+                  }
+
+                  if now.duration_since(started) >= DISPLAY_WARMUP {
+                      if let Some((window_start, window_bytes)) = history.front().copied() {
+                          let elapsed = now.duration_since(window_start).as_secs_f64();
+                          if elapsed >= SAMPLE_INTERVAL.as_secs_f64() {
+                              self.emit(
+                                  tx,
+                                  EngineEvent::ThroughputSample {
+                                      phase,
+                                      mbps: mbps(current.saturating_sub(window_bytes), elapsed),
+                                  },
+                              );
+                          }
+                      }
+                  }
+
+                  if now >= deadline {
+                      break;
+                  }
+              }
+          }'''
+          text = replace_between(
+              text,
+              "    async fn sample_transfer(",
+              "    fn emit(",
+              new_sampler,
+              "sample_transfer",
+          )
+
+          new_upload_worker = r'''async fn upload_worker(
+              client: Client,
+              total: Arc<AtomicU64>,
+              initial_payload_len: usize,
+              deadline: Instant,
+          ) -> Result<()> {
+              let mut payload_len = initial_payload_len;
+              let mut rate_limit_retries = 0_usize;
+              while Instant::now() < deadline {
+                  let response = tokio::select! {
+                      response = client
+                          .post(UPLOAD_URL)
+                          .query(&[("r", cache_buster())])
+                          .header("content-type", "application/octet-stream")
+                          .header("cache-control", "no-store")
+                          .header(CONTENT_LENGTH, payload_len.to_string())
+                          .body(counted_upload_body(Arc::clone(&total), payload_len))
+                          .send() => response.context("Cloudflare upload request failed")?,
+                      _ = sleep_until(deadline) => break,
+                  };
+
+                  if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                      rate_limit_retries += 1;
+                      if rate_limit_retries > MAX_RATE_LIMIT_RETRIES
+                          || !sleep_before_deadline(
+                              rate_limit_delay(&response, rate_limit_retries),
+                              deadline,
+                          )
+                          .await
+                      {
+                          break;
+                      }
+                      continue;
+                  }
+                  if is_size_rejection(response.status()) && payload_len > UPLOAD_MIN_BYTES {
+                      payload_len = (payload_len / 2).max(UPLOAD_MIN_BYTES);
+                      continue;
+                  }
+
+                  rate_limit_retries = 0;
+                  response
+                      .error_for_status()
+                      .context("Cloudflare upload endpoint returned an error")?;
+              }
+              Ok(())
+          }
+
+          fn counted_upload_body(total: Arc<AtomicU64>, payload_len: usize) -> Body {
+              let chunk = Bytes::from(vec![0_u8; UPLOAD_BODY_CHUNK_BYTES]);
+              let stream = futures_util::stream::unfold(
+                  (payload_len, chunk, total),
+                  |(remaining, chunk, total)| async move {
+                      if remaining == 0 {
+                          return None;
+                      }
+                      let len = remaining.min(chunk.len());
+                      total.fetch_add(len as u64, Ordering::Relaxed);
+                      let item = Ok::<Bytes, std::io::Error>(chunk.slice(..len));
+                      Some((item, (remaining - len, chunk, total)))
+                  },
+              );
+              Body::wrap_stream(stream)
+          }'''
+          text = replace_between(
+              text,
+              "async fn upload_worker(",
+              "async fn latency_probe(",
+              new_upload_worker,
+              "upload_worker",
+          )
+          path.write_text(text)
+
+          # TUI layout: full-width live trace + structured completion cards.
+          path = Path("src/tui/view.rs")
+          text = path.read_text()
+          text = replace_once(
+              text,
+              "    let lower_height = if app.is_complete() { 6 } else { 3 };",
+              "    let lower_height = if app.is_complete() { 9 } else { 4 };",
+              "full lower panel height",
+          )
+          text = replace_once(
+              text,
+              "    if app.is_complete() {\n        frame.render_widget(completion_panel(app), vertical[3]);\n    } else {",
+              "    if app.is_complete() {\n        render_completion_panel(frame, app, vertical[3]);\n    } else {",
+              "completion renderer call",
+          )
+          text = replace_once(
+              text,
+              "        metric_line(\"DOWNLOAD\", format_speed(app.download_mbps)),\n        metric_line(\"PING\", format_ms(app.ping_ms)),\n        metric_line(\"LOADED ↓\", format_ms(app.download_loaded_ms)),",
+              "        metric_line(\"DOWNLOAD\", format_speed(app.download_mbps), DOWNLOAD_ACCENT),\n        metric_line(\"PING\", format_ms(app.ping_ms), Color::White),\n        metric_line(\"LOADED ↓\", format_ms(app.download_loaded_ms), Color::White),",
+              "left metric accents",
+          )
+          text = replace_once(
+              text,
+              "        metric_line(\"UPLOAD\", format_speed(app.upload_mbps)),\n        metric_line(\"JITTER\", format_ms(app.jitter_ms)),\n        metric_line(\"LOADED ↑\", format_ms(app.upload_loaded_ms)),",
+              "        metric_line(\"UPLOAD\", format_speed(app.upload_mbps), UPLOAD_ACCENT),\n        metric_line(\"JITTER\", format_ms(app.jitter_ms), Color::White),\n        metric_line(\"LOADED ↑\", format_ms(app.upload_loaded_ms), Color::White),",
+              "right metric accents",
+          )
+
+          new_sparkline = r'''fn render_sparkline(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
+              let width = area.width.saturating_sub(2) as usize;
+              let data = resample_sparkline(&app.samples, width);
+              let sparkline = Sparkline::default()
+                  .block(
+                      Block::default()
+                          .title(Line::from(Span::styled(
+                              " THROUGHPUT TRACE ",
+                              Style::default().fg(Color::DarkGray),
+                          )))
+                          .borders(Borders::ALL)
+                          .border_style(Style::default().fg(Color::DarkGray)),
+                  )
+                  .data(&data)
+                  .style(Style::default().fg(accent));
+              frame.render_widget(sparkline, area);
+          }
+
+          fn resample_sparkline(samples: &std::collections::VecDeque<f64>, width: usize) -> Vec<u64> {
+              if samples.is_empty() || width == 0 {
+                  return Vec::new();
+              }
+              let source = samples.iter().copied().collect::<Vec<_>>();
+              if source.len() == 1 {
+                  return vec![source[0].max(0.0) as u64; width];
+              }
+
+              (0..width)
+                  .map(|column| {
+                      let position = if width <= 1 {
+                          0.0
+                      } else {
+                          column as f64 * (source.len() - 1) as f64 / (width - 1) as f64
+                      };
+                      let left = position.floor() as usize;
+                      let right = position.ceil() as usize;
+                      let fraction = position - left as f64;
+                      let value = source[left] * (1.0 - fraction) + source[right] * fraction;
+                      value.max(0.0) as u64
+                  })
+                  .collect()
+          }'''
+          text = replace_between(
+              text,
+              "fn render_sparkline(",
+              "fn completion_panel(",
+              new_sparkline,
+              "sparkline renderer",
+          )
+
+          new_completion = r'''fn render_completion_panel(frame: &mut Frame, app: &App, area: Rect) {
+              let Some(result) = app.result.as_ref() else {
+                  frame.render_widget(legacy_completion(app), area);
+                  return;
+              };
+              let Some(analysis) = result.analysis.as_ref() else {
+                  frame.render_widget(legacy_completion(app), area);
+                  return;
+              };
+
+              let quality = &analysis.quality;
+              let quality_color = if quality.is_s_tier() {
+                  S_TIER_ACCENT
+              } else {
+                  grade_color(quality.grade)
+              };
+              let buffer_grade = quality.bufferbloat.grade.map_or("—", QualityGrade::label);
+              let jitter_p95 = analysis
+                  .latency
+                  .jitter
+                  .as_ref()
+                  .map_or(0.0, |jitter| jitter.p95_ms);
+
+              let vertical = Layout::default()
+                  .direction(Direction::Vertical)
+                  .constraints([Constraint::Length(5), Constraint::Min(3)])
+                  .split(area);
+              let cards = Layout::default()
+                  .direction(Direction::Horizontal)
+                  .constraints([
+                      Constraint::Percentage(34),
+                      Constraint::Percentage(33),
+                      Constraint::Percentage(33),
+                  ])
+                  .split(vertical[0]);
+
+              let tier = quality
+                  .tier_label()
+                  .map_or(String::new(), |tier| format!("  ◆ {tier}"));
+              let quality_card = Paragraph::new(vec![
+                  Line::from(vec![
+                      Span::styled(
+                          format!("{}/100 {}", quality.score, quality.grade.label()),
+                          Style::default()
+                              .fg(quality_color)
+                              .add_modifier(Modifier::BOLD),
+                      ),
+                      Span::styled(tier, Style::default().fg(S_TIER_ACCENT)),
+                  ]),
+                  Line::from(Span::styled(
+                      format!("{} confidence", quality.confidence.label()),
+                      Style::default().fg(Color::DarkGray),
+                  )),
+                  Line::from(format!(
+                      "Bufferbloat {buffer_grade}   ↓ {}   ↑ {}",
+                      format_delta(quality.bufferbloat.download_increase_ms),
+                      format_delta(quality.bufferbloat.upload_increase_ms)
+                  )),
+              ])
+              .block(card_block(" QUALITY ", quality_color));
+
+              let workloads = Paragraph::new(vec![
+                  workload_line("Gaming", quality.workloads.gaming),
+                  workload_line("Calls", quality.workloads.video_calls),
+                  workload_line("Streaming", quality.workloads.streaming),
+              ])
+              .block(card_block(" WORKLOADS ", Color::Gray));
+
+              let tails = Paragraph::new(vec![
+                  Line::from(format!("Idle p95      {:>6.1} ms", analysis.latency.idle.p95_ms)),
+                  Line::from(format!("Idle p99      {:>6.1} ms", analysis.latency.idle.p99_ms)),
+                  Line::from(format!("Jitter p95    {:>6.1} ms", jitter_p95)),
+              ])
+              .block(card_block(" TAIL LATENCY ", Color::Gray));
+
+              frame.render_widget(quality_card, cards[0]);
+              frame.render_widget(workloads, cards[1]);
+              frame.render_widget(tails, cards[2]);
+
+              let diagnosis = if let Some(finding) = quality.findings.first() {
+                  let recommendation = finding
+                      .recommendation
+                      .as_deref()
+                      .unwrap_or(finding.evidence.as_str());
+                  Paragraph::new(vec![
+                      Line::from(vec![
+                          Span::styled(
+                              format!(" {} ", finding.severity.label()),
+                              Style::default()
+                                  .fg(severity_color(finding.severity))
+                                  .add_modifier(Modifier::BOLD),
+                          ),
+                          Span::styled(
+                              finding.title.clone(),
+                              Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                          ),
+                      ]),
+                      Line::from(Span::styled(
+                          format!("  {recommendation}"),
+                          Style::default().fg(Color::Gray),
+                      )),
+                  ])
+              } else {
+                  Paragraph::new(vec![
+                      Line::from(Span::styled(
+                          " HEALTHY ",
+                          Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                      )),
+                      Line::from(Span::styled(
+                          "  No material network-quality finding was detected in this run.",
+                          Style::default().fg(Color::Gray),
+                      )),
+                  ])
+              };
+              frame.render_widget(
+                  diagnosis
+                      .block(card_block(" DIAGNOSIS ", Color::Gray))
+                      .wrap(Wrap { trim: true }),
+                  vertical[1],
+              );
+          }
+
+          fn card_block(title: &'static str, color: Color) -> Block<'static> {
+              Block::default()
+                  .title(Line::from(Span::styled(
+                      title,
+                      Style::default().fg(color).add_modifier(Modifier::BOLD),
+                  )))
+                  .borders(Borders::ALL)
+                  .border_style(Style::default().fg(Color::DarkGray))
+          }
+
+          fn workload_line(label: &'static str, grade: QualityGrade) -> Line<'static> {
+              Line::from(vec![
+                  Span::styled(format!("{label:<13}"), Style::default().fg(Color::DarkGray)),
+                  Span::styled(
+                      grade.label(),
+                      Style::default()
+                          .fg(grade_color(grade))
+                          .add_modifier(Modifier::BOLD),
+                  ),
+              ])
+          }'''
+          text = replace_between(
+              text,
+              "fn completion_panel(",
+              "fn compact_quality(",
+              new_completion,
+              "completion panel",
+          )
+          text = replace_once(
+              text,
+              "fn metric_line(label: &'static str, value: String) -> Line<'static> {",
+              "fn metric_line(label: &'static str, value: String, color: Color) -> Line<'static> {",
+              "metric_line signature",
+          )
+          text = replace_once(
+              text,
+              "        Span::styled(value, Style::default().fg(Color::White)),",
+              "        Span::styled(\n            value,\n            Style::default().fg(color).add_modifier(Modifier::BOLD),\n        ),",
+              "metric value style",
+          )
+          path.write_text(text)
+
+          # Patch release version and README wording.
+          path = Path("Cargo.toml")
+          text = path.read_text().replace('version = "0.5.0"', 'version = "0.5.1"', 1)
+          path.write_text(text)
+
+          path = Path("README.md")
+          text = path.read_text()
+          marker = "## Network intelligence\n"
+          note = '''## v0.5.1 measurement stability\n\nv0.5.1 improves Cloudflare upload accounting by counting streamed request-body bytes as the HTTP transport consumes them instead of waiting for a whole POST to finish. This avoids the large 25 MB step pattern in the live upload gauge and materially reduces deadline undercount from partially completed requests. Live throughput is displayed through a rolling window; the canonical final result remains byte/time based.\n\nThe full TUI completion view also uses separate Quality, Workloads, Tail Latency, and Diagnosis panels, while the live throughput trace is resampled to the available terminal width.\n\n'''
+          if note not in text:
+              text = text.replace(marker, note + marker, 1)
+          path.write_text(text)
+
+      - name: Format Rust sources
+        run: cargo fmt --all
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml README.md src/engine/cloudflare_adaptive.rs src/tui/view.rs
+          git commit -m "Stabilize upload measurement and refine TUI"
+          git push origin HEAD:agent/v0.5.1-upload-ui
