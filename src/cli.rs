@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputFormat {
@@ -10,8 +10,11 @@ pub enum OutputFormat {
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "speedtest")]
-#[command(version, about = "A fast, polished terminal speed test")]
+#[command(version, about = "A fast, polished terminal network quality analyzer")]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Number of concurrent transfer streams.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=16))]
     pub streams: u8,
@@ -20,7 +23,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u64).range(3..=30))]
     pub duration: u64,
 
-    /// Maximum interactive TUI render rate. The animation physics always run at 240 Hz.
+    /// Maximum interactive TUI render rate. The speedometer physics always run at 240 Hz.
     #[arg(long, default_value_t = 240, value_parser = clap::value_parser!(u16).range(30..=240))]
     pub fps: u16,
 
@@ -43,4 +46,125 @@ pub struct Cli {
     /// Do not persist automatic history/results.
     #[arg(long)]
     pub no_save: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum Command {
+    /// Continuously probe latency to expose spikes and short disruptions.
+    Stability(StabilityArgs),
+    /// Show recent saved speed-test runs.
+    History(HistoryArgs),
+    /// Summarize saved runs and flag unusual recent performance.
+    Stats(StatsArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct StabilityArgs {
+    /// Total probe duration. Supports s, m, or h suffixes (for example 90s or 5m).
+    #[arg(long, default_value = "1m", value_parser = parse_stability_duration)]
+    pub duration: u64,
+
+    /// Time between probes. Supports ms or s suffixes (for example 750ms or 1s).
+    #[arg(long, default_value = "1s", value_parser = parse_probe_interval)]
+    pub interval_ms: u64,
+
+    /// Maximum TUI render rate.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u16).range(10..=240))]
+    pub fps: u16,
+
+    /// Disable the stability TUI.
+    #[arg(long)]
+    pub plain: bool,
+
+    /// Print the completed stability result as JSON.
+    #[arg(long, conflicts_with = "plain")]
+    pub json: bool,
+
+    /// Write the completed stability result to this JSON file.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
+    /// Do not persist the stability run.
+    #[arg(long)]
+    pub no_save: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct HistoryArgs {
+    /// Only include results from the last N days.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3650))]
+    pub days: u64,
+
+    /// Maximum number of runs displayed in the table.
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(usize).range(1..=200))]
+    pub limit: usize,
+
+    /// Print matching history as a JSON array.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct StatsArgs {
+    /// Analyze results from the last N days.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3650))]
+    pub days: u64,
+
+    /// Print the history summary as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+fn parse_stability_duration(value: &str) -> Result<u64, String> {
+    let seconds = parse_time(value, 1_000)? / 1_000;
+    if !(10..=86_400).contains(&seconds) {
+        return Err("stability duration must be between 10s and 24h".to_string());
+    }
+    Ok(seconds)
+}
+
+fn parse_probe_interval(value: &str) -> Result<u64, String> {
+    let milliseconds = parse_time(value, 1)?;
+    if !(500..=10_000).contains(&milliseconds) {
+        return Err("probe interval must be between 500ms and 10s".to_string());
+    }
+    Ok(milliseconds)
+}
+
+fn parse_time(value: &str, bare_multiplier: u64) -> Result<u64, String> {
+    let value = value.trim().to_ascii_lowercase();
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
+        (number, 1_u64)
+    } else if let Some(number) = value.strip_suffix('s') {
+        (number, 1_000)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60_000)
+    } else if let Some(number) = value.strip_suffix('h') {
+        (number, 3_600_000)
+    } else {
+        (value.as_str(), bare_multiplier)
+    };
+
+    number
+        .trim()
+        .parse::<u64>()
+        .map(|number| number.saturating_mul(multiplier))
+        .map_err(|_| format!("invalid duration: {value}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_human_stability_duration() {
+        assert_eq!(parse_stability_duration("90s").unwrap(), 90);
+        assert_eq!(parse_stability_duration("5m").unwrap(), 300);
+    }
+
+    #[test]
+    fn parses_probe_interval() {
+        assert_eq!(parse_probe_interval("750ms").unwrap(), 750);
+        assert_eq!(parse_probe_interval("2s").unwrap(), 2_000);
+    }
 }
