@@ -281,6 +281,7 @@ fn inspect_linux(interface: Option<&str>) -> Result<WifiSnapshot> {
     })
 }
 
+#[cfg(any(test, unix))]
 fn dbm_to_percent(dbm: f64) -> f64 {
     ((dbm + 100.0) * 2.0).clamp(0.0, 100.0)
 }
