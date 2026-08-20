@@ -31,7 +31,7 @@ fn draw_full(frame: &mut Frame, app: &App) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    let lower_height = if app.is_complete() { 6 } else { 3 };
+    let lower_height = if app.is_complete() { 9 } else { 4 };
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -56,7 +56,7 @@ fn draw_full(frame: &mut Frame, app: &App) {
 
     render_metrics(frame, app, vertical[2]);
     if app.is_complete() {
-        frame.render_widget(completion_panel(app), vertical[3]);
+        render_completion_panel(frame, app, vertical[3]);
     } else {
         render_sparkline(frame, app, vertical[3], accent);
     }
@@ -148,29 +148,30 @@ fn render_metrics(frame: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     let left = Paragraph::new(vec![
-        metric_line("DOWNLOAD", format_speed(app.download_mbps)),
-        metric_line("PING", format_ms(app.ping_ms)),
-        metric_line("LOADED ↓", format_ms(app.download_loaded_ms)),
+        metric_line("DOWNLOAD", format_speed(app.download_mbps), DOWNLOAD_ACCENT),
+        metric_line("PING", format_ms(app.ping_ms), Color::White),
+        metric_line("LOADED ↓", format_ms(app.download_loaded_ms), Color::White),
     ]);
     let right = Paragraph::new(vec![
-        metric_line("UPLOAD", format_speed(app.upload_mbps)),
-        metric_line("JITTER", format_ms(app.jitter_ms)),
-        metric_line("LOADED ↑", format_ms(app.upload_loaded_ms)),
+        metric_line("UPLOAD", format_speed(app.upload_mbps), UPLOAD_ACCENT),
+        metric_line("JITTER", format_ms(app.jitter_ms), Color::White),
+        metric_line("LOADED ↑", format_ms(app.upload_loaded_ms), Color::White),
     ]);
     frame.render_widget(left, metrics[0]);
     frame.render_widget(right, metrics[1]);
 }
 
 fn render_sparkline(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
-    let data: Vec<u64> = app
-        .samples
-        .iter()
-        .map(|value| value.max(0.0) as u64)
-        .collect();
+    let width = area.width.saturating_sub(2) as usize;
+    let data = resample_sparkline(&app.samples, width);
     let sparkline = Sparkline::default()
         .block(
             Block::default()
-                .borders(Borders::TOP)
+                .title(Line::from(Span::styled(
+                    " THROUGHPUT TRACE ",
+                    Style::default().fg(Color::DarkGray),
+                )))
+                .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
         .data(&data)
@@ -178,109 +179,183 @@ fn render_sparkline(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
     frame.render_widget(sparkline, area);
 }
 
-fn completion_panel(app: &App) -> Paragraph<'static> {
+fn resample_sparkline(samples: &std::collections::VecDeque<f64>, width: usize) -> Vec<u64> {
+    if samples.is_empty() || width == 0 {
+        return Vec::new();
+    }
+    let source = samples.iter().copied().collect::<Vec<_>>();
+    if source.len() == 1 {
+        return vec![source[0].max(0.0) as u64; width];
+    }
+
+    (0..width)
+        .map(|column| {
+            let position = if width <= 1 {
+                0.0
+            } else {
+                column as f64 * (source.len() - 1) as f64 / (width - 1) as f64
+            };
+            let left = position.floor() as usize;
+            let right = position.ceil() as usize;
+            let fraction = position - left as f64;
+            let value = source[left] * (1.0 - fraction) + source[right] * fraction;
+            value.max(0.0) as u64
+        })
+        .collect()
+}
+
+fn render_completion_panel(frame: &mut Frame, app: &App, area: Rect) {
     let Some(result) = app.result.as_ref() else {
-        return legacy_completion(app);
+        frame.render_widget(legacy_completion(app), area);
+        return;
     };
     let Some(analysis) = result.analysis.as_ref() else {
-        return legacy_completion(app);
+        frame.render_widget(legacy_completion(app), area);
+        return;
     };
 
     let quality = &analysis.quality;
+    let quality_color = if quality.is_s_tier() {
+        S_TIER_ACCENT
+    } else {
+        grade_color(quality.grade)
+    };
     let buffer_grade = quality.bufferbloat.grade.map_or("—", QualityGrade::label);
     let jitter_p95 = analysis
         .latency
         .jitter
         .as_ref()
         .map_or(0.0, |jitter| jitter.p95_ms);
-    let finding = quality.findings.first();
-    let quality_color = if quality.is_s_tier() {
-        S_TIER_ACCENT
-    } else {
-        grade_color(quality.grade)
-    };
 
-    let mut quality_line = vec![Span::styled(
-        format!(" QUALITY {}/100 {} ", quality.score, quality.grade.label()),
-        Style::default()
-            .fg(quality_color)
-            .add_modifier(Modifier::BOLD),
-    )];
-    if quality.is_s_tier() {
-        quality_line.push(Span::styled(
-            " ◆ S-TIER ",
-            Style::default()
-                .fg(S_TIER_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    quality_line.push(Span::styled(
-        format!("{} confidence", quality.confidence.label()),
-        Style::default().fg(Color::DarkGray),
-    ));
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(3)])
+        .split(area);
+    let cards = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(vertical[0]);
 
-    let mut lines = vec![
-        Line::from(quality_line),
+    let tier = quality
+        .tier_label()
+        .map_or(String::new(), |tier| format!("  ◆ {tier}"));
+    let quality_card = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled(" Gaming ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                quality.workloads.gaming.label(),
-                Style::default().fg(grade_color(quality.workloads.gaming)),
+                format!("{}/100 {}", quality.score, quality.grade.label()),
+                Style::default()
+                    .fg(quality_color)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("   Calls ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                quality.workloads.video_calls.label(),
-                Style::default().fg(grade_color(quality.workloads.video_calls)),
-            ),
-            Span::styled("   Streaming ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                quality.workloads.streaming.label(),
-                Style::default().fg(grade_color(quality.workloads.streaming)),
-            ),
-            Span::styled("   Cloud gaming ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                quality.workloads.cloud_gaming.label(),
-                Style::default().fg(grade_color(quality.workloads.cloud_gaming)),
-            ),
+            Span::styled(tier, Style::default().fg(S_TIER_ACCENT)),
         ]),
-        Line::from(format!(
-            " tails  idle p95 {:.1} ms  p99 {:.1} ms  •  jitter p95 {:.1} ms",
-            analysis.latency.idle.p95_ms, analysis.latency.idle.p99_ms, jitter_p95
+        Line::from(Span::styled(
+            format!("{} confidence", quality.confidence.label()),
+            Style::default().fg(Color::DarkGray),
         )),
         Line::from(format!(
-            " bufferbloat {buffer_grade}  ↓ {}  ↑ {}",
+            "Bufferbloat {buffer_grade}   ↓ {}   ↑ {}",
             format_delta(quality.bufferbloat.download_increase_ms),
             format_delta(quality.bufferbloat.upload_increase_ms)
         )),
-    ];
+    ])
+    .block(card_block(" QUALITY ", quality_color));
 
-    if let Some(finding) = finding {
+    let workloads = Paragraph::new(vec![
+        workload_line("Gaming", quality.workloads.gaming),
+        workload_line("Calls", quality.workloads.video_calls),
+        workload_line("Streaming", quality.workloads.streaming),
+    ])
+    .block(card_block(" WORKLOADS ", Color::Gray));
+
+    let tails = Paragraph::new(vec![
+        Line::from(format!(
+            "Idle p95      {:>6.1} ms",
+            analysis.latency.idle.p95_ms
+        )),
+        Line::from(format!(
+            "Idle p99      {:>6.1} ms",
+            analysis.latency.idle.p99_ms
+        )),
+        Line::from(format!("Jitter p95    {:>6.1} ms", jitter_p95)),
+    ])
+    .block(card_block(" TAIL LATENCY ", Color::Gray));
+
+    frame.render_widget(quality_card, cards[0]);
+    frame.render_widget(workloads, cards[1]);
+    frame.render_widget(tails, cards[2]);
+
+    let diagnosis = if let Some(finding) = quality.findings.first() {
         let recommendation = finding
             .recommendation
             .as_deref()
             .unwrap_or(finding.evidence.as_str());
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {} ", finding.severity.label()),
-                Style::default()
-                    .fg(severity_color(finding.severity))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{} — {recommendation}", finding.title),
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!(" {} ", finding.severity.label()),
+                    Style::default()
+                        .fg(severity_color(finding.severity))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    finding.title.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                format!("  {recommendation}"),
                 Style::default().fg(Color::Gray),
-            ),
-        ]));
-    }
+            )),
+        ])
+    } else {
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                " HEALTHY ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "  No material network-quality finding was detected in this run.",
+                Style::default().fg(Color::Gray),
+            )),
+        ])
+    };
+    frame.render_widget(
+        diagnosis
+            .block(card_block(" DIAGNOSIS ", Color::Gray))
+            .wrap(Wrap { trim: true }),
+        vertical[1],
+    );
+}
 
-    Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true })
+fn card_block(title: &'static str, color: Color) -> Block<'static> {
+    Block::default()
+        .title(Line::from(Span::styled(
+            title,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+}
+
+fn workload_line(label: &'static str, grade: QualityGrade) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:<13}"), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            grade.label(),
+            Style::default()
+                .fg(grade_color(grade))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
 }
 
 fn compact_quality(app: &App) -> Paragraph<'static> {
@@ -393,13 +468,16 @@ fn severity_color(severity: FindingSeverity) -> Color {
     }
 }
 
-fn metric_line(label: &'static str, value: String) -> Line<'static> {
+fn metric_line(label: &'static str, value: String, color: Color) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!(" {label:<10}"),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(value, Style::default().fg(Color::White)),
+        Span::styled(
+            value,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
     ])
 }
 
