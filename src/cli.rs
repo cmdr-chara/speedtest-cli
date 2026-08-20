@@ -1,4 +1,7 @@
-use std::{net::IpAddr, path::PathBuf};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -8,12 +11,26 @@ pub enum OutputFormat {
     Csv,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum InternetBackendArg {
+    Cloudflare,
+    Librespeed,
+}
+
 #[derive(Debug, Clone, Parser)]
 #[command(name = "speedtest")]
 #[command(version, about = "A fast, polished terminal network quality analyzer")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// Internet measurement backend.
+    #[arg(long, value_enum, default_value_t = InternetBackendArg::Cloudflare)]
+    pub backend: InternetBackendArg,
+
+    /// Custom LibreSpeed base URL. Standard garbage.php/empty.php paths are assumed.
+    #[arg(long, value_name = "URL")]
+    pub librespeed_server: Option<String>,
 
     /// Number of concurrent transfer streams.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=16))]
@@ -60,8 +77,18 @@ pub enum Command {
     Dns(DnsArgs),
     /// Compare two saved results, or the two most recent history entries.
     Compare(CompareArgs),
-    /// Diagnose routing, DNS, IP connectivity, HTTPS, and optionally throughput.
+    /// Diagnose routing, DNS, IP connectivity, HTTPS, Wi-Fi, and optionally throughput.
     Doctor(DoctorArgs),
+    /// Measure real ICMP echo response loss and RTT distribution.
+    Loss(LossArgs),
+    /// Inspect the active Wi-Fi link using native platform tooling.
+    Wifi(WifiArgs),
+    /// Cross-check Cloudflare and LibreSpeed measurements.
+    Verify(VerifyArgs),
+    /// Run the built-in self-hosted LAN speed-test server.
+    Serve(ServeArgs),
+    /// Measure a self-hosted LAN endpoint.
+    Lan(LanArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -191,11 +218,21 @@ pub enum DnsBenchmarkProfileArg {
     All,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DnsProtocolArg {
+    Udp,
+    Doh,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct DnsBenchmarkArgs {
     /// Resolver league to benchmark.
     #[arg(long, value_enum, default_value_t = DnsBenchmarkProfileArg::Fastest)]
     pub profile: DnsBenchmarkProfileArg,
+
+    /// DNS transport to benchmark.
+    #[arg(long, value_enum, default_value_t = DnsProtocolArg::Udp)]
+    pub protocol: DnsProtocolArg,
 
     /// Queries sent to each resolver profile.
     #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u16).range(3..=100))]
@@ -297,6 +334,76 @@ pub struct DoctorArgs {
     pub interface: Option<String>,
 
     /// Print the complete diagnostic report as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct LossArgs {
+    /// ICMP echo target. Defaults to Cloudflare's public resolver address.
+    #[arg(long, default_value = "1.1.1.1")]
+    pub target: String,
+
+    /// Number of ICMP echo requests.
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(3..=200))]
+    pub count: u16,
+
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WifiArgs {
+    /// Wireless interface/device to inspect. Defaults to platform auto-detection.
+    #[arg(long)]
+    pub interface: Option<String>,
+
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerifyArgs {
+    /// Seconds for each download/upload phase on each backend.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(3..=15))]
+    pub duration: u64,
+
+    /// Concurrent streams per backend.
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=8))]
+    pub streams: u8,
+
+    /// Optional custom LibreSpeed base URL.
+    #[arg(long, value_name = "URL")]
+    pub librespeed_server: Option<String>,
+
+    /// Print the report as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ServeArgs {
+    /// Address for the self-hosted LAN endpoint.
+    #[arg(long, default_value = "0.0.0.0:9876")]
+    pub bind: SocketAddr,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct LanArgs {
+    /// Self-hosted endpoint, for example 192.168.1.50:9876.
+    pub server: SocketAddr,
+
+    /// Seconds for each LAN throughput phase.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(2..=30))]
+    pub duration: u64,
+
+    /// Concurrent LAN transfer streams.
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=16))]
+    pub streams: u8,
+
+    /// Print the canonical result as JSON.
     #[arg(long)]
     pub json: bool,
 }
