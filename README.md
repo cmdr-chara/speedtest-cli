@@ -2,7 +2,7 @@
 
 A fast, polished terminal network quality analyzer written in Rust.
 
-It measures throughput and latency, then explains how the connection behaves under load: tail latency, jitter, bufferbloat, workload grades, and concrete diagnostic findings. The measurement engine, analysis model, terminal UI, and persistence layer are intentionally separated so each can evolve independently.
+It measures throughput and latency, then explains how the connection behaves under load: tail latency, jitter, bufferbloat, workload grades, stability, historical trends, and concrete diagnostic findings. The measurement engine, analysis model, terminal UI, and persistence layer are intentionally separated so each can evolve independently.
 
 ## Preview
 
@@ -21,11 +21,10 @@ It measures throughput and latency, then explains how the connection behaves und
 │   PING        8.2 ms               JITTER    1.1 ms               │
 │   LOADED ↓   19.4 ms               LOADED ↑ 82.7 ms               │
 │                                                                   │
-│ QUALITY 88/100 A  high confidence                                 │
-│ Gaming A   Calls B   Streaming A+   Cloud gaming A                │
+│ QUALITY 99/100 A+  ◆ S-TIER  high confidence                      │
+│ Gaming A+  Calls A   Streaming A+  Cloud gaming A                 │
 │ tails  idle p95 10.1 ms  p99 11.0 ms  •  jitter p95 2.0 ms       │
-│ bufferbloat C  ↓ +11.2 ms  ↑ +74.5 ms                             │
-│ WARNING High upload bufferbloat — enable SQM/CAKE/FQ-CoDel        │
+│ bufferbloat A  ↓ +11.2 ms  ↑ +6.5 ms                              │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -37,9 +36,13 @@ It measures throughput and latency, then explains how the connection behaves und
 - Download and upload throughput sampling
 - **p95/p99 latency and jitter tails** from retained probe distributions
 - **Transparent 0–100 network quality score** with A+–F grade and confidence level
+- Rare **◆ S-TIER** distinction for exceptional high-confidence runs
 - **Bufferbloat grading** with measured download/upload latency increase
 - **Gaming, video-call, streaming, and cloud-gaming grades**
 - **Human-readable diagnostic findings and recommendations**
+- **Long-running stability mode** with rolling latency trace, tail latency, probe availability, and failure bursts
+- **Historical run browser** with quality/S-tier context and terminal sparkline
+- **Historical statistics and anomaly detection** against the saved baseline
 - Layered animated Ratatui speedometer and live sparkline
 - 240 Hz speedometer physics with a configurable 30–240 FPS render cap
 - JSON output for scripts
@@ -53,9 +56,9 @@ Packet loss is intentionally nullable rather than depending on a deprecated publ
 
 ## Network intelligence
 
-The v0.2 analysis is deliberately **explainable rather than authoritative**. It uses documented-in-code heuristic bands over the measurements collected by this client. The score is not an industry standard and is not presented as one.
+The quality analysis is deliberately **explainable rather than authoritative**. It uses documented-in-code heuristic bands over the measurements collected by this client. The score is not an industry standard and is not presented as one.
 
-A completed result contains:
+A completed result can include:
 
 ```text
 Quality            88/100 A
@@ -73,6 +76,69 @@ Recommendation     enable SQM/CAKE/FQ-CoDel or shape upstream traffic
 ```
 
 Confidence is based on measurement coverage. If loaded-latency probes are missing or sparse, the client lowers confidence and leaves the bufferbloat grade unavailable rather than fabricating one.
+
+## Stability mode
+
+`speedtest stability` continuously sends conservative zero-byte HTTP probes instead of repeatedly saturating the link. It is designed to expose latency spikes and short disruptions that a normal short speed test can miss.
+
+```bash
+speedtest stability
+speedtest stability --duration 5m
+speedtest stability --duration 5m --interval 750ms
+speedtest stability --plain
+speedtest stability --json
+speedtest stability --output stability.json
+```
+
+The default run lasts one minute with one probe per second. Supported durations range from 10 seconds to 24 hours, and probe intervals range from 500 ms to 10 seconds.
+
+Example plain result:
+
+```text
+Network Stability
+  Duration:       300s
+  Probe interval: 1000 ms
+  Probes:         300 successful / 0 failed
+  Availability:   100.00% (HTTP probe availability, not packet loss)
+  Failure bursts: 0
+  Median:         8.3 ms
+  p95 / p99:      10.8 / 14.2 ms
+  Max:            18.1 ms
+  Jitter p95:     2.2 ms
+  Stability:      99/100 A+
+  Tier:           ◆ S-TIER
+```
+
+**Probe availability is not packet loss.** A failed HTTP probe may result from endpoint throttling, a transient route/server issue, or the local network. Consecutive failures are grouped into failure bursts so one disruption is not presented as several unrelated incidents.
+
+## History and stats
+
+Completed normal speed tests are already saved locally. v0.3 makes that history queryable without external scripts.
+
+```bash
+speedtest history
+speedtest history --days 7
+speedtest history --days 30 --limit 50
+speedtest history --json
+
+speedtest stats
+speedtest stats --days 90
+speedtest stats --json
+```
+
+`history` displays recent runs newest-first, including download/upload, idle latency, quality grade, and S-tier status when available.
+
+`stats` calculates:
+
+- median and best download/upload
+- median and p95 idle latency
+- median quality score
+- S-tier run count
+- an overall download trend
+- a Unicode throughput history sparkline
+- latest-run anomaly detection against the previous saved baseline
+
+Anomaly detection requires at least five prior runs before evaluating the latest result. It currently flags material download/upload regressions, significantly elevated idle latency, and large quality-score drops.
 
 ## Installation
 
@@ -132,6 +198,7 @@ speedtest
 ## Usage
 
 ```bash
+# Normal speed / network-quality analysis
 speedtest
 speedtest --fps 144
 speedtest --plain
@@ -140,11 +207,18 @@ speedtest --streams 4 --duration 10
 speedtest --output result.json
 speedtest --output result.csv --format csv
 speedtest --no-save
+
+# Stability
+speedtest stability --duration 5m --interval 1s
+
+# Historical intelligence
+speedtest history --days 30
+speedtest stats --days 30
 ```
 
 For development from a checkout, replace `speedtest` with `cargo run --release --`.
 
-### CLI options
+### Normal-test options
 
 ```text
 --streams <N>       Concurrent transfer streams (default: 2)
@@ -163,7 +237,7 @@ The Cloudflare backend deliberately defaults to two streams and long transfer bo
 
 ## Result model
 
-The existing summary fields remain stable and v0.2 adds an optional `analysis` object, so older saved results can still be deserialized.
+The existing summary fields remain stable and newer releases add an optional `analysis` object, so older saved results can still be deserialized.
 
 ```json
 {
@@ -223,9 +297,14 @@ Completed tests are saved to the platform data directory unless `--no-save` is u
 ```text
 speedtest/
 ├── history.jsonl
-└── results/
-    ├── 20260819T170000Z.json
-    └── ...
+├── results/
+│   ├── 20260819T170000Z.json
+│   └── ...
+└── stability/
+    ├── history.jsonl
+    └── results/
+        ├── 20260820T105000Z.json
+        └── ...
 ```
 
 ## Architecture
@@ -238,8 +317,10 @@ src/
 ├── engine/
 │   ├── mod.rs
 │   └── cloudflare.rs
+├── history.rs
 ├── model/
 │   └── mod.rs
+├── stability.rs
 ├── storage/
 │   └── mod.rs
 ├── tui/
@@ -248,12 +329,13 @@ src/
 │   ├── speedometer.rs
 │   ├── speedometer/
 │   │   └── gauge.rs
+│   ├── stability.rs
 │   └── view.rs
 ├── lib.rs
 └── main.rs
 ```
 
-The UI never measures the network directly. It consumes `EngineEvent`s and renders them. The analysis layer consumes completed measurements and sample distributions. The storage layer only consumes `TestResult`, which keeps scripting and future alternate frontends straightforward.
+The normal TUI never measures the network directly; it consumes `EngineEvent`s. Stability follows the same event-driven approach with `StabilityEvent`s. History analysis consumes persisted canonical results. This keeps measurement, rendering, analysis, and storage independently testable.
 
 ## Releases
 
@@ -261,17 +343,17 @@ The release workflow reads the package version from `Cargo.toml`. When a commit 
 
 ## Accuracy notes
 
-This is an independent CLI, not an official Cloudflare client. Network measurements vary with routing, congestion, Wi-Fi conditions, endpoint behavior, protocol overhead, and test methodology. Percentiles become more informative with more samples; v0.2 uses 24 idle probes and retains loaded-latency samples throughout both transfer phases. Quality and workload grades are local heuristics built from those measurements, not standardized certifications.
+This is an independent CLI, not an official Cloudflare client. Network measurements vary with routing, congestion, Wi-Fi conditions, endpoint behavior, protocol overhead, and test methodology. Percentiles become more informative with more samples. Quality, workload, stability, trend, and anomaly grades are local heuristics built from the measurements collected by this client, not standardized certifications.
+
+Stability mode deliberately avoids calling failed HTTP probes packet loss. A proper packet-loss implementation remains a separate future measurement problem.
 
 ## Roadmap
 
-- Historical `speedtest history` and `speedtest stats` commands
-- Baseline and anomaly detection across saved results
-- Long-running stability tests with spike/loss distributions
 - Adaptive stream count and payload sizing
 - Pluggable measurement backends / server discovery
 - Ethernet/Wi-Fi, VPN, and IPv4/IPv6 comparison workflows
-- Better packet-loss implementation without deprecated infrastructure
+- Dedicated packet-loss implementation without deprecated infrastructure
+- Local/self-hosted LAN measurement mode
 - Configurable but restrained themes
 - Homebrew and WinGet packages
 
