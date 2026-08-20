@@ -438,7 +438,8 @@ pub struct DnsBackup {
 }
 
 pub fn provider(id: &str) -> Option<&'static DnsProvider> {
-    let normalized = match id.to_ascii_lowercase().as_str() {
+    let lowercase = id.to_ascii_lowercase();
+    let normalized = match lowercase.as_str() {
         "cloudflare-standard" => "cloudflare",
         "google-public-dns" => "google",
         "quad9-secure" => "quad9",
