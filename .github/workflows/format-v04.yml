@@ -20,14 +20,28 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Apply provider lookup lifetime fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/dns/mod.rs")
+          source = path.read_text()
+          old = "    let normalized = match id.to_ascii_lowercase().as_str() {"
+          new = "    let lowercase = id.to_ascii_lowercase();\n    let normalized = match lowercase.as_str() {"
+          if old in source:
+              path.write_text(source.replace(old, new, 1))
+          PY
+
       - name: Format Rust sources
         run: cargo fmt --all
 
-      - name: Commit formatter output
+      - name: Commit branch corrections
         shell: bash
         run: |
           if git diff --quiet -- '*.rs'; then
-            echo "Rust sources already formatted."
+            echo "Rust sources already corrected and formatted."
             exit 0
           fi
 
@@ -41,5 +55,5 @@ jobs:
             src/doctor.rs \
             src/main.rs \
             src/storage/mod.rs
-          git commit -m "Format v0.4 Rust sources"
+          git commit -m "Fix DNS provider lookup lifetime"
           git push origin HEAD:agent/v0.4-dns-doctor-compare
