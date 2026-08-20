@@ -1,0 +1,45 @@
+name: Format v0.4 branch
+
+on:
+  push:
+    branches:
+      - agent/v0.4-dns-doctor-compare
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v0.4-dns-doctor-compare
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Format Rust sources
+        run: cargo fmt --all
+
+      - name: Commit formatter output
+        shell: bash
+        run: |
+          if git diff --quiet -- '*.rs'; then
+            echo "Rust sources already formatted."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            src/compare.rs \
+            src/dns/mod.rs \
+            src/dns/system.rs \
+            src/dns_custom.rs \
+            src/doctor.rs \
+            src/main.rs \
+            src/storage/mod.rs
+          git commit -m "Format v0.4 Rust sources"
+          git push origin HEAD:agent/v0.4-dns-doctor-compare
