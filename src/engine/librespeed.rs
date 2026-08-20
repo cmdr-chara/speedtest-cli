@@ -148,12 +148,8 @@ impl LibreSpeedEngine {
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Upload));
         let (upload, upload_loaded) = self.measure_upload(&server, &tx).await?;
 
-        let latency = analysis::summarize_latency(
-            &idle_samples,
-            &download_loaded,
-            &upload_loaded,
-            None,
-        );
+        let latency =
+            analysis::summarize_latency(&idle_samples, &download_loaded, &upload_loaded, None);
         let network_analysis = analysis::build_network_analysis(
             &idle_samples,
             &download_loaded,
@@ -205,7 +201,9 @@ impl LibreSpeedEngine {
         while let Some(result) = workers.join_next().await {
             result.context("LibreSpeed download worker panicked")??;
         }
-        let loaded_samples = loaded.await.context("LibreSpeed loaded-latency task panicked")?;
+        let loaded_samples = loaded
+            .await
+            .context("LibreSpeed loaded-latency task panicked")?;
         let bytes = total.load(Ordering::Relaxed);
         if bytes == 0 {
             return Err(anyhow!("LibreSpeed server delivered no download data"));
@@ -248,7 +246,9 @@ impl LibreSpeedEngine {
         while let Some(result) = workers.join_next().await {
             result.context("LibreSpeed upload worker panicked")??;
         }
-        let loaded_samples = loaded.await.context("LibreSpeed loaded-latency task panicked")?;
+        let loaded_samples = loaded
+            .await
+            .context("LibreSpeed loaded-latency task panicked")?;
         let bytes = total.load(Ordering::Relaxed);
         if bytes == 0 {
             return Err(anyhow!("LibreSpeed server accepted no upload data"));
@@ -353,14 +353,21 @@ async fn select_public_server(client: &Client) -> Result<ResolvedServer> {
         .ok_or_else(|| anyhow!("no built-in LibreSpeed server was reachable"))
 }
 
-async fn measure_latency(client: &Client, server: &ResolvedServer, count: usize) -> Result<Vec<f64>> {
+async fn measure_latency(
+    client: &Client,
+    server: &ResolvedServer,
+    count: usize,
+) -> Result<Vec<f64>> {
     let mut samples = Vec::with_capacity(count);
     for index in 0..count {
         let url = server.base.join(&server.ping_path)?;
         let started = Instant::now();
         let response = client
             .get(url)
-            .query(&[("cors", "true"), ("r", &format!("{index}-{}", Utc::now().timestamp_micros()))])
+            .query(&[
+                ("cors", "true"),
+                ("r", &format!("{index}-{}", Utc::now().timestamp_micros())),
+            ])
             .header("cache-control", "no-store")
             .send()
             .await
@@ -396,8 +403,10 @@ async fn download_worker(
             value = request => value.context("LibreSpeed download request failed")?,
             _ = sleep_until(deadline) => break,
         };
-        if matches!(response.status(), StatusCode::PAYLOAD_TOO_LARGE | StatusCode::FORBIDDEN)
-            && chunk_mb > 4
+        if matches!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE | StatusCode::FORBIDDEN
+        ) && chunk_mb > 4
         {
             chunk_mb = (chunk_mb / 2).max(4);
             continue;
@@ -505,7 +514,9 @@ mod tests {
     #[test]
     fn public_server_registry_has_global_coverage() {
         assert!(PUBLIC_SERVERS.len() >= 6);
-        assert!(PUBLIC_SERVERS.iter().any(|server| server.base.contains("librespeed.org")));
+        assert!(PUBLIC_SERVERS
+            .iter()
+            .any(|server| server.base.contains("librespeed.org")));
     }
 
     #[test]

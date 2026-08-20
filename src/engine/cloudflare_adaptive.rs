@@ -77,12 +77,8 @@ impl CloudflareEngine {
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Upload));
         let (upload, upload_loaded) = self.measure_upload(&tx).await?;
 
-        let latency = analysis::summarize_latency(
-            &idle_samples,
-            &download_loaded,
-            &upload_loaded,
-            None,
-        );
+        let latency =
+            analysis::summarize_latency(&idle_samples, &download_loaded, &upload_loaded, None);
         let network_analysis = analysis::build_network_analysis(
             &idle_samples,
             &download_loaded,
@@ -119,7 +115,10 @@ impl CloudflareEngine {
                 .await
                 .context("Cloudflare warm-up request failed")?;
             if response.status().is_success() {
-                let _ = response.bytes().await.context("Cloudflare warm-up body failed")?;
+                let _ = response
+                    .bytes()
+                    .await
+                    .context("Cloudflare warm-up body failed")?;
                 return Ok(());
             }
             if !is_size_rejection(response.status()) {
@@ -170,7 +169,10 @@ impl CloudflareEngine {
             ));
         }
         emit_loaded(&loaded_samples, TestPhase::Download, tx);
-        Ok((throughput(bytes, self.config.phase_duration), loaded_samples))
+        Ok((
+            throughput(bytes, self.config.phase_duration),
+            loaded_samples,
+        ))
     }
 
     async fn measure_upload(
@@ -203,7 +205,10 @@ impl CloudflareEngine {
             ));
         }
         emit_loaded(&loaded_samples, TestPhase::Upload, tx);
-        Ok((throughput(bytes, self.config.phase_duration), loaded_samples))
+        Ok((
+            throughput(bytes, self.config.phase_duration),
+            loaded_samples,
+        ))
     }
 
     async fn sample_transfer(
@@ -393,7 +398,10 @@ async fn latency_probe(client: &Client) -> Result<f64> {
             let response = response
                 .error_for_status()
                 .context("Cloudflare latency endpoint returned an error")?;
-            let _ = response.bytes().await.context("Cloudflare latency body failed")?;
+            let _ = response
+                .bytes()
+                .await
+                .context("Cloudflare latency body failed")?;
             return Ok(started.elapsed().as_secs_f64() * 1000.0);
         }
     }
@@ -410,7 +418,10 @@ async fn measure_loaded_latency(client: Client, deadline: Instant) -> Vec<f64> {
         if remaining.is_zero() {
             break;
         }
-        let probe = tokio::time::timeout(remaining.min(Duration::from_secs(3)), latency_probe(&client));
+        let probe = tokio::time::timeout(
+            remaining.min(Duration::from_secs(3)),
+            latency_probe(&client),
+        );
         if let Ok(Ok(ms)) = probe.await {
             samples.push(ms);
         }
@@ -451,11 +462,7 @@ fn rate_limit_delay(response: &Response, attempt: usize) -> Duration {
         .min(MAX_RATE_LIMIT_DELAY)
 }
 
-fn emit_loaded(
-    samples: &[f64],
-    phase: TestPhase,
-    tx: &UnboundedSender<EngineEvent>,
-) {
+fn emit_loaded(samples: &[f64], phase: TestPhase, tx: &UnboundedSender<EngineEvent>) {
     if let Some(ms) = analysis::distribution(samples).map(|stats| stats.median_ms) {
         let _ = tx.send(EngineEvent::LoadedLatency { phase, ms });
     }

@@ -3,7 +3,10 @@ use std::{sync::atomic::Ordering, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use reqwest::Client;
-use tokio::{task::JoinSet, time::{timeout, Instant}};
+use tokio::{
+    task::JoinSet,
+    time::{timeout, Instant},
+};
 
 use crate::analysis;
 
@@ -117,7 +120,10 @@ async fn query_doh(client: &Client, endpoint: &str, domain: &str) -> Result<f64>
     .context("DoH query timed out")??
     .error_for_status()
     .context("DoH endpoint returned an error")?;
-    let body = response.bytes().await.context("failed to read DoH response")?;
+    let body = response
+        .bytes()
+        .await
+        .context("failed to read DoH response")?;
     super::validate_response(&body, query_id)?;
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
@@ -140,9 +146,7 @@ fn score_relative(raw: RawBenchmark, best_median: f64, best_p95: f64) -> DnsProv
         .round()
         .clamp(0.0, 100.0) as u8;
     let grade = grade_for_score(score);
-    let s_tier = score >= 98
-        && success_rate_percent >= 100.0
-        && median <= best_median * 1.10 + 0.5;
+    let s_tier = score >= 98 && success_rate_percent >= 100.0 && median <= best_median * 1.10 + 0.5;
 
     DnsProviderBenchmark {
         provider_id: raw.provider_id,

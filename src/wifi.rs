@@ -37,7 +37,9 @@ pub fn inspect(interface: Option<&str>) -> Result<WifiSnapshot> {
         return inspect_linux(interface);
     }
     #[allow(unreachable_code)]
-    Ok(unavailable("Wi-Fi diagnostics are not implemented on this platform"))
+    Ok(unavailable(
+        "Wi-Fi diagnostics are not implemented on this platform",
+    ))
 }
 
 fn unavailable(detail: impl Into<String>) -> WifiSnapshot {
@@ -62,7 +64,9 @@ fn inspect_windows(interface: Option<&str>) -> Result<WifiSnapshot> {
         .output()
         .context("failed to run `netsh wlan show interfaces`")?;
     if !output.status.success() {
-        return Ok(unavailable("Windows WLAN service did not expose an active Wi-Fi interface"));
+        return Ok(unavailable(
+            "Windows WLAN service did not expose an active Wi-Fi interface",
+        ));
     }
     let text = String::from_utf8_lossy(&output.stdout);
     let requested = interface.map(str::to_ascii_lowercase);
@@ -94,7 +98,8 @@ fn inspect_windows(interface: Option<&str>) -> Result<WifiSnapshot> {
     let channel = field(&block, "Channel").and_then(|value| value.parse::<u32>().ok());
     let radio = field(&block, "Radio type");
     let receive = field(&block, "Receive rate (Mbps)").and_then(|value| value.parse::<f64>().ok());
-    let transmit = field(&block, "Transmit rate (Mbps)").and_then(|value| value.parse::<f64>().ok());
+    let transmit =
+        field(&block, "Transmit rate (Mbps)").and_then(|value| value.parse::<f64>().ok());
     let link_mbps = match (receive, transmit) {
         (Some(rx), Some(tx)) => Some(rx.min(tx)),
         (Some(value), None) | (None, Some(value)) => Some(value),
@@ -134,7 +139,8 @@ fn block_matches(lines: &[String], requested: Option<&str>) -> bool {
 #[cfg(target_os = "macos")]
 fn inspect_macos(interface: Option<&str>) -> Result<WifiSnapshot> {
     let device = interface.unwrap_or("en0");
-    let airport_path = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
+    let airport_path =
+        "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
     if std::path::Path::new(airport_path).exists() {
         let output = Command::new(airport_path)
             .arg("-I")
@@ -160,7 +166,8 @@ fn inspect_macos(interface: Option<&str>) -> Result<WifiSnapshot> {
                 channel,
                 link_mbps,
                 radio: None,
-                detail: "macOS AirPort diagnostic data; link rate is not Internet throughput.".to_string(),
+                detail: "macOS AirPort diagnostic data; link rate is not Internet throughput."
+                    .to_string(),
             });
         }
     }
@@ -211,7 +218,9 @@ fn inspect_linux(interface: Option<&str>) -> Result<WifiSnapshot> {
         .output()
         .context("failed to query Linux Wi-Fi link")?;
     if !link.status.success() {
-        return Ok(unavailable(format!("{device} is not associated with a Wi-Fi network")));
+        return Ok(unavailable(format!(
+            "{device} is not associated with a Wi-Fi network"
+        )));
     }
     let text = String::from_utf8_lossy(&link.stdout);
     let ssid = text
@@ -234,14 +243,20 @@ fn inspect_linux(interface: Option<&str>) -> Result<WifiSnapshot> {
             .strip_prefix("freq: ")
             .and_then(|value| value.parse::<u32>().ok())
     });
-    let band = frequency.map(|mhz| match mhz {
-        2400..=2500 => "2.4 GHz",
-        4900..=5900 => "5 GHz",
-        5925..=7125 => "6 GHz",
-        _ => "unknown",
-    }.to_string());
+    let band = frequency.map(|mhz| {
+        match mhz {
+            2400..=2500 => "2.4 GHz",
+            4900..=5900 => "5 GHz",
+            5925..=7125 => "6 GHz",
+            _ => "unknown",
+        }
+        .to_string()
+    });
 
-    let info = Command::new("iw").args(["dev", &device, "info"]).output().ok();
+    let info = Command::new("iw")
+        .args(["dev", &device, "info"])
+        .output()
+        .ok();
     let channel = info.as_ref().and_then(|output| {
         let text = String::from_utf8_lossy(&output.stdout);
         text.lines().find_map(|line| {
@@ -261,7 +276,8 @@ fn inspect_linux(interface: Option<&str>) -> Result<WifiSnapshot> {
         channel,
         link_mbps,
         radio: None,
-        detail: "Linux `iw` link diagnostics; PHY/link rate is not Internet throughput.".to_string(),
+        detail: "Linux `iw` link diagnostics; PHY/link rate is not Internet throughput."
+            .to_string(),
     })
 }
 

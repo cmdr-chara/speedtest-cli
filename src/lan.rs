@@ -41,7 +41,10 @@ pub async fn serve(bind: SocketAddr) -> Result<()> {
         .await
         .with_context(|| format!("failed to bind LAN speed-test server to {bind}"))?;
     loop {
-        let (stream, _) = listener.accept().await.context("LAN server accept failed")?;
+        let (stream, _) = listener
+            .accept()
+            .await
+            .context("LAN server accept failed")?;
         tokio::spawn(async move {
             let _ = handle_connection(stream).await;
         });
@@ -59,12 +62,8 @@ pub async fn run(server: SocketAddr, config: LanConfig) -> Result<TestResult> {
     sleep(Duration::from_millis(250)).await;
     let (upload, upload_loaded) = measure_upload(server, config).await?;
 
-    let latency = analysis::summarize_latency(
-        &idle_samples,
-        &download_loaded,
-        &upload_loaded,
-        None,
-    );
+    let latency =
+        analysis::summarize_latency(&idle_samples, &download_loaded, &upload_loaded, None);
     let network_analysis = analysis::build_network_analysis(
         &idle_samples,
         &download_loaded,
@@ -89,7 +88,9 @@ pub async fn run(server: SocketAddr, config: LanConfig) -> Result<TestResult> {
 }
 
 async fn handle_connection(mut stream: TcpStream) -> Result<()> {
-    stream.set_nodelay(true).context("failed to enable TCP_NODELAY")?;
+    stream
+        .set_nodelay(true)
+        .context("failed to enable TCP_NODELAY")?;
     let mut header = [0_u8; 5];
     stream
         .read_exact(&mut header)
@@ -245,11 +246,7 @@ async fn measure_upload(
     ))
 }
 
-async fn upload_worker(
-    server: SocketAddr,
-    total: Arc<AtomicU64>,
-    deadline: Instant,
-) -> Result<()> {
+async fn upload_worker(server: SocketAddr, total: Arc<AtomicU64>, deadline: Instant) -> Result<()> {
     let mut stream = TcpStream::connect(server)
         .await
         .with_context(|| format!("failed to connect to LAN server {server}"))?;

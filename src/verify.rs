@@ -36,10 +36,7 @@ pub async fn run(config: EngineConfig, librespeed_server: Option<&str>) -> Resul
         .await
         .context("Cloudflare verification run failed")?;
 
-    let librespeed = InternetEngine::LibreSpeed(LibreSpeedEngine::new(
-        config,
-        librespeed_server,
-    )?);
+    let librespeed = InternetEngine::LibreSpeed(LibreSpeedEngine::new(config, librespeed_server)?);
     let librespeed = run_engine(librespeed)
         .await
         .context("LibreSpeed verification run failed")?;
@@ -76,7 +73,9 @@ async fn run_engine(engine: InternetEngine) -> Result<TestResult> {
     while let Some(event) = rx.recv().await {
         match event {
             EngineEvent::Complete(result) => {
-                handle.await.context("verification engine task panicked")??;
+                handle
+                    .await
+                    .context("verification engine task panicked")??;
                 return Ok(result);
             }
             EngineEvent::Error(error) => anyhow::bail!(error),

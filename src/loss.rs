@@ -65,41 +65,19 @@ pub async fn measure(target: &str, count: u16) -> Result<PacketLossResult> {
 fn run_ping(target: &str, count: usize) -> Result<std::process::Output> {
     #[cfg(target_os = "windows")]
     let output = Command::new("ping")
-        .args([
-            "-n",
-            &count.to_string(),
-            "-w",
-            "1000",
-            target,
-        ])
+        .args(["-n", &count.to_string(), "-w", "1000", target])
         .output()
         .context("failed to run Windows ping")?;
 
     #[cfg(target_os = "macos")]
     let output = Command::new("ping")
-        .args([
-            "-c",
-            &count.to_string(),
-            "-W",
-            "1000",
-            "-i",
-            "0.2",
-            target,
-        ])
+        .args(["-c", &count.to_string(), "-W", "1000", "-i", "0.2", target])
         .output()
         .context("failed to run macOS ping")?;
 
     #[cfg(all(unix, not(target_os = "macos")))]
     let output = Command::new("ping")
-        .args([
-            "-c",
-            &count.to_string(),
-            "-W",
-            "1",
-            "-i",
-            "0.2",
-            target,
-        ])
+        .args(["-c", &count.to_string(), "-W", "1", "-i", "0.2", target])
         .output()
         .context("failed to run ping")?;
 

@@ -116,15 +116,24 @@ fn run_history(args: HistoryArgs) -> Result<()> {
         return Ok(());
     }
     if results.is_empty() {
-        println!("No saved speed-test results in the last {} days.", args.days);
+        println!(
+            "No saved speed-test results in the last {} days.",
+            args.days
+        );
         return Ok(());
     }
 
     let summary = history::summarize(&results, args.days).expect("non-empty history has summary");
-    println!("SPEEDTEST HISTORY · {} DAYS · {} RUNS", args.days, results.len());
+    println!(
+        "SPEEDTEST HISTORY · {} DAYS · {} RUNS",
+        args.days,
+        results.len()
+    );
     println!();
     println!("  DATE / UTC         BACKEND       DOWNLOAD     UPLOAD       PING      QUALITY");
-    println!("  ─────────────────  ────────────  ───────────  ───────────  ────────  ─────────────");
+    println!(
+        "  ─────────────────  ────────────  ───────────  ───────────  ────────  ─────────────"
+    );
     for result in results.iter().rev().take(usize::from(args.limit)) {
         let quality = result.analysis.as_ref().map_or_else(
             || "—".to_string(),
@@ -158,7 +167,10 @@ fn run_stats(args: StatsArgs) -> Result<()> {
         if args.json {
             println!("null");
         } else {
-            println!("No saved speed-test results in the last {} days.", args.days);
+            println!(
+                "No saved speed-test results in the last {} days.",
+                args.days
+            );
         }
         return Ok(());
     };
@@ -293,7 +305,10 @@ async fn run_dns_set(args: DnsSetArgs) -> Result<()> {
     }
     let servers = provider.addresses(state.ipv6_default_route);
     if servers.is_empty() {
-        bail!("{} does not expose DNS53 addresses", provider.display_name());
+        bail!(
+            "{} does not expose DNS53 addresses",
+            provider.display_name()
+        );
     }
     let preflight = dns_custom::test_servers(servers.clone(), 6).await?;
     if preflight.success_rate_percent < 80.0 {
@@ -341,7 +356,10 @@ async fn run_dns_optimize(args: DnsOptimizeArgs) -> Result<()> {
     println!("DNS OPTIMIZER RECOMMENDATION");
     println!("  Winner:         {}", provider.display_name());
     if let Some(latency) = &winner.latency {
-        println!("  Median / p95:   {:.1} / {:.1} ms", latency.median_ms, latency.p95_ms);
+        println!(
+            "  Median / p95:   {:.1} / {:.1} ms",
+            latency.median_ms, latency.p95_ms
+        );
     }
     print_dns_change(&state, &provider.display_name(), &servers);
     if args.dry_run {
@@ -366,7 +384,10 @@ async fn run_dns_reset(args: DnsResetArgs) -> Result<()> {
         return Ok(());
     }
     if !state.can_configure() {
-        bail!("{} does not support safe automatic DNS reset", state.backend);
+        bail!(
+            "{} does not support safe automatic DNS reset",
+            state.backend
+        );
     }
     if !args.yes && !confirm("Reset this interface to automatic DNS?")? {
         println!("No changes made.");
@@ -444,7 +465,9 @@ async fn apply_dns_change(
 
 fn run_compare(args: CompareArgs) -> Result<()> {
     let (before, after) = match (&args.before, &args.after) {
-        (Some(before), Some(after)) => (storage::read_result(before)?, storage::read_result(after)?),
+        (Some(before), Some(after)) => {
+            (storage::read_result(before)?, storage::read_result(after)?)
+        }
         (None, None) => {
             let history = storage::load_history()?;
             if history.len() < 2 {
@@ -526,7 +549,10 @@ async fn run_verify(args: VerifyArgs) -> Result<()> {
 async fn run_serve(args: ServeArgs) -> Result<()> {
     println!("LAN SPEEDTEST SERVER");
     println!("  Listening: {}", args.bind);
-    println!("  Client:    speedtest lan <this-host>:{}", args.bind.port());
+    println!(
+        "  Client:    speedtest lan <this-host>:{}",
+        args.bind.port()
+    );
     println!("  Stop with Ctrl+C.");
     lan::serve(args.bind).await
 }
@@ -608,7 +634,10 @@ async fn run_interactive_stability(
 fn print_result(result: &TestResult) {
     println!("Speedtest");
     println!("  Backend:       {}", result.backend);
-    println!("  Server:        {} ({})", result.server.name, result.server.host);
+    println!(
+        "  Server:        {} ({})",
+        result.server.name, result.server.host
+    );
     println!("  Download:      {:.1} Mbps", result.download.mbps);
     println!("  Upload:        {:.1} Mbps", result.upload.mbps);
     println!("  Ping:          {:.1} ms", result.latency.idle_ms);
@@ -651,7 +680,11 @@ fn print_result(result: &TestResult) {
             );
         }
         if let Some(finding) = quality.findings.first() {
-            println!("  Diagnosis:     {}: {}", finding.severity.label(), finding.title);
+            println!(
+                "  Diagnosis:     {}: {}",
+                finding.severity.label(),
+                finding.title
+            );
             println!("                 {}", finding.evidence);
             if let Some(recommendation) = &finding.recommendation {
                 println!("  Try:           {recommendation}");
@@ -675,10 +708,17 @@ fn print_stability(result: &StabilityResult) {
     println!("  Failure bursts: {}", result.failure_bursts);
     if let Some(latency) = &result.latency {
         println!("  Median:         {:.1} ms", latency.median_ms);
-        println!("  p95 / p99:      {:.1} / {:.1} ms", latency.p95_ms, latency.p99_ms);
+        println!(
+            "  p95 / p99:      {:.1} / {:.1} ms",
+            latency.p95_ms, latency.p99_ms
+        );
         println!("  Max:            {:.1} ms", latency.max_ms);
     }
-    println!("  Stability:      {}/100 {}", result.score, result.grade.label());
+    println!(
+        "  Stability:      {}/100 {}",
+        result.score,
+        result.grade.label()
+    );
     if let Some(tier) = result.tier_label() {
         println!("  Tier:           ◆ {tier}");
     }
@@ -703,7 +743,10 @@ fn print_stats(summary: &HistorySummary) {
     if let Some(score) = summary.median_quality_score {
         println!("  Quality median:    {score:.0}/100");
     }
-    println!("  S-tier runs:       {} / {}", summary.s_tier_runs, summary.runs);
+    println!(
+        "  S-tier runs:       {} / {}",
+        summary.s_tier_runs, summary.runs
+    );
     println!("  Trend:             {}", summary.trend.label());
     println!("  Download history:  {}", summary.download_sparkline);
     if !summary.anomalies.is_empty() {
@@ -718,7 +761,10 @@ fn print_stats(summary: &HistorySummary) {
 fn print_dns_test(result: &DnsProviderBenchmark) {
     println!("DNS HEALTH / SPEED TEST");
     println!();
-    println!("  Resolver:       {} {}", result.provider_name, result.profile_name);
+    println!(
+        "  Resolver:       {} {}",
+        result.provider_name, result.profile_name
+    );
     println!("  Servers:        {}", format_servers(&result.servers));
     println!(
         "  Queries:        {} / {} successful ({:.0}%)",
@@ -726,9 +772,16 @@ fn print_dns_test(result: &DnsProviderBenchmark) {
     );
     if let Some(latency) = &result.latency {
         println!("  Median:         {:.1} ms", latency.median_ms);
-        println!("  p95 / p99:      {:.1} / {:.1} ms", latency.p95_ms, latency.p99_ms);
+        println!(
+            "  p95 / p99:      {:.1} / {:.1} ms",
+            latency.p95_ms, latency.p99_ms
+        );
     }
-    println!("  DNS score:      {}/100 {}", result.score, result.grade.label());
+    println!(
+        "  DNS score:      {}/100 {}",
+        result.score,
+        result.grade.label()
+    );
     if let Some(tier) = result.tier_label() {
         println!("  Tier:           ◆ {tier}");
     }
@@ -740,14 +793,14 @@ fn print_dns_benchmark(result: &DnsBenchmarkResult) {
     println!("  #  RESOLVER                         MEDIAN     P95   SUCCESS   SCORE");
     println!("  ─  ───────────────────────────────  ───────  ───────  ───────  ─────────────");
     for (index, entry) in result.entries.iter().enumerate() {
-        let median = entry
-            .latency
-            .as_ref()
-            .map_or_else(|| "—".to_string(), |latency| format!("{:.1}ms", latency.median_ms));
-        let p95 = entry
-            .latency
-            .as_ref()
-            .map_or_else(|| "—".to_string(), |latency| format!("{:.1}ms", latency.p95_ms));
+        let median = entry.latency.as_ref().map_or_else(
+            || "—".to_string(),
+            |latency| format!("{:.1}ms", latency.median_ms),
+        );
+        let p95 = entry.latency.as_ref().map_or_else(
+            || "—".to_string(),
+            |latency| format!("{:.1}ms", latency.p95_ms),
+        );
         let name = if entry.profile_name.eq_ignore_ascii_case("standard") {
             entry.provider_name.clone()
         } else {
@@ -770,7 +823,12 @@ fn print_dns_benchmark(result: &DnsBenchmarkResult) {
     }
     if let Some(winner) = result.winner() {
         println!();
-        println!("  ◆ WINNER: {} · {}/100 {}", winner.provider_name, winner.score, winner.grade.label());
+        println!(
+            "  ◆ WINNER: {} · {}/100 {}",
+            winner.provider_name,
+            winner.score,
+            winner.grade.label()
+        );
     }
 }
 
@@ -800,7 +858,10 @@ fn print_comparison(result: &CompareResult) {
         result.quality_score.after,
         result.quality_score.absolute_change,
     ) {
-        println!("  {:<16} {:>10.0}/100 {:>10.0}/100 {change:+.0} pts", "Quality", before, after);
+        println!(
+            "  {:<16} {:>10.0}/100 {:>10.0}/100 {change:+.0} pts",
+            "Quality", before, after
+        );
     }
     println!();
     println!("  VERDICT    {}", result.verdict.to_ascii_uppercase());
@@ -826,7 +887,12 @@ fn print_doctor(report: &DoctorReport) {
     }
     println!();
     for check in &report.checks {
-        println!("  {} {:<20} {}", check.status.symbol(), check.name, check.detail);
+        println!(
+            "  {} {:<20} {}",
+            check.status.symbol(),
+            check.name,
+            check.detail
+        );
     }
     if let Some(speedtest) = &report.speedtest {
         println!();
@@ -854,11 +920,20 @@ fn print_packet_loss(result: &loss::PacketLossResult) {
     println!("ICMP PACKET LOSS");
     println!();
     println!("  Target:          {}", result.target);
-    println!("  Sent/received:   {} / {}", result.packets_sent, result.packets_received);
-    println!("  Lost:            {} ({:.2}%)", result.packets_lost, result.loss_percent);
+    println!(
+        "  Sent/received:   {} / {}",
+        result.packets_sent, result.packets_received
+    );
+    println!(
+        "  Lost:            {} ({:.2}%)",
+        result.packets_lost, result.loss_percent
+    );
     if let Some(rtt) = &result.rtt {
         println!("  RTT median:      {:.1} ms", rtt.median_ms);
-        println!("  RTT p95 / p99:   {:.1} / {:.1} ms", rtt.p95_ms, rtt.p99_ms);
+        println!(
+            "  RTT p95 / p99:   {:.1} / {:.1} ms",
+            rtt.p95_ms, rtt.p99_ms
+        );
         println!("  RTT max:         {:.1} ms", rtt.max_ms);
     }
     println!();
@@ -873,8 +948,14 @@ fn print_wifi(result: &wifi::WifiSnapshot) {
         println!("  {}", result.detail);
         return;
     }
-    println!("  Interface:       {}", result.interface.as_deref().unwrap_or("unknown"));
-    println!("  SSID:            {}", result.ssid.as_deref().unwrap_or("unknown"));
+    println!(
+        "  Interface:       {}",
+        result.interface.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "  SSID:            {}",
+        result.ssid.as_deref().unwrap_or("unknown")
+    );
     if let Some(dbm) = result.signal_dbm {
         println!("  Signal:          {:.0} dBm", dbm);
     }
@@ -913,10 +994,20 @@ fn print_verify(report: &verify::VerifyReport) {
         report.cloudflare.latency.idle_ms, report.librespeed.latency.idle_ms
     );
     if let Some(loss) = &report.icmp_loss {
-        println!("  ICMP loss       {:>9.2}%     independent reference", loss.loss_percent);
+        println!(
+            "  ICMP loss       {:>9.2}%     independent reference",
+            loss.loss_percent
+        );
     }
     println!();
-    println!("  Agreement:      {}", if report.consistent { "CONSISTENT" } else { "DIVERGENT" });
+    println!(
+        "  Agreement:      {}",
+        if report.consistent {
+            "CONSISTENT"
+        } else {
+            "DIVERGENT"
+        }
+    );
     println!("  {}", report.verdict);
     println!("  Highlight:      {}", report.comparison.highlight);
 }
@@ -934,23 +1025,36 @@ fn dns_profile(profile: DnsBenchmarkProfileArg) -> BenchmarkProfile {
 
 fn confirm(prompt: &str) -> Result<bool> {
     print!("{prompt} [y/N] ");
-    io::stdout().flush().context("failed to flush confirmation prompt")?;
+    io::stdout()
+        .flush()
+        .context("failed to flush confirmation prompt")?;
     let mut answer = String::new();
     io::stdin()
         .read_line(&mut answer)
         .context("failed to read confirmation")?;
-    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 fn yes(value: bool) -> &'static str {
-    if value { "✓" } else { "—" }
+    if value {
+        "✓"
+    } else {
+        "—"
+    }
 }
 
 fn format_servers(servers: &[std::net::IpAddr]) -> String {
     if servers.is_empty() {
         "none detected".to_string()
     } else {
-        servers.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+        servers
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -962,6 +1066,10 @@ fn truncate(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         value.to_string()
     } else {
-        value.chars().take(width.saturating_sub(1)).collect::<String>() + "…"
+        value
+            .chars()
+            .take(width.saturating_sub(1))
+            .collect::<String>()
+            + "…"
     }
 }
