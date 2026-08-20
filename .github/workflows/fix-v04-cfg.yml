@@ -1,4 +1,4 @@
-name: Fix v0.4 cfg branch
+name: Fix v0.4 cfg gates
 
 on:
   push:
@@ -16,49 +16,58 @@ jobs:
         with:
           ref: agent/v0.4-dns-doctor-compare
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Scope platform helpers to their OSes
-        shell: bash
+      - name: Apply target-specific cfg gates
+        shell: python
         run: |
-          python3 - <<'PY'
           from pathlib import Path
 
           path = Path("src/dns/system.rs")
-          source = path.read_text()
+          text = path.read_text()
 
-          source = source.replace(
-              "fn parse_ip_list<'a>(values: impl Iterator<Item = &'a str>) -> Vec<IpAddr> {",
-              "#[cfg(any(target_os = \"windows\", target_os = \"macos\"))]\nfn parse_ip_list<'a>(values: impl Iterator<Item = &'a str>) -> Vec<IpAddr> {",
-              1,
+          text = text.replace(
+              'use std::{\n    fs,\n    net::IpAddr,\n    process::{Command, Output},\n};',
+              'use std::{\n    net::IpAddr,\n    process::{Command, Output},\n};\n\n#[cfg(all(unix, not(target_os = "macos")))]\nuse std::fs;'
           )
-          source = source.replace(
-              "fn value_after_colon(text: &str, key: &str) -> Option<String> {",
-              "#[cfg(target_os = \"macos\")]\nfn value_after_colon(text: &str, key: &str) -> Option<String> {",
-              1,
+          text = text.replace(
+              '#[cfg(any(target_os = "windows", target_os = "macos"))]\n#[cfg(any(target_os = "windows", target_os = "macos"))]\nfn parse_ip_list',
+              '#[cfg(any(target_os = "windows", target_os = "macos"))]\nfn parse_ip_list'
           )
-          source = source.replace(
-              "    #[test]\n    fn parses_colon_values() {",
-              "    #[cfg(target_os = \"macos\")]\n    #[test]\n    fn parses_colon_values() {",
-              1,
+          text = text.replace(
+              'fn command_available(command: &str) -> bool {',
+              '#[cfg(all(unix, not(target_os = "macos")))]\nfn command_available(command: &str) -> bool {'
           )
-          path.write_text(source)
-          PY
+          text = text.replace(
+              '#[cfg(target_os = "macos")]\n#[cfg(target_os = "macos")]\nfn value_after_colon',
+              '#[cfg(target_os = "macos")]\nfn value_after_colon'
+          )
+          text = text.replace(
+              'fn token_after(text: &str, key: &str) -> Option<String> {',
+              '#[cfg(all(unix, not(target_os = "macos")))]\nfn token_after(text: &str, key: &str) -> Option<String> {'
+          )
+          text = text.replace(
+              'fn is_true(value: &str) -> bool {',
+              '#[cfg(all(unix, not(target_os = "macos")))]\nfn is_true(value: &str) -> bool {'
+          )
+          text = text.replace(
+              '    #[test]\n    fn parses_route_tokens() {',
+              '    #[cfg(all(unix, not(target_os = "macos")))]\n    #[test]\n    fn parses_route_tokens() {'
+          )
+          text = text.replace(
+              '    #[cfg(target_os = "macos")]\n    #[cfg(target_os = "macos")]\n    #[test]\n    fn parses_colon_values()',
+              '    #[cfg(target_os = "macos")]\n    #[test]\n    fn parses_colon_values()'
+          )
 
-      - name: Format Rust sources
-        run: cargo fmt --all
+          path.write_text(text)
 
-      - name: Commit correction
+      - name: Commit cfg fix
         shell: bash
         run: |
           if git diff --quiet -- src/dns/system.rs; then
-            echo "No cfg correction needed."
+            echo "cfg gates already fixed."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- src/dns/system.rs
-          git commit -m "Scope DNS helpers to supported platforms"
+          git commit -m "Fix platform-specific DNS cfg gates"
           git push origin HEAD:agent/v0.4-dns-doctor-compare
