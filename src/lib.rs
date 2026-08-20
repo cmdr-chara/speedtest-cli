@@ -1,5 +1,9 @@
 pub mod analysis;
 pub mod cli;
+pub mod compare;
+pub mod dns;
+pub mod dns_custom;
+pub mod doctor;
 pub mod engine;
 pub mod history;
 pub mod model;
