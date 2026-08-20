@@ -1,8 +1,10 @@
 use std::{
-    fs,
     net::IpAddr,
     process::{Command, Output},
 };
+
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::fs;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -622,7 +624,6 @@ fn checked_output(command: &mut Command, description: &str) -> Result<Output> {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn parse_ip_list<'a>(values: impl Iterator<Item = &'a str>) -> Vec<IpAddr> {
     dedup_ips(
         values
@@ -637,6 +638,7 @@ fn dedup_ips(mut values: Vec<IpAddr>) -> Vec<IpAddr> {
     values
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
 fn command_available(command: &str) -> bool {
     Command::new(command)
         .arg("--version")
@@ -645,7 +647,6 @@ fn command_available(command: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-#[cfg(target_os = "macos")]
 fn value_after_colon(text: &str, key: &str) -> Option<String> {
     text.lines().find_map(|line| {
         let (left, right) = line.split_once(':')?;
@@ -653,6 +654,7 @@ fn value_after_colon(text: &str, key: &str) -> Option<String> {
     })
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
 fn token_after(text: &str, key: &str) -> Option<String> {
     let tokens = text.split_whitespace().collect::<Vec<_>>();
     tokens
@@ -660,6 +662,7 @@ fn token_after(text: &str, key: &str) -> Option<String> {
         .find_map(|pair| (pair[0] == key).then(|| pair[1].to_string()))
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
 fn is_true(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -671,6 +674,7 @@ fn is_true(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn parses_route_tokens() {
         let route = "default via 192.168.1.1 dev eth0 proto dhcp";
@@ -678,7 +682,6 @@ mod tests {
         assert_eq!(token_after(route, "via").as_deref(), Some("192.168.1.1"));
     }
 
-    #[cfg(target_os = "macos")]
     #[cfg(target_os = "macos")]
     #[test]
     fn parses_colon_values() {
