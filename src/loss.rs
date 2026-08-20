@@ -92,20 +92,19 @@ fn parse_reply_times(text: &str) -> Vec<f64> {
 }
 
 fn parse_reply_time(line: &str) -> Option<f64> {
-    for marker in ["time=", "time<"] {
+    ["time=", "time<"].into_iter().find_map(|marker| {
         let (_, tail) = line.split_once(marker)?;
         let value = tail
             .chars()
             .take_while(|character| character.is_ascii_digit() || *character == '.')
             .collect::<String>();
         let parsed = value.parse::<f64>().ok()?;
-        return Some(if marker == "time<" {
+        Some(if marker == "time<" {
             (parsed / 2.0).max(0.1)
         } else {
             parsed
-        });
-    }
-    None
+        })
+    })
 }
 
 pub fn default_target() -> &'static str {
