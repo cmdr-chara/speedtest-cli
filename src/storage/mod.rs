@@ -1,14 +1,15 @@
 use std::{
     env,
-    fs::{self, OpenOptions},
-    io::Write,
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
+use chrono::{Duration as ChronoDuration, Utc};
 use serde::Serialize;
 
-use crate::model::TestResult;
+use crate::{model::TestResult, stability::StabilityResult};
 
 pub fn persist_default(result: &TestResult) -> Result<(PathBuf, PathBuf)> {
     let root = data_dir().context("could not determine a platform data directory")?;
@@ -25,12 +26,42 @@ pub fn persist_default(result: &TestResult) -> Result<(PathBuf, PathBuf)> {
     Ok((result_path, history_path))
 }
 
+pub fn persist_stability(result: &StabilityResult) -> Result<(PathBuf, PathBuf)> {
+    let root = data_dir().context("could not determine a platform data directory")?;
+    let stability_root = root.join("stability");
+    let results_dir = stability_root.join("results");
+    fs::create_dir_all(&results_dir).context("failed to create stability results directory")?;
+
+    let filename = result.timestamp.format("%Y%m%dT%H%M%SZ.json").to_string();
+    let result_path = results_dir.join(filename);
+    write_stability_json(&result_path, result)?;
+
+    let history_path = stability_root.join("history.jsonl");
+    append_jsonl_value(&history_path, result)?;
+    Ok((result_path, history_path))
+}
+
+pub fn load_history() -> Result<Vec<TestResult>> {
+    let root = data_dir().context("could not determine a platform data directory")?;
+    load_history_path(&root.join("history.jsonl"))
+}
+
+pub fn load_history_since(days: u64) -> Result<Vec<TestResult>> {
+    let cutoff = Utc::now() - ChronoDuration::days(days.min(i64::MAX as u64) as i64);
+    let mut results: Vec<_> = load_history()?
+        .into_iter()
+        .filter(|result| result.timestamp >= cutoff)
+        .collect();
+    results.sort_by_key(|result| result.timestamp);
+    Ok(results)
+}
+
 pub fn write_json(path: &Path, result: &TestResult) -> Result<()> {
-    ensure_parent(path)?;
-    let content = result.pretty_json()?;
-    fs::write(path, format!("{content}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
+    write_json_value(path, result)
+}
+
+pub fn write_stability_json(path: &Path, result: &StabilityResult) -> Result<()> {
+    write_json_value(path, result)
 }
 
 pub fn write_csv(path: &Path, result: &TestResult) -> Result<()> {
@@ -44,6 +75,14 @@ pub fn write_csv(path: &Path, result: &TestResult) -> Result<()> {
     Ok(())
 }
 
+fn write_json_value<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    ensure_parent(path)?;
+    let content = serde_json::to_string_pretty(value).context("failed to serialize JSON output")?;
+    fs::write(path, format!("{content}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
 fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -54,16 +93,41 @@ fn ensure_parent(path: &Path) -> Result<()> {
 }
 
 fn append_jsonl(path: &Path, result: &TestResult) -> Result<()> {
+    append_jsonl_value(path, result)
+}
+
+fn append_jsonl_value<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     ensure_parent(path)?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .with_context(|| format!("failed to open {}", path.display()))?;
-    serde_json::to_writer(&mut file, result).context("failed to serialize history record")?;
+    serde_json::to_writer(&mut file, value).context("failed to serialize history record")?;
     file.write_all(b"\n")
         .context("failed to append history record")?;
     Ok(())
+}
+
+fn load_history_path(path: &Path) -> Result<Vec<TestResult>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut results = Vec::new();
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("failed reading history line {}", index + 1))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let result = serde_json::from_str::<TestResult>(&line)
+            .with_context(|| format!("invalid history record on line {}", index + 1))?;
+        results.push(result);
+    }
+    results.sort_by_key(|result| result.timestamp);
+    Ok(results)
 }
 
 #[derive(Serialize)]
@@ -232,5 +296,19 @@ mod tests {
         assert!(content.contains("quality_score"));
         assert!(content.contains("download_mbps"));
         assert!(content.contains("100"));
+    }
+
+    #[test]
+    fn loads_jsonl_history_in_timestamp_order() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let mut earlier = result();
+        earlier.timestamp -= ChronoDuration::minutes(1);
+        append_jsonl(&path, &result()).unwrap();
+        append_jsonl(&path, &earlier).unwrap();
+
+        let loaded = load_history_path(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded[0].timestamp <= loaded[1].timestamp);
     }
 }

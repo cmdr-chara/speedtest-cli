@@ -1,5 +1,6 @@
 mod app;
 mod speedometer;
+mod stability;
 mod view;
 
 use std::{
@@ -16,7 +17,11 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::{engine::EngineEvent, model::TestResult};
+use crate::{
+    engine::EngineEvent,
+    model::TestResult,
+    stability::{StabilityEvent, StabilityResult},
+};
 
 use self::app::App;
 
@@ -27,6 +32,14 @@ pub async fn run(mut rx: UnboundedReceiver<EngineEvent>, render_fps: u16) -> Res
     let result = run_loop(&mut terminal, &mut rx, render_fps).await;
     restore_terminal(&mut terminal)?;
     result
+}
+
+pub async fn run_stability(
+    rx: UnboundedReceiver<StabilityEvent>,
+    target_duration: Duration,
+    render_fps: u16,
+) -> Result<StabilityResult> {
+    stability::run(rx, target_duration, render_fps).await
 }
 
 async fn run_loop(
@@ -74,7 +87,7 @@ async fn run_loop(
     }
 }
 
-fn frame_interval(fps: u16) -> Duration {
+pub(super) fn frame_interval(fps: u16) -> Duration {
     Duration::from_secs_f64(1.0 / f64::from(fps))
 }
 
@@ -104,14 +117,14 @@ fn handle_input(app: &App) -> Result<Option<TestResult>> {
     Ok(None)
 }
 
-fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+pub(super) fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode().context("failed to enable raw terminal mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
     Terminal::new(CrosstermBackend::new(stdout)).context("failed to initialize terminal")
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+pub(super) fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode().context("failed to disable raw terminal mode")?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)
         .context("failed to leave alternate screen")?;
