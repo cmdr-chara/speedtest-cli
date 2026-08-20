@@ -1,18 +1,18 @@
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::mpsc::UnboundedSender,
-    time::{sleep_until, Instant},
-};
+use tokio::time::{sleep_until, Instant};
+use tokio::{sync::mpsc::UnboundedSender, time};
 
 use crate::{
     analysis,
-    engine::cloudflare::CloudflareEngine,
     model::{LatencyDistribution, QualityGrade},
 };
+
+const LATENCY_URL: &str = "https://speed.cloudflare.com/__down";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StabilitySample {
@@ -58,11 +58,16 @@ pub enum StabilityEvent {
 }
 
 pub async fn run(
-    engine: &CloudflareEngine,
     duration: Duration,
     interval: Duration,
     tx: Option<UnboundedSender<StabilityEvent>>,
 ) -> Result<StabilityResult> {
+    let client = Client::builder()
+        .user_agent(concat!("speedtest-cli/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("failed to build stability probe client")?;
     let started = Instant::now();
     let deadline = started + duration;
     let mut next_probe = started;
@@ -78,7 +83,7 @@ pub async fn run(
         }
 
         let latency_ms = tokio::select! {
-            result = engine.latency_probe() => result.ok(),
+            result = latency_probe(&client) => result.ok(),
             _ = sleep_until(deadline) => break,
         };
         let sample = StabilitySample {
@@ -104,6 +109,24 @@ pub async fn run(
     Ok(result)
 }
 
+async fn latency_probe(client: &Client) -> Result<f64> {
+    let started = Instant::now();
+    let response = client
+        .get(LATENCY_URL)
+        .query(&[("bytes", "0"), ("mode", "stability")])
+        .header("cache-control", "no-cache")
+        .send()
+        .await
+        .context("stability latency probe failed")?
+        .error_for_status()
+        .context("stability latency endpoint returned an error")?;
+    let _ = response
+        .bytes()
+        .await
+        .context("stability latency response failed")?;
+    Ok(started.elapsed().as_secs_f64() * 1000.0)
+}
+
 pub fn summarize(
     samples: Vec<StabilitySample>,
     duration: Duration,
@@ -119,6 +142,7 @@ pub fn summarize(
         .collect();
     let successful_probes = successful.len();
     let failed_probes = samples.len().saturating_sub(successful_probes);
+    let failure_burst_count = failure_bursts(&samples);
     let availability = if samples.is_empty() {
         0.0
     } else {
@@ -141,26 +165,13 @@ pub fn summarize(
         successful_probes,
         failed_probes,
         probe_availability_percent: availability,
-        failure_bursts: failure_bursts_from_samples(&successful, failed_probes, &jitter_values),
+        failure_bursts: failure_burst_count,
         latency,
         jitter,
         score,
         grade,
         s_tier,
     }
-}
-
-fn failure_bursts_from_samples(
-    successful: &[f64],
-    failed_probes: usize,
-    _jitter_values: &[f64],
-) -> usize {
-    if failed_probes == 0 {
-        return 0;
-    }
-    // The exact burst count is computed from the original sample sequence by the public helper.
-    // This fallback keeps the summary conservative if only aggregate inputs are ever supplied.
-    usize::from(!successful.is_empty() || failed_probes > 0)
 }
 
 pub fn failure_bursts(samples: &[StabilitySample]) -> usize {
@@ -189,10 +200,58 @@ fn stability_score(
     };
     let jitter_p95 = jitter.map_or(100.0, |stats| stats.p95_ms);
     let components = [
-        (lower_score(latency.median_ms, &[(10.0, 100.0), (20.0, 95.0), (40.0, 85.0), (80.0, 65.0), (150.0, 40.0)]), 0.25),
-        (lower_score(latency.p95_ms, &[(15.0, 100.0), (30.0, 95.0), (60.0, 82.0), (120.0, 60.0), (250.0, 35.0)]), 0.30),
-        (lower_score(latency.p99_ms, &[(20.0, 100.0), (40.0, 92.0), (80.0, 78.0), (160.0, 55.0), (350.0, 30.0)]), 0.20),
-        (lower_score(jitter_p95, &[(2.0, 100.0), (5.0, 95.0), (10.0, 85.0), (20.0, 65.0), (50.0, 35.0)]), 0.15),
+        (
+            lower_score(
+                latency.median_ms,
+                &[
+                    (10.0, 100.0),
+                    (20.0, 95.0),
+                    (40.0, 85.0),
+                    (80.0, 65.0),
+                    (150.0, 40.0),
+                ],
+            ),
+            0.25,
+        ),
+        (
+            lower_score(
+                latency.p95_ms,
+                &[
+                    (15.0, 100.0),
+                    (30.0, 95.0),
+                    (60.0, 82.0),
+                    (120.0, 60.0),
+                    (250.0, 35.0),
+                ],
+            ),
+            0.30,
+        ),
+        (
+            lower_score(
+                latency.p99_ms,
+                &[
+                    (20.0, 100.0),
+                    (40.0, 92.0),
+                    (80.0, 78.0),
+                    (160.0, 55.0),
+                    (350.0, 30.0),
+                ],
+            ),
+            0.20,
+        ),
+        (
+            lower_score(
+                jitter_p95,
+                &[
+                    (2.0, 100.0),
+                    (5.0, 95.0),
+                    (10.0, 85.0),
+                    (20.0, 65.0),
+                    (50.0, 35.0),
+                ],
+            ),
+            0.15,
+        ),
         (availability_score(availability), 0.10),
     ];
     components
@@ -276,6 +335,7 @@ mod tests {
         assert_eq!(failure_bursts(&samples), 2);
         let result = summarize(samples, Duration::from_secs(5), Duration::from_secs(1));
         assert_eq!(result.failed_probes, 3);
+        assert_eq!(result.failure_bursts, 2);
         assert!(result.probe_availability_percent < 50.0);
         assert!(!result.s_tier);
     }
