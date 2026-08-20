@@ -285,6 +285,7 @@ fn dbm_to_percent(dbm: f64) -> f64 {
     ((dbm + 100.0) * 2.0).clamp(0.0, 100.0)
 }
 
+#[cfg(any(test, target_os = "windows", target_os = "macos"))]
 fn band_from_channel(channel: u32) -> Option<String> {
     match channel {
         1..=14 => Some("2.4 GHz".to_string()),
