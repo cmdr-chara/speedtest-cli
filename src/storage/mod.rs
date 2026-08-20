@@ -11,8 +11,12 @@ use serde::Serialize;
 
 use crate::{model::TestResult, stability::StabilityResult};
 
+pub fn data_root() -> Result<PathBuf> {
+    data_dir().context("could not determine a platform data directory")
+}
+
 pub fn persist_default(result: &TestResult) -> Result<(PathBuf, PathBuf)> {
-    let root = data_dir().context("could not determine a platform data directory")?;
+    let root = data_root()?;
     let results_dir = root.join("results");
     fs::create_dir_all(&results_dir).context("failed to create results directory")?;
 
@@ -27,7 +31,7 @@ pub fn persist_default(result: &TestResult) -> Result<(PathBuf, PathBuf)> {
 }
 
 pub fn persist_stability(result: &StabilityResult) -> Result<(PathBuf, PathBuf)> {
-    let root = data_dir().context("could not determine a platform data directory")?;
+    let root = data_root()?;
     let stability_root = root.join("stability");
     let results_dir = stability_root.join("results");
     fs::create_dir_all(&results_dir).context("failed to create stability results directory")?;
@@ -42,7 +46,7 @@ pub fn persist_stability(result: &StabilityResult) -> Result<(PathBuf, PathBuf)>
 }
 
 pub fn load_history() -> Result<Vec<TestResult>> {
-    let root = data_dir().context("could not determine a platform data directory")?;
+    let root = data_root()?;
     load_history_path(&root.join("history.jsonl"))
 }
 
@@ -54,6 +58,13 @@ pub fn load_history_since(days: u64) -> Result<Vec<TestResult>> {
         .collect();
     results.sort_by_key(|result| result.timestamp);
     Ok(results)
+}
+
+pub fn read_result(path: &Path) -> Result<TestResult> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse speed-test result from {}", path.display()))
 }
 
 pub fn write_json(path: &Path, result: &TestResult) -> Result<()> {
@@ -296,6 +307,15 @@ mod tests {
         assert!(content.contains("quality_score"));
         assert!(content.contains("download_mbps"));
         assert!(content.contains("100"));
+    }
+
+    #[test]
+    fn reads_saved_result() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("result.json");
+        write_json(&path, &result()).unwrap();
+        let loaded = read_result(&path).unwrap();
+        assert_eq!(loaded.download.mbps, 100.0);
     }
 
     #[test]
