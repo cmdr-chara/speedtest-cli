@@ -630,6 +630,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_linux_iw_link_ssid() {
+        let connected = "Connected to 00:11:22:33:44:55 (on wlan0)\n\
+            SSID: Lab Network\n\
+            signal: -54 dBm\n";
+        assert_eq!(linux_link_ssid(connected).as_deref(), Some("Lab Network"));
+        assert_eq!(linux_link_ssid("Not connected.\n"), None);
+        assert_eq!(linux_link_ssid("SSID:    \n"), None);
+    }
+
+    #[test]
     fn parses_and_selects_macos_wifi_hardware_port_devices() {
         let fixture = "Hardware Port: Ethernet\n\
 Device: en0\n\
