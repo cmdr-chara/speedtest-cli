@@ -94,13 +94,14 @@ pub const PUBLIC_SERVERS: &[LibreSpeedServer] = &[
 pub struct LibreSpeedEngine {
     client: Client,
     config: EngineConfig,
-    server: Option<ResolvedServer>,
+    server: Option<Box<ResolvedServer>>,
 }
 
 #[derive(Debug, Clone)]
 struct ResolvedServer {
     name: String,
     base: Url,
+    host: String,
     download_path: String,
     upload_path: String,
     ping_path: String,
@@ -115,7 +116,10 @@ impl LibreSpeedEngine {
             .pool_max_idle_per_host(config.streams.saturating_add(4))
             .build()
             .context("failed to build LibreSpeed HTTP client")?;
-        let server = custom_server.map(resolve_custom_server).transpose()?;
+        let server = custom_server
+            .map(resolve_custom_server)
+            .transpose()?
+            .map(Box::new);
         Ok(Self {
             client,
             config,
@@ -125,7 +129,7 @@ impl LibreSpeedEngine {
 
     pub async fn run(&self, tx: UnboundedSender<EngineEvent>) -> Result<TestResult> {
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Preparing));
-        let server = match &self.server {
+        let server = match self.server.as_deref() {
             Some(server) => server.clone(),
             None => select_public_server(&self.client).await?,
         };
@@ -162,7 +166,7 @@ impl LibreSpeedEngine {
             timestamp: Utc::now(),
             backend: "librespeed".to_string(),
             server: ServerInfo {
-                host: server.base.as_str().to_string(),
+                host: server.host,
                 name: server.name,
             },
             latency,
@@ -302,15 +306,40 @@ impl LibreSpeedEngine {
 }
 
 fn resolve_custom_server(base: &str) -> Result<ResolvedServer> {
-    let base = if base.ends_with('/') {
-        base.to_string()
-    } else {
-        format!("{base}/")
-    };
-    let base = Url::parse(&base).context("invalid LibreSpeed server URL")?;
+    let mut base = Url::parse(base).context("invalid LibreSpeed server URL")?;
+    if !matches!(base.scheme(), "http" | "https") {
+        return Err(anyhow!(
+            "LibreSpeed server URL must use the http or https scheme"
+        ));
+    }
+    if base.host_str().is_none() {
+        return Err(anyhow!("LibreSpeed server URL must include a host"));
+    }
+    if !base.username().is_empty() || base.password().is_some() {
+        return Err(anyhow!(
+            "LibreSpeed server URL must not include user credentials"
+        ));
+    }
+    if base.query().is_some() {
+        return Err(anyhow!(
+            "LibreSpeed server URL must not include a query string"
+        ));
+    }
+    if base.fragment().is_some() {
+        return Err(anyhow!("LibreSpeed server URL must not include a fragment"));
+    }
+
+    if !base.path().ends_with('/') {
+        base.path_segments_mut()
+            .map_err(|_| anyhow!("LibreSpeed server URL cannot be used as a base URL"))?
+            .push("");
+    }
+    let host = server_host(&base)?;
+
     Ok(ResolvedServer {
         name: "Custom LibreSpeed server".to_string(),
         base,
+        host,
         download_path: "garbage.php".to_string(),
         upload_path: "empty.php".to_string(),
         ping_path: "empty.php".to_string(),
@@ -318,13 +347,26 @@ fn resolve_custom_server(base: &str) -> Result<ResolvedServer> {
 }
 
 fn resolve_builtin(server: LibreSpeedServer) -> Result<ResolvedServer> {
+    let base = Url::parse(server.base).context("invalid built-in LibreSpeed URL")?;
+    let host = server_host(&base).context("invalid built-in LibreSpeed URL")?;
     Ok(ResolvedServer {
         name: server.name.to_string(),
-        base: Url::parse(server.base).context("invalid built-in LibreSpeed URL")?,
+        base,
+        host,
         download_path: server.download_path.to_string(),
         upload_path: server.upload_path.to_string(),
         ping_path: server.ping_path.to_string(),
     })
+}
+
+fn server_host(url: &Url) -> Result<String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("LibreSpeed server URL must include a host"))?;
+    let host = host.to_string();
+    Ok(url
+        .port()
+        .map_or(host.clone(), |port| format!("{host}:{port}")))
 }
 
 async fn select_public_server(client: &Client) -> Result<ResolvedServer> {
@@ -523,6 +565,73 @@ mod tests {
     fn resolves_custom_server_with_standard_paths() {
         let server = resolve_custom_server("https://speed.example.test/backend").unwrap();
         assert_eq!(server.base.as_str(), "https://speed.example.test/backend/");
+        assert_eq!(server.host, "speed.example.test");
         assert_eq!(server.download_path, "garbage.php");
+        assert_eq!(
+            server.base.join(&server.download_path).unwrap().as_str(),
+            "https://speed.example.test/backend/garbage.php"
+        );
+    }
+
+    #[test]
+    fn preserves_nested_custom_server_paths_when_joining_endpoints() {
+        let server = resolve_custom_server("https://speed.example.test/nested/backend/").unwrap();
+        assert_eq!(
+            server.base.join(&server.download_path).unwrap().as_str(),
+            "https://speed.example.test/nested/backend/garbage.php"
+        );
+        assert_eq!(
+            server.base.join(&server.upload_path).unwrap().as_str(),
+            "https://speed.example.test/nested/backend/empty.php"
+        );
+    }
+
+    #[test]
+    fn custom_server_requires_http_or_https() {
+        for url in ["ftp://speed.example.test/backend", "file:///tmp/librespeed"] {
+            let error = resolve_custom_server(url).unwrap_err().to_string();
+            assert!(error.contains("http or https"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn custom_server_rejects_credentials() {
+        for url in [
+            "https://operator@speed.example.test/backend",
+            "https://operator:secret@speed.example.test/backend",
+        ] {
+            let error = resolve_custom_server(url).unwrap_err().to_string();
+            assert!(error.contains("credentials"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn custom_server_rejects_query_and_fragment() {
+        let query = resolve_custom_server("https://speed.example.test/backend?token=secret")
+            .unwrap_err()
+            .to_string();
+        assert!(query.contains("query string"), "unexpected error: {query}");
+
+        let fragment = resolve_custom_server("https://speed.example.test/backend#secret")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            fragment.contains("fragment"),
+            "unexpected error: {fragment}"
+        );
+    }
+
+    #[test]
+    fn custom_server_host_metadata_excludes_path_and_default_port() {
+        let server =
+            resolve_custom_server("https://speed.example.test:443/private/backend").unwrap();
+        assert_eq!(server.host, "speed.example.test");
+        assert!(!server.host.contains("private"));
+    }
+
+    #[test]
+    fn custom_server_host_metadata_formats_ipv6_and_non_default_ports() {
+        let server = resolve_custom_server("http://[::1]:8080/backend").unwrap();
+        assert_eq!(server.host, "[::1]:8080");
     }
 }

@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -7,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
+use fs2::FileExt;
 use serde::Serialize;
 
 use crate::{model::TestResult, stability::StabilityResult};
@@ -20,9 +22,7 @@ pub fn persist_default(result: &TestResult) -> Result<(PathBuf, PathBuf)> {
     let results_dir = root.join("results");
     fs::create_dir_all(&results_dir).context("failed to create results directory")?;
 
-    let filename = result.timestamp.format("%Y%m%dT%H%M%SZ.json").to_string();
-    let result_path = results_dir.join(filename);
-    write_json(&result_path, result)?;
+    let result_path = write_unique_timestamped_json(&results_dir, &result.timestamp, result)?;
 
     let history_path = root.join("history.jsonl");
     append_jsonl(&history_path, result)?;
@@ -36,9 +36,7 @@ pub fn persist_stability(result: &StabilityResult) -> Result<(PathBuf, PathBuf)>
     let results_dir = stability_root.join("results");
     fs::create_dir_all(&results_dir).context("failed to create stability results directory")?;
 
-    let filename = result.timestamp.format("%Y%m%dT%H%M%SZ.json").to_string();
-    let result_path = results_dir.join(filename);
-    write_stability_json(&result_path, result)?;
+    let result_path = write_unique_timestamped_json(&results_dir, &result.timestamp, result)?;
 
     let history_path = stability_root.join("history.jsonl");
     append_jsonl_value(&history_path, result)?;
@@ -51,10 +49,13 @@ pub fn load_history() -> Result<Vec<TestResult>> {
 }
 
 pub fn load_history_since(days: u64) -> Result<Vec<TestResult>> {
-    let cutoff = Utc::now() - ChronoDuration::days(days.min(i64::MAX as u64) as i64);
+    let now = Utc::now();
+    let cutoff = now - ChronoDuration::days(days.min(i64::MAX as u64) as i64);
     let mut results: Vec<_> = load_history()?
         .into_iter()
-        .filter(|result| result.timestamp >= cutoff)
+        .filter(|result| {
+            result.timestamp >= cutoff && is_plausible_history_timestamp(&result.timestamp, &now)
+        })
         .collect();
     results.sort_by_key(|result| result.timestamp);
     Ok(results)
@@ -94,6 +95,43 @@ fn write_json_value<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
+fn write_unique_timestamped_json<T: Serialize>(
+    directory: &Path,
+    timestamp: &chrono::DateTime<Utc>,
+    value: &T,
+) -> Result<PathBuf> {
+    fs::create_dir_all(directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+    let mut content =
+        serde_json::to_vec_pretty(value).context("failed to serialize JSON output")?;
+    content.push(b'\n');
+    let stem = timestamp.format("%Y%m%dT%H%M%SZ").to_string();
+
+    for collision in 0_u64.. {
+        let filename = if collision == 0 {
+            format!("{stem}.json")
+        } else {
+            format!("{stem}-{collision}.json")
+        };
+        let path = directory.join(filename);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(&content)
+                    .with_context(|| format!("failed to write {}", path.display()))?;
+                file.flush()
+                    .with_context(|| format!("failed to flush {}", path.display()))?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to create {}", path.display()));
+            }
+        }
+    }
+
+    unreachable!("u64 filename collision counter is exhaustive")
+}
+
 fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -109,14 +147,24 @@ fn append_jsonl(path: &Path, result: &TestResult) -> Result<()> {
 
 fn append_jsonl_value<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     ensure_parent(path)?;
+    let mut record = serde_json::to_vec(value).context("failed to serialize history record")?;
+    record.push(b'\n');
     let mut file = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)
         .with_context(|| format!("failed to open {}", path.display()))?;
-    serde_json::to_writer(&mut file, value).context("failed to serialize history record")?;
-    file.write_all(b"\n")
-        .context("failed to append history record")?;
+    FileExt::lock_exclusive(&file).with_context(|| format!("failed to lock {}", path.display()))?;
+    if let Err(error) = file.write_all(&record) {
+        let _ = FileExt::unlock(&file);
+        return Err(error).context("failed to append history record");
+    }
+    if let Err(error) = file.flush() {
+        let _ = FileExt::unlock(&file);
+        return Err(error).context("failed to flush history record");
+    }
+    FileExt::unlock(&file).with_context(|| format!("failed to unlock {}", path.display()))?;
     Ok(())
 }
 
@@ -126,19 +174,46 @@ fn load_history_path(path: &Path) -> Result<Vec<TestResult>> {
     }
 
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
+    FileExt::lock_shared(&file)
+        .with_context(|| format!("failed to lock {} for reading", path.display()))?;
+    let mut reader = BufReader::new(file);
     let mut results = Vec::new();
-    for (index, line) in reader.lines().enumerate() {
+    let now = Utc::now();
+    for (index, line) in (&mut reader).split(b'\n').enumerate() {
         let line = line.with_context(|| format!("failed reading history line {}", index + 1))?;
-        if line.trim().is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let result = serde_json::from_str::<TestResult>(&line)
-            .with_context(|| format!("invalid history record on line {}", index + 1))?;
-        results.push(result);
+        match serde_json::from_slice::<TestResult>(&line) {
+            Ok(result) => {
+                if !is_plausible_history_timestamp(&result.timestamp, &now) {
+                    eprintln!(
+                        "warning: retaining history record on line {} in {} even though timestamp {} is implausibly far in the future; time-window views will ignore it",
+                        index + 1,
+                        path.display(),
+                        result.timestamp.to_rfc3339()
+                    );
+                }
+                results.push(result);
+            }
+            Err(error) => eprintln!(
+                "warning: skipping invalid history record on line {} in {}: {error}",
+                index + 1,
+                path.display()
+            ),
+        }
     }
+    FileExt::unlock(reader.get_ref())
+        .with_context(|| format!("failed to unlock {} after reading", path.display()))?;
     results.sort_by_key(|result| result.timestamp);
     Ok(results)
+}
+
+fn is_plausible_history_timestamp(
+    timestamp: &chrono::DateTime<Utc>,
+    now: &chrono::DateTime<Utc>,
+) -> bool {
+    *timestamp <= *now + ChronoDuration::minutes(5)
 }
 
 #[derive(Serialize)]
@@ -225,34 +300,46 @@ impl<'a> From<&'a TestResult> for CsvRecord<'a> {
 fn data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        return env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .map(|path| path.join("speedtest"));
+        return absolute_env_path(env::var_os("LOCALAPPDATA")).map(|path| path.join("speedtest"));
     }
 
     #[cfg(target_os = "macos")]
     {
-        return env::var_os("HOME")
-            .map(PathBuf::from)
+        return absolute_env_path(env::var_os("HOME"))
             .map(|path| path.join("Library/Application Support/speedtest"));
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if let Some(path) = env::var_os("XDG_DATA_HOME") {
-            return Some(PathBuf::from(path).join("speedtest"));
-        }
-        return env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|path| path.join(".local/share/speedtest"));
+        return unix_data_dir(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"));
     }
 
     #[allow(unreachable_code)]
     None
 }
 
+fn absolute_env_path(value: Option<OsString>) -> Option<PathBuf> {
+    value
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty() && path.is_absolute())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unix_data_dir(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    absolute_env_path(xdg_data_home)
+        .map(|path| path.join("speedtest"))
+        .or_else(|| absolute_env_path(home).map(|path| path.join(".local/share/speedtest")))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashSet,
+        sync::{mpsc, Arc, Barrier},
+        thread,
+        time::Duration,
+    };
+
     use chrono::Utc;
     use tempfile::tempdir;
 
@@ -330,5 +417,151 @@ mod tests {
         let loaded = load_history_path(&path).unwrap();
         assert_eq!(loaded.len(), 2);
         assert!(loaded[0].timestamp <= loaded[1].timestamp);
+    }
+
+    #[test]
+    fn concurrent_history_appends_preserve_every_record() {
+        const WRITERS: usize = 64;
+
+        let dir = tempdir().unwrap();
+        let path = Arc::new(dir.path().join("history.jsonl"));
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|index| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let mut record = result();
+                    record.backend = format!("writer-{index}");
+                    barrier.wait();
+                    append_jsonl(&path, &record).unwrap();
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let loaded = load_history_path(&path).unwrap();
+        assert_eq!(loaded.len(), WRITERS);
+        let backends: HashSet<_> = loaded
+            .iter()
+            .map(|record| record.backend.as_str())
+            .collect();
+        assert_eq!(backends.len(), WRITERS);
+    }
+
+    #[test]
+    fn history_reader_waits_for_an_in_progress_locked_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let serialized = serde_json::to_vec(&result()).unwrap();
+        let split = serialized.len() / 2;
+        let writer_path = path.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .append(true)
+                .open(writer_path)
+                .unwrap();
+            FileExt::lock_exclusive(&file).unwrap();
+            file.write_all(&serialized[..split]).unwrap();
+            file.flush().unwrap();
+            started_tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(25));
+            file.write_all(&serialized[split..]).unwrap();
+            file.write_all(b"\n").unwrap();
+            file.flush().unwrap();
+            FileExt::unlock(&file).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        let loaded = load_history_path(&path).unwrap();
+        writer.join().unwrap();
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn identical_timestamps_create_distinct_result_files() {
+        let dir = tempdir().unwrap();
+        let first = result();
+        let mut second = first.clone();
+        second.download.mbps = 200.0;
+
+        let first_path =
+            write_unique_timestamped_json(dir.path(), &first.timestamp, &first).unwrap();
+        let second_path =
+            write_unique_timestamped_json(dir.path(), &second.timestamp, &second).unwrap();
+
+        assert_ne!(first_path, second_path);
+        assert_eq!(read_result(&first_path).unwrap().download.mbps, 100.0);
+        assert_eq!(read_result(&second_path).unwrap().download.mbps, 200.0);
+    }
+
+    #[test]
+    fn corrupt_history_line_does_not_hide_valid_records() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let first = result();
+        let mut second = result();
+        second.backend = "second".to_string();
+        let content = format!(
+            "{}\nnot valid json\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+        fs::write(&path, content).unwrap();
+
+        let loaded = load_history_path(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().any(|record| record.backend == "test"));
+        assert!(loaded.iter().any(|record| record.backend == "second"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn invalid_xdg_data_home_falls_back_only_to_absolute_home() {
+        let fallback = unix_data_dir(
+            Some(OsString::from("relative/xdg")),
+            Some(OsString::from("/home/example")),
+        );
+        assert_eq!(
+            fallback,
+            Some(PathBuf::from("/home/example/.local/share/speedtest"))
+        );
+        assert_eq!(
+            unix_data_dir(Some(OsString::new()), Some(OsString::from("relative-home"))),
+            None
+        );
+    }
+
+    #[test]
+    fn implausibly_future_history_timestamp_is_retained_in_base_history() {
+        let now = Utc::now();
+        assert!(is_plausible_history_timestamp(
+            &(now + ChronoDuration::minutes(5)),
+            &now
+        ));
+        assert!(!is_plausible_history_timestamp(
+            &(now + ChronoDuration::minutes(6)),
+            &now
+        ));
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let mut future = result();
+        future.timestamp = now + ChronoDuration::days(365);
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&future).unwrap()),
+        )
+        .unwrap();
+
+        let loaded = load_history_path(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].timestamp, future.timestamp);
     }
 }

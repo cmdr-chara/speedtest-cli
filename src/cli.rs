@@ -20,6 +20,7 @@ pub enum InternetBackendArg {
 #[derive(Debug, Clone, Parser)]
 #[command(name = "speedtest")]
 #[command(version, about = "A fast, polished terminal network quality analyzer")]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -57,7 +58,7 @@ pub struct Cli {
     pub output: Option<PathBuf>,
 
     /// Format used by --output.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Json, requires = "output")]
     pub format: OutputFormat,
 
     /// Do not persist automatic history/results.
@@ -406,6 +407,18 @@ pub struct LanArgs {
     /// Print the canonical result as JSON.
     #[arg(long)]
     pub json: bool,
+
+    /// Also write the completed LAN result to this path.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
+    /// Format used by --output.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Json, requires = "output")]
+    pub format: OutputFormat,
+
+    /// Do not persist automatic history/results.
+    #[arg(long)]
+    pub no_save: bool,
 }
 
 fn parse_stability_duration(value: &str) -> Result<u64, String> {
@@ -459,5 +472,27 @@ mod tests {
     fn parses_probe_interval() {
         assert_eq!(parse_probe_interval("750ms").unwrap(), 750);
         assert_eq!(parse_probe_interval("2s").unwrap(), 2_000);
+    }
+
+    #[test]
+    fn rejects_default_test_options_before_subcommands() {
+        let error = Cli::try_parse_from(["speedtest", "--json", "history"])
+            .expect_err("root measurement options must not be silently ignored");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let parsed = Cli::try_parse_from(["speedtest", "history", "--json"])
+            .expect("subcommand-local options remain valid");
+        assert!(matches!(
+            parsed.command,
+            Some(Command::History(HistoryArgs { json: true, .. }))
+        ));
+    }
+
+    #[test]
+    fn output_format_requires_an_output_path() {
+        assert!(Cli::try_parse_from(["speedtest", "--format", "csv"]).is_err());
+        assert!(
+            Cli::try_parse_from(["speedtest", "lan", "127.0.0.1:9876", "--format", "csv"]).is_err()
+        );
     }
 }

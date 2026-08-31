@@ -113,22 +113,36 @@ impl CloudflareEngine {
 
     async fn warm_up(&self) -> Result<()> {
         for bytes in [1_000_000_u64, 100_000, 1] {
-            let response = self
-                .client
-                .get(DOWNLOAD_URL)
-                .query(&[("bytes", bytes), ("warmup", cache_buster())])
-                .header("cache-control", "no-store")
-                .send()
-                .await
-                .context("Cloudflare warm-up request failed")?;
-            if response.status().is_success() {
-                let _ = response
-                    .bytes()
+            let mut rate_limit_retries = 0_usize;
+            loop {
+                let response = self
+                    .client
+                    .get(DOWNLOAD_URL)
+                    .query(&[("bytes", bytes), ("warmup", cache_buster())])
+                    .header("cache-control", "no-store")
+                    .send()
                     .await
-                    .context("Cloudflare warm-up body failed")?;
-                return Ok(());
-            }
-            if !is_size_rejection(response.status()) {
+                    .context("Cloudflare warm-up request failed")?;
+                if response.status().is_success() {
+                    let _ = response
+                        .bytes()
+                        .await
+                        .context("Cloudflare warm-up body failed")?;
+                    return Ok(());
+                }
+                if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                    rate_limit_retries += 1;
+                    if rate_limit_retries > MAX_RATE_LIMIT_RETRIES {
+                        return Err(anyhow!(
+                            "Cloudflare rate limited warm-up probes after {MAX_RATE_LIMIT_RETRIES} retries"
+                        ));
+                    }
+                    sleep(rate_limit_delay(&response, rate_limit_retries)).await;
+                    continue;
+                }
+                if is_size_rejection(response.status()) {
+                    break;
+                }
                 response
                     .error_for_status()
                     .context("Cloudflare warm-up endpoint returned an error")?;

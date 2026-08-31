@@ -12,8 +12,7 @@ use tokio::{
 
 use crate::{
     analysis,
-    dns::{DnsCategory, DnsProviderBenchmark},
-    model::QualityGrade,
+    dns::{finalize_score, grade_for_score, DnsCategory, DnsProviderBenchmark},
 };
 
 const TIMEOUT: Duration = Duration::from_millis(1_500);
@@ -42,9 +41,13 @@ pub async fn test_servers(servers: Vec<IpAddr>, queries: usize) -> Result<DnsPro
             samples.push(ms);
         }
     }
+    Ok(score_samples(servers, queries, &samples))
+}
+
+fn score_samples(servers: Vec<IpAddr>, queries: usize, samples: &[f64]) -> DnsProviderBenchmark {
     let successes = samples.len();
     let success_rate_percent = successes as f64 / queries as f64 * 100.0;
-    let latency = analysis::distribution(&samples);
+    let latency = analysis::distribution(samples);
     let median = latency.as_ref().map_or(1_500.0, |stats| stats.median_ms);
     let p95 = latency.as_ref().map_or(1_500.0, |stats| stats.p95_ms);
     let spread = latency
@@ -52,12 +55,14 @@ pub async fn test_servers(servers: Vec<IpAddr>, queries: usize) -> Result<DnsPro
         .map_or(1_500.0, |stats| (stats.p95_ms - stats.median_ms).max(0.0));
     let latency_score = absolute_latency_score(median) * 0.60 + absolute_latency_score(p95) * 0.25;
     let stability_score = (100.0 - spread / median.max(1.0) * 100.0).clamp(15.0, 100.0);
-    let score = (latency_score + success_rate_percent * 0.10 + stability_score * 0.05)
-        .round()
-        .clamp(0.0, 100.0) as u8;
-    let grade = grade(score);
+    let score = finalize_score(
+        successes,
+        success_rate_percent,
+        latency_score + success_rate_percent * 0.10 + stability_score * 0.05,
+    );
+    let grade = grade_for_score(score);
 
-    Ok(DnsProviderBenchmark {
+    DnsProviderBenchmark {
         provider_id: "custom".to_string(),
         provider_name: "Custom resolver".to_string(),
         profile_name: "explicit IP".to_string(),
@@ -71,7 +76,7 @@ pub async fn test_servers(servers: Vec<IpAddr>, queries: usize) -> Result<DnsPro
         grade,
         s_tier: score >= 98 && success_rate_percent >= 100.0 && median <= 15.0,
         is_current: false,
-    })
+    }
 }
 
 async fn query(server: IpAddr, domain: &str) -> Result<f64> {
@@ -149,18 +154,33 @@ fn absolute_latency_score(value: f64) -> f64 {
     }
 }
 
-fn grade(score: u8) -> QualityGrade {
-    if score >= 95 {
-        QualityGrade::APlus
-    } else if score >= 88 {
-        QualityGrade::A
-    } else if score >= 78 {
-        QualityGrade::B
-    } else if score >= 65 {
-        QualityGrade::C
-    } else if score >= 50 {
-        QualityGrade::D
-    } else {
-        QualityGrade::F
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::QualityGrade;
+
+    #[test]
+    fn zero_success_custom_result_has_zero_score_and_f_grade() {
+        let result = score_samples(vec!["192.0.2.1".parse().unwrap()], 10, &[]);
+
+        assert_eq!(result.score, 0);
+        assert_eq!(result.grade, QualityGrade::F);
+        assert!(!result.s_tier);
+    }
+
+    #[test]
+    fn reliable_custom_scoring_is_preserved() {
+        let result = score_samples(vec!["192.0.2.1".parse().unwrap()], 10, &[10.0; 10]);
+
+        assert_eq!(result.score, 100);
+        assert_eq!(result.grade, QualityGrade::APlus);
+        assert!(result.s_tier);
+    }
+
+    #[test]
+    fn partial_custom_success_cannot_receive_an_elite_grade() {
+        let result = score_samples(vec!["192.0.2.1".parse().unwrap()], 10, &[5.0; 5]);
+        assert!(result.score <= 40);
+        assert_eq!(result.grade, QualityGrade::F);
     }
 }

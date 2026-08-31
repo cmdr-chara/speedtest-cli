@@ -18,7 +18,7 @@ use crate::{
     stability::{StabilityEvent, StabilityResult, StabilitySample},
 };
 
-use super::{enter_terminal, frame_interval, restore_terminal};
+use super::{enter_terminal, finish_terminal_session, frame_interval, restore_terminal};
 
 const TRACE_POINTS: usize = 120;
 
@@ -86,8 +86,8 @@ pub(super) async fn run(
 ) -> Result<StabilityResult> {
     let mut terminal = enter_terminal()?;
     let result = run_loop(&mut terminal, &mut rx, target_duration, render_fps).await;
-    restore_terminal(&mut terminal)?;
-    result
+    let restoration = restore_terminal(&mut terminal);
+    finish_terminal_session(result, restoration)
 }
 
 async fn run_loop(
@@ -270,10 +270,15 @@ fn render_metrics(frame: &mut Frame, app: &StabilityApp, area: Rect) {
         ),
         metric_line(
             "PROBES",
-            format!(
-                "{} ok / {} failed",
-                app.probes.saturating_sub(app.failed),
-                app.failed
+            app.result.as_ref().map_or_else(
+                || format_probe_counts(app.probes.saturating_sub(app.failed), app.failed, 0),
+                |result| {
+                    format_probe_counts(
+                        result.successful_probes,
+                        result.failed_probes,
+                        result.skipped_probes,
+                    )
+                },
             ),
         ),
     ]);
@@ -301,8 +306,10 @@ fn render_status(frame: &mut Frame, app: &StabilityApp, area: Rect) {
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )),
             Line::from(format!(
-                "probe availability {:.2}%  •  {} failed  •  {} failure bursts",
-                result.probe_availability_percent, result.failed_probes, result.failure_bursts
+                "probe availability {:.2}%  •  {}  •  {} failure bursts",
+                result.probe_availability_percent,
+                format_probe_outcomes(result.failed_probes, result.skipped_probes),
+                result.failure_bursts
             )),
         ])
         .alignment(Alignment::Center)
@@ -334,7 +341,7 @@ fn render_footer(frame: &mut Frame, app: &StabilityApp, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Cloudflare Edge", Style::default().fg(Color::Gray)),
+            Span::styled("Network stability test", Style::default().fg(Color::Gray)),
             Span::raw("  •  "),
             Span::styled(instruction, Style::default().fg(Color::DarkGray)),
         ]))
@@ -367,6 +374,22 @@ fn format_ms_value(value: f64) -> String {
     format!("{value:.1} ms")
 }
 
+fn format_probe_counts(successful: usize, failed: usize, skipped: usize) -> String {
+    let mut counts = format!("{successful} ok / {failed} failed");
+    if skipped > 0 {
+        counts.push_str(&format!(" / {skipped} skipped"));
+    }
+    counts
+}
+
+fn format_probe_outcomes(failed: usize, skipped: usize) -> String {
+    let mut outcomes = format!("{failed} failed");
+    if skipped > 0 {
+        outcomes.push_str(&format!("  •  {skipped} skipped"));
+    }
+    outcomes
+}
+
 fn format_clock(milliseconds: u64) -> String {
     let seconds = milliseconds / 1000;
     let hours = seconds / 3600;
@@ -376,5 +399,21 @@ fn format_clock(milliseconds: u64) -> String {
         format!("{hours:02}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_labels_include_skipped_work_only_when_present() {
+        assert_eq!(format_probe_counts(10, 1, 0), "10 ok / 1 failed");
+        assert_eq!(
+            format_probe_counts(10, 1, 2),
+            "10 ok / 1 failed / 2 skipped"
+        );
+        assert_eq!(format_probe_outcomes(1, 0), "1 failed");
+        assert_eq!(format_probe_outcomes(1, 2), "1 failed  •  2 skipped");
     }
 }

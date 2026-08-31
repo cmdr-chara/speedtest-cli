@@ -104,6 +104,13 @@ impl App {
     pub(super) fn is_complete(&self) -> bool {
         self.result.is_some()
     }
+
+    pub(super) fn footer_source(&self) -> String {
+        self.result.as_ref().map_or_else(
+            || "Internet speed test".to_string(),
+            |result| format!("{} ({})", result.server.host, result.backend),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +154,11 @@ mod tests {
         assert_eq!(app.phase, TestPhase::Complete);
         assert_eq!(app.speedometer.displayed_mbps(), 780.0);
         assert_eq!(app.speedometer.peak_mbps(), 812.0);
+        assert_eq!(app.footer_source(), "speed.cloudflare.com (cloudflare)");
+    }
+
+    #[test]
+    fn footer_is_backend_neutral_until_a_result_exists() {
+        assert_eq!(App::default().footer_source(), "Internet speed test");
     }
 }

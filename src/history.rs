@@ -30,6 +30,22 @@ pub enum AnomalySeverity {
     Warning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryScope {
+    Internet,
+    Lan,
+}
+
+impl HistoryScope {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Internet => "internet",
+            Self::Lan => "LAN",
+        }
+    }
+}
+
 impl AnomalySeverity {
     pub const fn label(self) -> &'static str {
         match self {
@@ -50,6 +66,7 @@ pub struct HistoryAnomaly {
 pub struct HistorySummary {
     pub generated_at: chrono::DateTime<Utc>,
     pub period_days: u64,
+    pub scope: HistoryScope,
     pub runs: usize,
     pub median_download_mbps: f64,
     pub best_download_mbps: f64,
@@ -68,6 +85,20 @@ pub fn summarize(results: &[TestResult], period_days: u64) -> Option<HistorySumm
     if results.is_empty() {
         return None;
     }
+
+    // LAN throughput is a fundamentally different population from WAN tests.
+    // Prefer Internet statistics whenever the period contains Internet runs;
+    // otherwise summarize the available LAN history.
+    let scope = if results.iter().any(|result| !is_lan(result)) {
+        HistoryScope::Internet
+    } else {
+        HistoryScope::Lan
+    };
+    let results = results
+        .iter()
+        .filter(|result| matches_scope(result, scope))
+        .cloned()
+        .collect::<Vec<_>>();
 
     let downloads: Vec<f64> = results.iter().map(|result| result.download.mbps).collect();
     let uploads: Vec<f64> = results.iter().map(|result| result.upload.mbps).collect();
@@ -97,6 +128,7 @@ pub fn summarize(results: &[TestResult], period_days: u64) -> Option<HistorySumm
     Some(HistorySummary {
         generated_at: Utc::now(),
         period_days,
+        scope,
         runs: results.len(),
         median_download_mbps: median(&downloads),
         best_download_mbps: downloads.iter().copied().fold(0.0, f64::max),
@@ -107,9 +139,35 @@ pub fn summarize(results: &[TestResult], period_days: u64) -> Option<HistorySumm
         median_quality_score: (!quality_scores.is_empty()).then(|| median(&quality_scores)),
         s_tier_runs,
         trend: download_trend(&downloads),
-        anomalies: detect_latest_anomalies(results),
+        anomalies: detect_latest_anomalies(&results),
         download_sparkline: sparkline(&downloads, 48),
     })
+}
+
+pub fn latest_comparable_pair(results: &[TestResult]) -> Option<(TestResult, TestResult)> {
+    [false, true]
+        .into_iter()
+        .filter_map(|lan_scope| {
+            let mut scoped = results
+                .iter()
+                .rev()
+                .filter(|result| is_lan(result) == lan_scope);
+            let after = scoped.next()?;
+            let before = scoped.next()?;
+            Some((before.clone(), after.clone()))
+        })
+        .max_by_key(|(_, after)| after.timestamp)
+}
+
+fn is_lan(result: &TestResult) -> bool {
+    result.backend.eq_ignore_ascii_case("lan")
+}
+
+fn matches_scope(result: &TestResult, scope: HistoryScope) -> bool {
+    match scope {
+        HistoryScope::Internet => !is_lan(result),
+        HistoryScope::Lan => is_lan(result),
+    }
 }
 
 pub fn detect_latest_anomalies(results: &[TestResult]) -> Vec<HistoryAnomaly> {
@@ -349,5 +407,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary.trend, HistoryTrend::Improving);
+    }
+
+    #[test]
+    fn internet_stats_are_not_distorted_by_lan_results() {
+        let internet = [result(0, 100.0, 20.0, 10.0), result(1, 120.0, 25.0, 12.0)];
+        let mut lan = result(2, 20_000.0, 18_000.0, 0.1);
+        lan.backend = "lan".to_string();
+        let summary = summarize(&[internet[0].clone(), internet[1].clone(), lan], 30).unwrap();
+
+        assert_eq!(summary.scope, HistoryScope::Internet);
+        assert_eq!(summary.runs, 2);
+        assert_eq!(summary.median_download_mbps, 110.0);
+    }
+
+    #[test]
+    fn implicit_compare_uses_the_latest_result_in_the_same_scope() {
+        let wan = result(0, 100.0, 20.0, 10.0);
+        let mut first_lan = result(1, 1_000.0, 900.0, 1.0);
+        first_lan.backend = "lan".to_string();
+        let second_wan = result(2, 120.0, 25.0, 9.0);
+        let mut second_lan = result(3, 1_100.0, 950.0, 0.9);
+        second_lan.backend = "lan".to_string();
+
+        let (before, after) =
+            latest_comparable_pair(&[wan, first_lan.clone(), second_wan, second_lan.clone()])
+                .unwrap();
+        assert_eq!(before.timestamp, first_lan.timestamp);
+        assert_eq!(after.timestamp, second_lan.timestamp);
+    }
+
+    #[test]
+    fn implicit_compare_uses_an_available_internet_pair_after_one_lan_run() {
+        let first_wan = result(0, 100.0, 20.0, 10.0);
+        let second_wan = result(1, 120.0, 25.0, 9.0);
+        let mut lone_lan = result(2, 1_000.0, 900.0, 1.0);
+        lone_lan.backend = "lan".to_string();
+
+        let (before, after) =
+            latest_comparable_pair(&[first_wan.clone(), second_wan.clone(), lone_lan]).unwrap();
+        assert_eq!(before.timestamp, first_wan.timestamp);
+        assert_eq!(after.timestamp, second_wan.timestamp);
     }
 }

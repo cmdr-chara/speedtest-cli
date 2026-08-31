@@ -28,6 +28,12 @@ pub struct StabilityResult {
     pub duration_seconds: u64,
     pub interval_ms: u64,
     pub samples: Vec<StabilitySample>,
+    #[serde(default)]
+    pub expected_probes: usize,
+    #[serde(default)]
+    pub attempted_probes: usize,
+    #[serde(default)]
+    pub skipped_probes: usize,
     pub successful_probes: usize,
     pub failed_probes: usize,
     pub probe_availability_percent: f64,
@@ -84,10 +90,11 @@ pub async fn run(
             break;
         }
 
-        let latency_ms = tokio::select! {
-            result = latency_probe(&client) => result.ok(),
-            _ = sleep_until(deadline) => break,
+        let probe_result = tokio::select! {
+            result = latency_probe(&client) => Some(result.ok()),
+            _ = sleep_until(deadline) => None,
         };
+        let latency_ms = probe_result.flatten();
         let sample = StabilitySample {
             elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             latency_ms,
@@ -96,6 +103,12 @@ pub async fn run(
             let _ = tx.send(StabilityEvent::Sample(sample.clone()));
         }
         samples.push(sample);
+
+        // A probe that was started and then cancelled by the overall deadline
+        // is an attempted failure, not an unattempted schedule slot.
+        if probe_result.is_none() {
+            break;
+        }
 
         next_probe += interval;
         let now = Instant::now();
@@ -146,12 +159,15 @@ pub fn summarize(
         })
         .collect();
     let successful_probes = successful.len();
-    let failed_probes = samples.len().saturating_sub(successful_probes);
+    let attempted_probes = samples.len();
+    let expected_probes = expected_probe_count(duration, interval);
+    let skipped_probes = expected_probes.saturating_sub(attempted_probes);
+    let failed_probes = attempted_probes.saturating_sub(successful_probes);
     let failure_burst_count = failure_bursts(&samples);
-    let availability = if samples.is_empty() {
+    let availability = if expected_probes == 0 {
         0.0
     } else {
-        successful_probes as f64 / samples.len() as f64 * 100.0
+        successful_probes as f64 / expected_probes as f64 * 100.0
     };
     let latency = analysis::distribution(&successful);
     let jitter = analysis::distribution(&jitter_values);
@@ -160,6 +176,7 @@ pub fn summarize(
     let s_tier = score >= 98
         && grade == QualityGrade::APlus
         && failed_probes == 0
+        && skipped_probes == 0
         && successful_probes >= 30;
 
     StabilityResult {
@@ -167,6 +184,9 @@ pub fn summarize(
         duration_seconds: duration.as_secs(),
         interval_ms: interval.as_millis().min(u128::from(u64::MAX)) as u64,
         samples,
+        expected_probes,
+        attempted_probes,
+        skipped_probes,
         successful_probes,
         failed_probes,
         probe_availability_percent: availability,
@@ -177,6 +197,15 @@ pub fn summarize(
         grade,
         s_tier,
     }
+}
+
+fn expected_probe_count(duration: Duration, interval: Duration) -> usize {
+    let duration_ns = duration.as_nanos();
+    let interval_ns = interval.as_nanos();
+    if duration_ns == 0 || interval_ns == 0 {
+        return 0;
+    }
+    duration_ns.div_ceil(interval_ns).min(usize::MAX as u128) as usize
 }
 
 pub fn failure_bursts(samples: &[StabilitySample]) -> usize {
@@ -259,12 +288,13 @@ fn stability_score(
         ),
         (availability_score(availability), 0.10),
     ];
-    components
+    let weighted = components
         .iter()
         .map(|(score, weight)| score * weight)
         .sum::<f64>()
         .round()
-        .clamp(0.0, 100.0) as u8
+        .clamp(0.0, 100.0);
+    weighted.min(availability_score(availability)) as u8
 }
 
 fn lower_score(value: f64, bands: &[(f64, f64)]) -> f64 {
@@ -343,5 +373,56 @@ mod tests {
         assert_eq!(result.failure_bursts, 2);
         assert!(result.probe_availability_percent < 50.0);
         assert!(!result.s_tier);
+    }
+
+    #[test]
+    fn missed_schedule_slots_reduce_probe_availability() {
+        let result = summarize(
+            vec![sample(0, Some(10.0))],
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+        );
+        assert_eq!(result.expected_probes, 5);
+        assert_eq!(result.attempted_probes, 1);
+        assert_eq!(result.skipped_probes, 4);
+        assert_eq!(result.probe_availability_percent, 20.0);
+        assert!(!result.s_tier);
+    }
+
+    #[test]
+    fn very_low_availability_cannot_receive_a_high_grade() {
+        let result = summarize(
+            vec![sample(0, Some(5.0)), sample(1, Some(5.0))],
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+        );
+        assert_eq!(result.successful_probes, 2);
+        assert_eq!(result.expected_probes, 60);
+        assert!(result.probe_availability_percent < 4.0);
+        assert!(result.score <= 10);
+        assert_eq!(result.grade, QualityGrade::F);
+    }
+
+    #[test]
+    fn materially_incomplete_runs_are_capped_by_availability() {
+        let ninety_percent = summarize(
+            (0..100)
+                .map(|index| sample(index, (index < 90).then_some(5.0)))
+                .collect(),
+            Duration::from_secs(100),
+            Duration::from_secs(1),
+        );
+        assert_eq!(ninety_percent.probe_availability_percent, 90.0);
+        assert!(ninety_percent.score <= 40);
+
+        let ninety_seven_percent = summarize(
+            (0..100)
+                .map(|index| sample(index, (index < 97).then_some(5.0)))
+                .collect(),
+            Duration::from_secs(100),
+            Duration::from_secs(1),
+        );
+        assert_eq!(ninety_seven_percent.probe_availability_percent, 97.0);
+        assert!(ninety_seven_percent.score <= 65);
     }
 }

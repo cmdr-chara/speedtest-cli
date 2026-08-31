@@ -11,9 +11,9 @@ use tokio::{
 use crate::analysis;
 
 use super::{
-    grade_for_score, median_or_inf, percent, providers_for_profile, BenchmarkProfile,
-    DnsBenchmarkResult, DnsProvider, DnsProviderBenchmark, RawBenchmark, DNS_TIMEOUT,
-    NEXT_QUERY_ID, TEST_DOMAINS,
+    finalize_score, grade_for_score, median_or_inf, percent, providers_for_profile,
+    select_winner_id, BenchmarkProfile, DnsBenchmarkResult, DnsProvider, DnsProviderBenchmark,
+    RawBenchmark, DNS_TIMEOUT, NEXT_QUERY_ID, TEST_DOMAINS,
 };
 
 pub async fn benchmark(profile: BenchmarkProfile, queries: usize) -> Result<DnsBenchmarkResult> {
@@ -42,10 +42,12 @@ pub async fn benchmark(profile: BenchmarkProfile, queries: usize) -> Result<DnsB
 
     let best_median = raw_entries
         .iter()
+        .filter(|raw| percent(raw.successes, raw.queries) >= 80.0)
         .filter_map(|raw| analysis::distribution(&raw.samples).map(|stats| stats.median_ms))
         .fold(f64::INFINITY, f64::min);
     let best_p95 = raw_entries
         .iter()
+        .filter(|raw| percent(raw.successes, raw.queries) >= 80.0)
         .filter_map(|raw| analysis::distribution(&raw.samples).map(|stats| stats.p95_ms))
         .fold(f64::INFINITY, f64::min);
 
@@ -59,10 +61,7 @@ pub async fn benchmark(profile: BenchmarkProfile, queries: usize) -> Result<DnsB
             .cmp(&left.score)
             .then_with(|| median_or_inf(left).total_cmp(&median_or_inf(right)))
     });
-    let winner_id = entries
-        .iter()
-        .find(|entry| entry.successes > 0)
-        .map(|entry| entry.provider_id.clone());
+    let winner_id = select_winner_id(&entries);
 
     Ok(DnsBenchmarkResult {
         timestamp: Utc::now(),
@@ -139,12 +138,14 @@ fn score_relative(raw: RawBenchmark, best_median: f64, best_p95: f64) -> DnsProv
         let spread = (stats.p95_ms - stats.median_ms).max(0.0);
         (100.0 - spread / stats.median_ms.max(1.0) * 100.0).clamp(15.0, 100.0)
     });
-    let score = (median_score * 0.40
-        + p95_score * 0.25
-        + success_rate_percent * 0.25
-        + stability_score * 0.10)
-        .round()
-        .clamp(0.0, 100.0) as u8;
+    let score = finalize_score(
+        raw.successes,
+        success_rate_percent,
+        median_score * 0.40
+            + p95_score * 0.25
+            + success_rate_percent * 0.25
+            + stability_score * 0.10,
+    );
     let grade = grade_for_score(score);
     let s_tier = score >= 98 && success_rate_percent >= 100.0 && median <= best_median * 1.10 + 0.5;
 
@@ -170,4 +171,69 @@ fn relative_score(value: f64, best: f64) -> f64 {
         return 0.0;
     }
     (best / value * 100.0).clamp(15.0, 100.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::QualityGrade;
+
+    fn raw_benchmark(successes: usize, samples: Vec<f64>) -> RawBenchmark {
+        RawBenchmark {
+            provider_id: "doh-test".to_string(),
+            provider_name: "DoH test".to_string(),
+            profile_name: "test".to_string(),
+            category: super::super::DnsCategory::Standard,
+            servers: Vec::new(),
+            queries: 10,
+            successes,
+            samples,
+            is_current: false,
+        }
+    }
+
+    #[test]
+    fn zero_success_doh_result_has_zero_score_and_f_grade() {
+        let result = score_relative(raw_benchmark(0, Vec::new()), 10.0, 10.0);
+
+        assert_eq!(result.score, 0);
+        assert_eq!(result.grade, QualityGrade::F);
+        assert!(!result.s_tier);
+    }
+
+    #[test]
+    fn reliable_doh_scoring_is_preserved() {
+        let result = score_relative(raw_benchmark(10, vec![10.0; 10]), 10.0, 10.0);
+
+        assert_eq!(result.score, 100);
+        assert_eq!(result.grade, QualityGrade::APlus);
+        assert!(result.s_tier);
+    }
+
+    #[test]
+    fn unreliable_doh_latency_does_not_define_relative_baselines() {
+        let raw_entries = [
+            raw_benchmark(1, vec![1.0]),
+            raw_benchmark(10, vec![20.0; 10]),
+        ];
+        let eligible = raw_entries
+            .iter()
+            .filter(|raw| percent(raw.successes, raw.queries) >= 80.0)
+            .collect::<Vec<_>>();
+        let best_median = eligible
+            .iter()
+            .filter_map(|raw| analysis::distribution(&raw.samples).map(|stats| stats.median_ms))
+            .fold(f64::INFINITY, f64::min);
+        let best_p95 = eligible
+            .iter()
+            .filter_map(|raw| analysis::distribution(&raw.samples).map(|stats| stats.p95_ms))
+            .fold(f64::INFINITY, f64::min);
+        drop(eligible);
+        let reliable = score_relative(
+            raw_entries.into_iter().nth(1).unwrap(),
+            best_median,
+            best_p95,
+        );
+        assert_eq!(reliable.score, 100);
+    }
 }

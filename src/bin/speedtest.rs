@@ -1,5 +1,6 @@
 use std::{
     io::{self, Write},
+    path::Path,
     time::Duration,
 };
 
@@ -48,6 +49,9 @@ async fn main() -> Result<()> {
 }
 
 async fn run_speedtest(cli: Cli) -> Result<()> {
+    if cli.librespeed_server.is_some() && !matches!(cli.backend, InternetBackendArg::Librespeed) {
+        bail!("--librespeed-server requires --backend librespeed");
+    }
     let config = EngineConfig {
         streams: usize::from(cli.streams),
         phase_duration: Duration::from_secs(cli.duration),
@@ -74,16 +78,7 @@ async fn run_speedtest(cli: Cli) -> Result<()> {
         print_result(&result);
     }
 
-    if let Some(path) = &cli.output {
-        match cli.format {
-            OutputFormat::Json => storage::write_json(path, &result)?,
-            OutputFormat::Csv => storage::write_csv(path, &result)?,
-        }
-    }
-    if !cli.no_save {
-        storage::persist_default(&result).context("failed to persist speed-test history")?;
-    }
-    Ok(())
+    write_and_persist_result(&result, cli.output.as_deref(), cli.format, cli.no_save)
 }
 
 async fn run_stability(args: StabilityArgs) -> Result<()> {
@@ -156,8 +151,12 @@ fn run_history(args: HistoryArgs) -> Result<()> {
         );
     }
     println!();
-    println!("  Download trend  {}", summary.download_sparkline);
-    println!("  Trend           {}", summary.trend.label());
+    println!(
+        "  Download trend ({})  {}",
+        summary.scope.label(),
+        summary.download_sparkline
+    );
+    println!("  Trend                 {}", summary.trend.label());
     Ok(())
 }
 
@@ -246,11 +245,17 @@ fn run_dns_show(args: DnsShowArgs) -> Result<()> {
     }
     println!("DNS CONFIGURATION");
     println!();
-    println!("  Interface:      {}", state.interface);
+    println!(
+        "  Interface:      {}",
+        escape_terminal_controls(&state.interface)
+    );
     if let Some(device) = &state.device {
-        println!("  Device/profile: {device}");
+        println!("  Device/profile: {}", escape_terminal_controls(device));
     }
-    println!("  Backend:        {}", state.backend);
+    println!(
+        "  Backend:        {}",
+        escape_terminal_controls(&state.backend)
+    );
     println!("  Source:         {}", state.mode.label());
     println!("  DNS servers:    {}", format_servers(&state.servers));
     if let Some(gateway) = state.gateway {
@@ -303,7 +308,7 @@ async fn run_dns_set(args: DnsSetArgs) -> Result<()> {
             state.backend
         );
     }
-    let servers = provider.addresses(state.ipv6_default_route);
+    let servers = provider.addresses_for_routes(state.ipv4_default_route, state.ipv6_default_route);
     if servers.is_empty() {
         bail!(
             "{} does not expose DNS53 addresses",
@@ -351,7 +356,15 @@ async fn run_dns_optimize(args: DnsOptimizeArgs) -> Result<()> {
             state.backend
         );
     }
-    let servers = provider.addresses(state.ipv6_default_route);
+    let servers = provider.addresses_for_routes(state.ipv4_default_route, state.ipv6_default_route);
+    let preflight = dns_custom::test_servers(servers.clone(), 6).await?;
+    if preflight.success_rate_percent < 80.0 {
+        bail!(
+            "refusing to configure {} because preflight DNS success was only {:.0}%",
+            provider.display_name(),
+            preflight.success_rate_percent
+        );
+    }
     println!();
     println!("DNS OPTIMIZER RECOMMENDATION");
     println!("  Winner:         {}", provider.display_name());
@@ -376,7 +389,10 @@ async fn run_dns_optimize(args: DnsOptimizeArgs) -> Result<()> {
 async fn run_dns_reset(args: DnsResetArgs) -> Result<()> {
     let state = dns::system::inspect(args.interface.as_deref())?;
     println!("DNS RESET");
-    println!("  Interface: {}", state.interface);
+    println!(
+        "  Interface: {}",
+        escape_terminal_controls(&state.interface)
+    );
     println!("  Current:   {}", format_servers(&state.servers));
     println!("  Target:    automatic / DHCP-managed DNS");
     if args.dry_run {
@@ -394,8 +410,24 @@ async fn run_dns_reset(args: DnsResetArgs) -> Result<()> {
         return Ok(());
     }
 
+    let _operation = dns::lock_operation()?;
+    let state = revalidate_dns_mutation_state(&state)?;
     let backup_path = dns::save_backup(&state)?;
-    dns::system::reset(&state)?;
+    if let Err(error) = dns::system::reset(&state) {
+        dns::system::flush_cache();
+        match dns::system::restore(&state) {
+            Ok(()) => {
+                dns::system::flush_cache();
+                bail!(
+                    "DNS reset failed ({error:#}); the previous configuration was restored"
+                );
+            }
+            Err(rollback_error) => bail!(
+                "DNS reset failed ({error:#}) and rollback also failed ({rollback_error:#}); snapshot: {}",
+                backup_path.display()
+            ),
+        }
+    }
     dns::system::flush_cache();
     if let Err(error) = dns::verify_system_resolution().await {
         let rollback = dns::system::restore(&state);
@@ -416,7 +448,10 @@ async fn run_dns_rollback(args: DnsRollbackArgs) -> Result<()> {
     let backup = dns::load_backup()?;
     println!("DNS ROLLBACK");
     println!("  Snapshot:   {}", backup.timestamp.to_rfc3339());
-    println!("  Interface:  {}", backup.state.interface);
+    println!(
+        "  Interface:  {}",
+        escape_terminal_controls(&backup.state.interface)
+    );
     println!("  Mode:       {}", backup.state.mode.label());
     println!("  Servers:    {}", format_servers(&backup.state.servers));
     if args.dry_run {
@@ -427,11 +462,33 @@ async fn run_dns_rollback(args: DnsRollbackArgs) -> Result<()> {
         println!("No changes made.");
         return Ok(());
     }
-    dns::system::restore(&backup.state)?;
+    let _operation = dns::lock_operation()?;
+    let current_backup = dns::load_backup()?;
+    if current_backup != backup {
+        bail!("the DNS rollback snapshot changed while awaiting confirmation; rerun the command");
+    }
+    ensure_active_dns_mutation_target(&current_backup.state)?;
+    if !current_backup.state.can_configure() {
+        bail!("the saved DNS snapshot cannot be restored safely by this platform backend");
+    }
+    let pre_rollback_state = dns::system::inspect(Some(&current_backup.state.interface))?;
+    if !pre_rollback_state.can_configure() {
+        bail!("the current DNS state cannot be restored safely if rollback verification fails");
+    }
+    dns::system::restore(&current_backup.state)?;
     dns::system::flush_cache();
-    dns::verify_system_resolution()
-        .await
-        .context("rollback was applied but system DNS verification failed")?;
+    if let Err(error) = dns::verify_system_resolution().await {
+        let recovery = dns::system::restore(&pre_rollback_state);
+        dns::system::flush_cache();
+        match recovery {
+            Ok(()) => bail!(
+                "rollback verification failed ({error:#}); the configuration from before this rollback attempt was restored"
+            ),
+            Err(recovery_error) => bail!(
+                "rollback verification failed ({error:#}) and restoring the configuration from before the attempt also failed ({recovery_error:#})"
+            ),
+        }
+    }
     println!("✓ Previous DNS snapshot restored and verified.");
     Ok(())
 }
@@ -441,11 +498,27 @@ async fn apply_dns_change(
     servers: &[std::net::IpAddr],
     label: &str,
 ) -> Result<()> {
-    let backup_path = dns::save_backup(state)?;
-    dns::system::apply_servers(state, servers)?;
+    let _operation = dns::lock_operation()?;
+    let state = revalidate_dns_mutation_state(state)?;
+    let backup_path = dns::save_backup(&state)?;
+    if let Err(error) = dns::system::apply_servers(&state, servers) {
+        dns::system::flush_cache();
+        match dns::system::restore(&state) {
+            Ok(()) => {
+                dns::system::flush_cache();
+                bail!(
+                    "DNS configuration failed ({error:#}); the previous configuration was restored"
+                );
+            }
+            Err(rollback_error) => bail!(
+                "DNS configuration failed ({error:#}) and rollback failed ({rollback_error:#}); recovery snapshot: {}",
+                backup_path.display()
+            ),
+        }
+    }
     dns::system::flush_cache();
     if let Err(error) = dns::verify_system_resolution().await {
-        let rollback = dns::system::restore(state);
+        let rollback = dns::system::restore(&state);
         dns::system::flush_cache();
         match rollback {
             Ok(()) => bail!(
@@ -463,6 +536,43 @@ async fn apply_dns_change(
     Ok(())
 }
 
+fn revalidate_dns_mutation_state(
+    original: &dns::system::DnsSystemState,
+) -> Result<dns::system::DnsSystemState> {
+    let current = dns::system::inspect(Some(&original.interface))?;
+    if &current != original {
+        bail!(
+            "DNS or route state changed while awaiting confirmation; review the new state and rerun the command"
+        );
+    }
+    ensure_active_dns_mutation_target(&current)?;
+    if !current.can_configure() {
+        bail!(
+            "{} cannot safely preserve and restore DNS on this interface",
+            current.backend
+        );
+    }
+    Ok(current)
+}
+
+fn ensure_active_dns_mutation_target(state: &dns::system::DnsSystemState) -> Result<()> {
+    let active = dns::system::inspect(None)?;
+    if active.interface != state.interface {
+        bail!(
+            "refusing to change DNS on non-active interface `{}` because post-change probes cannot be bound safely; active interface is `{}`",
+            state.interface,
+            active.interface
+        );
+    }
+    if !(state.ipv4_default_route || state.ipv6_default_route) {
+        bail!(
+            "refusing to change DNS on `{}` because it has no active default route",
+            state.interface
+        );
+    }
+    Ok(())
+}
+
 fn run_compare(args: CompareArgs) -> Result<()> {
     let (before, after) = match (&args.before, &args.after) {
         (Some(before), Some(after)) => {
@@ -470,13 +580,11 @@ fn run_compare(args: CompareArgs) -> Result<()> {
         }
         (None, None) => {
             let history = storage::load_history()?;
-            if history.len() < 2 {
-                bail!("compare requires two saved results or explicit BEFORE and AFTER JSON files");
-            }
-            (
-                history[history.len() - 2].clone(),
-                history[history.len() - 1].clone(),
-            )
+            history::latest_comparable_pair(&history).ok_or_else(|| {
+                anyhow!(
+                    "compare requires two saved results from the same Internet/LAN scope or explicit BEFORE and AFTER JSON files"
+                )
+            })?
         }
         _ => bail!("supply both BEFORE and AFTER JSON files, or omit both"),
     };
@@ -492,14 +600,30 @@ fn run_compare(args: CompareArgs) -> Result<()> {
 async fn run_doctor(args: DoctorArgs) -> Result<()> {
     let mut report = doctor::run(args.interface.as_deref()).await?;
     if args.full {
-        let engine = InternetEngine::Cloudflare(CloudflareEngine::new(EngineConfig {
-            streams: 2,
-            phase_duration: Duration::from_secs(8),
-        })?);
-        let result = run_non_interactive(&engine)
-            .await
-            .context("full doctor speed test failed")?;
-        report.attach_speedtest(result);
+        let routing_blocked = report.checks.iter().any(|check| {
+            (check.name == "Default route" && check.status == doctor::DoctorStatus::Fail)
+                || (check.name == "Probe routing"
+                    && check.status == doctor::DoctorStatus::NotAvailable)
+        });
+        let full_result = if routing_blocked {
+            Err(anyhow!(
+                "full speed test skipped because active probes cannot be attributed safely to the selected interface"
+            ))
+        } else {
+            match CloudflareEngine::new(EngineConfig {
+                streams: 2,
+                phase_duration: Duration::from_secs(8),
+            }) {
+                Ok(engine) => run_non_interactive(&InternetEngine::Cloudflare(engine))
+                    .await
+                    .context("full doctor speed test failed"),
+                Err(error) => Err(error.context("failed to initialize full doctor speed test")),
+            }
+        };
+        match full_result {
+            Ok(result) => report.attach_speedtest(result),
+            Err(error) => report.attach_speedtest_failure(&error),
+        }
     }
     if args.json {
         println!("{}", report.pretty_json()?);
@@ -547,13 +671,6 @@ async fn run_verify(args: VerifyArgs) -> Result<()> {
 }
 
 async fn run_serve(args: ServeArgs) -> Result<()> {
-    println!("LAN SPEEDTEST SERVER");
-    println!("  Listening: {}", args.bind);
-    println!(
-        "  Client:    speedtest lan <this-host>:{}",
-        args.bind.port()
-    );
-    println!("  Stop with Ctrl+C.");
     lan::serve(args.bind).await
 }
 
@@ -570,6 +687,24 @@ async fn run_lan(args: LanArgs) -> Result<()> {
         println!("{}", result.pretty_json()?);
     } else {
         print_result(&result);
+    }
+    write_and_persist_result(&result, args.output.as_deref(), args.format, args.no_save)
+}
+
+fn write_and_persist_result(
+    result: &TestResult,
+    output: Option<&Path>,
+    format: OutputFormat,
+    no_save: bool,
+) -> Result<()> {
+    if let Some(path) = output {
+        match format {
+            OutputFormat::Json => storage::write_json(path, result)?,
+            OutputFormat::Csv => storage::write_csv(path, result)?,
+        }
+    }
+    if !no_save {
+        storage::persist_default(result).context("failed to persist speed-test history")?;
     }
     Ok(())
 }
@@ -698,8 +833,8 @@ fn print_stability(result: &StabilityResult) {
     println!("  Duration:       {}s", result.duration_seconds);
     println!("  Probe interval: {} ms", result.interval_ms);
     println!(
-        "  Probes:         {} successful / {} failed",
-        result.successful_probes, result.failed_probes
+        "  Probes:         {} successful / {} failed / {} skipped",
+        result.successful_probes, result.failed_probes, result.skipped_probes
     );
     println!(
         "  Availability:   {:.2}% (HTTP probe availability, not packet loss)",
@@ -725,7 +860,11 @@ fn print_stability(result: &StabilityResult) {
 }
 
 fn print_stats(summary: &HistorySummary) {
-    println!("NETWORK STATS · {} DAYS", summary.period_days);
+    println!(
+        "NETWORK STATS · {} · {} DAYS",
+        summary.scope.label().to_ascii_uppercase(),
+        summary.period_days
+    );
     println!();
     println!("  Runs:              {}", summary.runs);
     println!(
@@ -839,7 +978,10 @@ fn print_dns_change(
 ) {
     println!("DNS CONFIGURATION CHANGE");
     println!();
-    println!("  Interface:      {}", state.interface);
+    println!(
+        "  Interface:      {}",
+        escape_terminal_controls(&state.interface)
+    );
     println!("  Current:        {}", format_servers(&state.servers));
     println!("  New provider:   {label}");
     println!("  New servers:    {}", format_servers(servers));
@@ -869,29 +1011,27 @@ fn print_comparison(result: &CompareResult) {
 }
 
 fn print_metric(label: &str, metric: &compare::MetricDelta, unit: &str) {
+    let change = metric
+        .percent_change
+        .map_or_else(|| "n/a".to_string(), |change| format!("{change:+.1}%"));
     println!(
-        "  {:<16} {:>10.1} {:<4} {:>10.1} {:<4} {:+.1}%",
-        label,
-        metric.before,
-        unit,
-        metric.after,
-        unit,
-        metric.percent_change.unwrap_or_default()
+        "  {:<16} {:>10.1} {:<4} {:>10.1} {:<4} {:>8}",
+        label, metric.before, unit, metric.after, unit, change
     );
 }
 
 fn print_doctor(report: &DoctorReport) {
     println!("NETWORK DOCTOR");
     if let Some(interface) = &report.interface {
-        println!("  Interface: {interface}");
+        println!("  Interface: {}", escape_terminal_controls(interface));
     }
     println!();
     for check in &report.checks {
         println!(
             "  {} {:<20} {}",
             check.status.symbol(),
-            check.name,
-            check.detail
+            escape_terminal_controls(&check.name),
+            escape_terminal_controls(&check.detail)
         );
     }
     if let Some(speedtest) = &report.speedtest {
@@ -910,9 +1050,12 @@ fn print_doctor(report: &DoctorReport) {
     }
     println!();
     println!("  DIAGNOSIS");
-    println!("  {}", report.diagnosis);
+    println!("  {}", escape_terminal_controls(&report.diagnosis));
     if let Some(recommendation) = &report.recommendation {
-        println!("  Recommendation: {recommendation}");
+        println!(
+            "  Recommendation: {}",
+            escape_terminal_controls(recommendation)
+        );
     }
 }
 
@@ -945,16 +1088,16 @@ fn print_wifi(result: &wifi::WifiSnapshot) {
     println!();
     if !result.available {
         println!("  No active Wi-Fi link detected.");
-        println!("  {}", result.detail);
+        println!("  {}", escape_terminal_controls(&result.detail));
         return;
     }
     println!(
         "  Interface:       {}",
-        result.interface.as_deref().unwrap_or("unknown")
+        escape_terminal_controls(result.interface.as_deref().unwrap_or("unknown"))
     );
     println!(
         "  SSID:            {}",
-        result.ssid.as_deref().unwrap_or("unknown")
+        escape_terminal_controls(result.ssid.as_deref().unwrap_or("unknown"))
     );
     if let Some(dbm) = result.signal_dbm {
         println!("  Signal:          {:.0} dBm", dbm);
@@ -963,7 +1106,7 @@ fn print_wifi(result: &wifi::WifiSnapshot) {
         println!("  Signal quality:  {:.0}%", percent);
     }
     if let Some(band) = &result.band {
-        println!("  Band:            {band}");
+        println!("  Band:            {}", escape_terminal_controls(band));
     }
     if let Some(channel) = result.channel {
         println!("  Channel:         {channel}");
@@ -972,9 +1115,12 @@ fn print_wifi(result: &wifi::WifiSnapshot) {
         println!("  Link rate:       {:.0} Mbps", rate);
     }
     if let Some(radio) = &result.radio {
-        println!("  Radio:           {radio}");
+        println!("  Radio:           {}", escape_terminal_controls(radio));
     }
-    println!("  Detail:          {}", result.detail);
+    println!(
+        "  Detail:          {}",
+        escape_terminal_controls(&result.detail)
+    );
 }
 
 fn print_verify(report: &verify::VerifyReport) {
@@ -1071,5 +1217,33 @@ fn truncate(value: &str, width: usize) -> String {
             .take(width.saturating_sub(1))
             .collect::<String>()
             + "…"
+    }
+}
+
+fn escape_terminal_controls(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_terminal_controls;
+
+    #[test]
+    fn terminal_output_escapes_controls_without_changing_unicode() {
+        let escaped = escape_terminal_controls("Café 中文\u{1b}[31m\nnext\tline");
+        assert!(escaped.starts_with("Café 中文"));
+        assert!(!escaped.contains('\u{1b}'));
+        assert!(!escaped.contains('\n'));
+        assert!(!escaped.contains('\t'));
+        assert!(escaped.contains("\\u{1b}[31m"));
+        assert!(escaped.contains("\\nnext\\tline"));
     }
 }

@@ -6,10 +6,12 @@ on:
       - ".github/workflows/release.yml"
       - ".github/scripts/package_release.py"
       - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "src/**"
   push:
     branches:
-      - determination
+      - main
   workflow_dispatch:
 
 permissions:
@@ -76,7 +78,7 @@ jobs:
             artifact: speedtest-macos-aarch64
             binary: target/aarch64-apple-darwin/release/speedtest
             archive: speedtest-macos-aarch64.tar.gz
-          - runner: macos-latest
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             artifact: speedtest-macos-x86_64
             binary: target/x86_64-apple-darwin/release/speedtest
@@ -93,10 +95,25 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.98.0"
           targets: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Smoke-test release binary
+        if: >-
+          (runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-musl') ||
+          (runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc') ||
+          (runner.os == 'macOS' && runner.arch == 'ARM64' && matrix.target == 'aarch64-apple-darwin') ||
+          (runner.os == 'macOS' && runner.arch == 'X64' && matrix.target == 'x86_64-apple-darwin')
+        env:
+          RELEASE_BINARY: ${{ matrix.binary }}
+        run: >-
+          python -c "import os, subprocess;
+          binary=os.environ['RELEASE_BINARY'];
+          subprocess.run([binary, '--version'], check=True);
+          subprocess.run([binary, '--help'], check=True, stdout=subprocess.DEVNULL)"
 
       - name: Package release asset
         run: >-

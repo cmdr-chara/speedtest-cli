@@ -59,7 +59,7 @@ A compatible custom LibreSpeed installation can be selected with:
 speedtest --backend librespeed --librespeed-server https://speed.example.com
 ```
 
-The custom URL is treated as the LibreSpeed base URL and standard `garbage.php` / `empty.php` endpoints are assumed.
+The custom URL is treated as the LibreSpeed base URL and standard `garbage.php` / `empty.php` endpoints are assumed. It must use HTTP or HTTPS, include a host, and must not contain credentials, a query, or a fragment. Nested base paths are supported.
 
 ### Backend verification
 
@@ -125,6 +125,8 @@ Then from another machine:
 speedtest lan 192.168.1.50:9876
 speedtest lan 192.168.1.50:9876 --duration 10 --streams 4
 speedtest lan 192.168.1.50:9876 --json
+speedtest lan 192.168.1.50:9876 --output lan-result.csv --format csv
+speedtest lan 192.168.1.50:9876 --no-save
 ```
 
 This gives you a local throughput/latency baseline. If LAN performance is poor, the problem is likely local before the ISP/WAN path is even involved.
@@ -181,6 +183,8 @@ speedtest dns optimize --profile privacy
 speedtest dns optimize --profile security
 ```
 
+Resolver winners and DNS changes require at least an 80% query-success rate. `set` and `optimize` also preflight the selected addresses immediately before any configuration change.
+
 Recovery:
 
 ```bash
@@ -188,7 +192,7 @@ speedtest dns rollback
 speedtest dns reset
 ```
 
-DNS writes snapshot the existing configuration before applying changes, verify resolution afterward, and attempt automatic rollback if post-change validation fails. On Linux, persistent automatic configuration currently requires NetworkManager; unmanaged resolver setups remain read-only.
+DNS writes snapshot the existing configuration before applying changes, verify resolution afterward, and attempt automatic rollback if post-change validation fails. Changes are limited to the active network interface so verification follows the configuration being changed. On Linux, persistent automatic configuration currently requires NetworkManager; unmanaged resolver setups remain read-only.
 
 ## Network Doctor and comparison
 
@@ -198,7 +202,7 @@ speedtest doctor --full
 speedtest doctor --json
 ```
 
-The lightweight doctor checks route/interface state, gateway latency where available, IPv4/IPv6 reachability, DNS health, HTTPS, and platform network context. `--full` also runs throughput/bufferbloat analysis.
+The lightweight doctor checks route/interface state, gateway latency where available, IPv4/IPv6 reachability, DNS health, HTTPS, and Wi-Fi context where available. `--full` also runs throughput/bufferbloat analysis.
 
 Compare the two latest saved runs:
 
@@ -226,6 +230,7 @@ speedtest stability --json
 ```
 
 **HTTP probe availability is not packet loss.** A failed stability probe can be caused by endpoint throttling, route/server behavior, or the local connection. Use `speedtest loss` when you specifically want ICMP echo response-loss measurement.
+Probes skipped because an earlier request overran its schedule are included in the availability denominator and reported separately.
 
 ## History and statistics
 
@@ -239,7 +244,7 @@ speedtest stats --days 90
 speedtest stats --json
 ```
 
-History/statistics include median/best throughput, latency statistics, quality context, S-tier counts, trend detection, a Unicode throughput sparkline, and latest-run anomaly detection against prior saved results.
+History/statistics include median/best throughput, latency statistics, quality context, S-tier counts, trend detection, a Unicode throughput sparkline, and latest-run anomaly detection against prior saved results. Statistics use Internet runs when any exist, otherwise LAN runs; implicit comparisons always pair runs from the same scope.
 
 ## Installation
 
@@ -266,6 +271,12 @@ speedtest
 
 The Linux release uses musl for broad distribution compatibility.
 
+Linux route/DNS diagnostics require `ip`; real ICMP loss measurement requires
+`ping` (normally `iputils-ping`), and Wi-Fi inspection requires `iw`.
+Persistent DNS changes additionally require a NetworkManager-managed connection
+and `nmcli`. Commands that do not need these helpers continue to work without
+them and report a clear unavailable status where appropriate.
+
 #### macOS
 
 ```bash
@@ -285,7 +296,7 @@ Each packaged release includes SHA-256 checksum files.
 ### Install from source
 
 ```bash
-cargo install --git https://github.com/cmdr-chara/speedtest-cli --branch determination --force
+cargo install --locked --git https://github.com/cmdr-chara/speedtest-cli --branch main --force
 speedtest --version
 ```
 
@@ -357,7 +368,7 @@ Standalone `speedtest loss` does not silently inject ICMP loss into an unrelated
 
 ## Data storage
 
-Completed tests are stored in the platform data directory unless `--no-save` is used.
+Completed Internet and LAN tests are stored in the platform data directory unless `--no-save` is used. Concurrent runs use locked history appends and collision-safe per-run filenames.
 
 ```text
 speedtest/
