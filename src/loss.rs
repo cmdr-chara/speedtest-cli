@@ -1,4 +1,5 @@
-use std::{process::Command, time::Duration};
+use std::time::Duration;
+use tokio::process::Command;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -26,19 +27,18 @@ impl PacketLossResult {
 }
 
 pub async fn measure(target: &str, count: u16) -> Result<PacketLossResult> {
-    let target = target.to_string();
+    let target = validate_target(target).map_err(anyhow::Error::msg)?;
     let packets_sent = usize::from(count.clamp(3, 200));
-    let command_target = target.clone();
-    let output = tokio::task::spawn_blocking(move || run_ping(&command_target, packets_sent))
+    let output = tokio::time::timeout(suggested_timeout(count), run_ping(&target, packets_sent))
         .await
-        .context("ICMP measurement task panicked")??;
+        .context("ICMP command timed out")??;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let samples = parse_reply_times(&stdout);
 
-    if samples.is_empty() && stdout.trim().is_empty() && !stderr.trim().is_empty() {
-        anyhow::bail!("ping command failed: {}", stderr.trim());
+    if samples.is_empty() && (!stderr.trim().is_empty() || !recognized_zero_replies(&stdout)) {
+        anyhow::bail!("ping did not return a supported reply/summary format; check the target and native ping availability (localized Windows output may be unsupported)");
     }
 
     let packets_received = samples.len().min(packets_sent);
@@ -62,29 +62,73 @@ pub async fn measure(target: &str, count: u16) -> Result<PacketLossResult> {
     })
 }
 
-fn run_ping(target: &str, count: usize) -> Result<std::process::Output> {
+async fn run_ping(target: &str, count: usize) -> Result<std::process::Output> {
     #[cfg(target_os = "windows")]
     let output = Command::new("ping")
         .args(["-n", &count.to_string(), "-w", "1000", target])
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .kill_on_drop(true)
         .output()
+        .await
         .context("failed to run Windows ping")?;
 
     #[cfg(target_os = "macos")]
     let output = Command::new("ping")
         .args(["-c", &count.to_string(), "-W", "1000", "-i", "0.2", target])
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .kill_on_drop(true)
         .output()
+        .await
         .context("failed to run macOS ping")?;
 
     #[cfg(all(unix, not(target_os = "macos")))]
     let output = Command::new("ping")
         .args(["-c", &count.to_string(), "-W", "1", "-i", "0.2", target])
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .kill_on_drop(true)
         .output()
+        .await
         .context("failed to run ping")?;
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
     anyhow::bail!("ICMP packet-loss measurement is not supported on this platform");
 
     Ok(output)
+}
+
+/// Reject option-shaped and ambiguous targets before invoking a native program.
+pub fn validate_target(target: &str) -> Result<String, String> {
+    if target.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(target.to_string());
+    }
+    let host = target.strip_suffix('.').unwrap_or(target);
+    if host.is_empty()
+        || host.len() > 253
+        || !host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+    {
+        return Err(
+            "target must be an IP address or ASCII DNS hostname, not an option or command"
+                .to_string(),
+        );
+    }
+    Ok(target.to_string())
+}
+
+fn recognized_zero_replies(text: &str) -> bool {
+    text.contains("0 received")
+        || text.contains("0 packets received")
+        || text.contains("Received = 0")
 }
 
 fn parse_reply_times(text: &str) -> Vec<f64> {
@@ -99,6 +143,9 @@ fn parse_reply_time(line: &str) -> Option<f64> {
             .take_while(|character| character.is_ascii_digit() || *character == '.')
             .collect::<String>();
         let parsed = value.parse::<f64>().ok()?;
+        if !parsed.is_finite() {
+            return None;
+        }
         Some(if marker == "time<" {
             (parsed / 2.0).max(0.1)
         } else {
@@ -118,6 +165,31 @@ pub fn suggested_timeout(count: u16) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_native_option_injection_and_accepts_addresses() {
+        for target in [
+            "-f",
+            "--help",
+            "a b",
+            "host\n",
+            "$(whoami)",
+            "a..b",
+            "-c9999",
+        ] {
+            assert!(validate_target(target).is_err(), "{target}");
+        }
+        for target in [
+            "1.1.1.1",
+            "::1",
+            "speed.example.test",
+            "localhost",
+            "example.test.",
+        ] {
+            assert!(validate_target(target).is_ok(), "{target}");
+        }
+        assert!(!recognized_zero_replies("Usage: ping [options]"));
+    }
 
     #[test]
     fn parses_unix_and_windows_reply_times() {

@@ -1,16 +1,18 @@
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use speedtest_cli::{
+    check,
     cli::{
-        Cli, Command, CompareArgs, DnsArgs, DnsBenchmarkArgs, DnsBenchmarkProfileArg, DnsCommand,
-        DnsListArgs, DnsOptimizeArgs, DnsProtocolArg, DnsResetArgs, DnsRollbackArgs, DnsSetArgs,
-        DnsShowArgs, DnsTestArgs, DoctorArgs, HistoryArgs, InternetBackendArg, LanArgs, LossArgs,
-        OutputFormat, ServeArgs, StabilityArgs, StatsArgs, VerifyArgs, WifiArgs,
+        CheckArgs, Cli, ColorMode, Command, CompareArgs, DnsArgs, DnsBenchmarkArgs,
+        DnsBenchmarkProfileArg, DnsCommand, DnsListArgs, DnsOptimizeArgs, DnsProtocolArg,
+        DnsResetArgs, DnsRollbackArgs, DnsSetArgs, DnsShowArgs, DnsTestArgs, DoctorArgs,
+        HistoryArgs, InternetBackendArg, LanArgs, LossArgs, OutputFormat, ServeArgs, StabilityArgs,
+        StatsArgs, VerifyArgs, WifiArgs,
     },
     compare::{self, CompareResult},
     dns::{self, BenchmarkProfile, DnsBenchmarkResult, DnsProviderBenchmark},
@@ -23,16 +25,128 @@ use speedtest_cli::{
     history::{self, HistorySummary},
     lan, loss,
     model::TestResult,
+    output, runtime,
     stability::{self, StabilityResult},
     storage, tui, verify, wifi,
 };
 use tokio::sync::mpsc;
 
+// Every line write returns its I/O error instead of panicking on a closed pipe.
+macro_rules! println {
+    () => { output::line(format_args!(""))? };
+    ($($arg:tt)*) => { output::line(format_args!($($arg)*))? };
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+async fn main() -> std::process::ExitCode {
+    // Clap's own help/error coloring uses the same explicit preference as the UI.
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let mut color = ColorMode::Auto;
+    for (index, argument) in arguments.iter().enumerate() {
+        let value = argument.to_str().unwrap_or("");
+        let choice = value.strip_prefix("--color=").or_else(|| {
+            (value == "--color")
+                .then(|| arguments.get(index + 1).and_then(|s| s.to_str()))
+                .flatten()
+        });
+        if let Some(choice) = choice {
+            color = match choice {
+                "never" => ColorMode::Never,
+                "always" => ColorMode::Always,
+                _ => ColorMode::Auto,
+            };
+        }
+    }
+    let clap_color = if color == ColorMode::Always {
+        clap::ColorChoice::Always
+    } else if !color.allows_tui() {
+        clap::ColorChoice::Never
+    } else {
+        clap::ColorChoice::Auto
+    };
+    let matches = Cli::command().color(clap_color).get_matches_from(arguments);
+    if matches.subcommand().is_some() {
+        for name in [
+            "timeout",
+            "backend",
+            "librespeed_server",
+            "streams",
+            "duration",
+            "fps",
+            "plain",
+            "json",
+            "output",
+            "format",
+            "no_save",
+        ] {
+            if matches.value_source(name) == Some(clap::parser::ValueSource::CommandLine) {
+                Cli::command().error(clap::error::ErrorKind::ArgumentConflict,
+                    format!("--{} is a default speed-test option; place subcommand options after the command", name.replace('_', "-"))).exit();
+            }
+        }
+    }
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    if cli.command.is_none()
+        && cli.librespeed_server.is_some()
+        && !matches!(cli.backend, InternetBackendArg::Librespeed)
+    {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--librespeed-server requires --backend librespeed; no measurement was started",
+            )
+            .exit();
+    }
+    let json = cli.json_requested();
+    // DNS writes retain their existing transaction/rollback lifecycle. Do not drop
+    // a configuration transaction halfway through because a generic select fired.
+    let interruptible = matches!(
+        cli.command,
+        None | Some(Command::Stability(_))
+            | Some(Command::Loss(_))
+            | Some(Command::Verify(_))
+            | Some(Command::Lan(_))
+            | Some(Command::Serve(_))
+    );
+    let result = if interruptible {
+        runtime::interruptible(dispatch(cli)).await
+    } else {
+        dispatch(cli).await
+    };
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            let code = runtime::exit_code(&error);
+            if code != 0 && code != 3 {
+                if json {
+                    let error =
+                        serde_json::json!({"error":{"code":code,"message":format!("{error:#}")}});
+                    let _ = output::diagnostic(format_args!("{error}"));
+                } else {
+                    let _ = output::diagnostic(format_args!("speedtest: {error:#}"));
+                }
+            }
+            std::process::ExitCode::from(code)
+        }
+    }
+}
+
+async fn dispatch(mut cli: Cli) -> Result<()> {
+    let can_interact = io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && cli.color.allows_tui()
+        && !matches!(cli.progress, speedtest_cli::cli::ProgressMode::Never);
+    if !can_interact && !cli.json {
+        cli.plain = true;
+    }
     match cli.command.clone() {
-        Some(Command::Stability(args)) => run_stability(args).await,
+        Some(Command::Check(args)) => run_check(args),
+        Some(Command::Stability(mut args)) => {
+            if !can_interact && !args.json {
+                args.plain = true;
+            }
+            run_stability(args).await
+        }
         Some(Command::History(args)) => run_history(args),
         Some(Command::Stats(args)) => run_stats(args),
         Some(Command::Dns(args)) => run_dns(args).await,
@@ -63,16 +177,15 @@ async fn run_speedtest(cli: Cli) -> Result<()> {
     };
 
     let result = if cli.plain || cli.json {
-        run_non_interactive(&engine).await?
+        run_non_interactive(
+            &engine,
+            Duration::from_secs(cli.timeout),
+            cli.progress.enabled_for(cli.json),
+        )
+        .await?
     } else {
-        run_interactive(engine, cli.fps).await?
+        run_interactive(engine, cli.fps, Duration::from_secs(cli.timeout)).await?
     };
-
-    if cli.json {
-        println!("{}", result.pretty_json()?);
-    } else if cli.plain {
-        print_result(&result);
-    }
 
     if let Some(path) = &cli.output {
         match cli.format {
@@ -83,6 +196,12 @@ async fn run_speedtest(cli: Cli) -> Result<()> {
     if !cli.no_save {
         storage::persist_default(&result).context("failed to persist speed-test history")?;
     }
+    if cli.json {
+        println!("{}", result.pretty_json()?);
+    } else {
+        print_result(&result)?;
+    }
+
     Ok(())
 }
 
@@ -95,16 +214,16 @@ async fn run_stability(args: StabilityArgs) -> Result<()> {
         run_interactive_stability(duration, interval, args.fps).await?
     };
 
-    if args.json {
-        println!("{}", result.pretty_json()?);
-    } else if args.plain {
-        print_stability(&result);
-    }
     if let Some(path) = &args.output {
         storage::write_stability_json(path, &result)?;
     }
     if !args.no_save {
         storage::persist_stability(&result).context("failed to persist stability history")?;
+    }
+    if args.json {
+        println!("{}", result.pretty_json()?);
+    } else {
+        print_stability(&result)?;
     }
     Ok(())
 }
@@ -177,7 +296,7 @@ fn run_stats(args: StatsArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
-        print_stats(&summary);
+        print_stats(&summary)?;
     }
     Ok(())
 }
@@ -270,7 +389,7 @@ async fn run_dns_test(args: DnsTestArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        print_dns_test(&result);
+        print_dns_test(&result)?;
     }
     Ok(())
 }
@@ -284,7 +403,7 @@ async fn run_dns_benchmark(args: DnsBenchmarkArgs) -> Result<()> {
     if args.json {
         println!("{}", result.pretty_json()?);
     } else {
-        print_dns_benchmark(&result);
+        print_dns_benchmark(&result)?;
     }
     Ok(())
 }
@@ -319,7 +438,7 @@ async fn run_dns_set(args: DnsSetArgs) -> Result<()> {
         );
     }
 
-    print_dns_change(&state, &provider.display_name(), &servers);
+    print_dns_change(&state, &provider.display_name(), &servers)?;
     if args.dry_run {
         println!("DRY RUN · no DNS settings were changed.");
         return Ok(());
@@ -333,7 +452,7 @@ async fn run_dns_set(args: DnsSetArgs) -> Result<()> {
 
 async fn run_dns_optimize(args: DnsOptimizeArgs) -> Result<()> {
     let benchmark = dns::benchmark(dns_profile(args.profile), usize::from(args.queries)).await?;
-    print_dns_benchmark(&benchmark);
+    print_dns_benchmark(&benchmark)?;
     let winner = benchmark
         .winner()
         .ok_or_else(|| anyhow!("no DNS resolver completed enough queries to select a winner"))?;
@@ -361,7 +480,7 @@ async fn run_dns_optimize(args: DnsOptimizeArgs) -> Result<()> {
             latency.median_ms, latency.p95_ms
         );
     }
-    print_dns_change(&state, &provider.display_name(), &servers);
+    print_dns_change(&state, &provider.display_name(), &servers)?;
     if args.dry_run {
         println!("DRY RUN · benchmark completed; no DNS settings were changed.");
         return Ok(());
@@ -484,7 +603,7 @@ fn run_compare(args: CompareArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&comparison)?);
     } else {
-        print_comparison(&comparison);
+        print_comparison(&comparison)?;
     }
     Ok(())
 }
@@ -496,7 +615,7 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
             streams: 2,
             phase_duration: Duration::from_secs(8),
         })?);
-        let result = run_non_interactive(&engine)
+        let result = run_non_interactive(&engine, Duration::from_secs(120), false)
             .await
             .context("full doctor speed test failed")?;
         report.attach_speedtest(result);
@@ -504,7 +623,7 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
     if args.json {
         println!("{}", report.pretty_json()?);
     } else {
-        print_doctor(&report);
+        print_doctor(&report)?;
     }
     Ok(())
 }
@@ -514,7 +633,7 @@ async fn run_loss(args: LossArgs) -> Result<()> {
     if args.json {
         println!("{}", result.pretty_json()?);
     } else {
-        print_packet_loss(&result);
+        print_packet_loss(&result)?;
     }
     Ok(())
 }
@@ -524,7 +643,7 @@ fn run_wifi(args: WifiArgs) -> Result<()> {
     if args.json {
         println!("{}", result.pretty_json()?);
     } else {
-        print_wifi(&result);
+        print_wifi(&result)?;
     }
     Ok(())
 }
@@ -541,20 +660,25 @@ async fn run_verify(args: VerifyArgs) -> Result<()> {
     if args.json {
         println!("{}", report.pretty_json()?);
     } else {
-        print_verify(&report);
+        print_verify(&report)?;
     }
     Ok(())
 }
 
 async fn run_serve(args: ServeArgs) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(args.bind)
+        .await
+        .context("failed to bind LAN server")?;
+    let bound = listener.local_addr()?;
     println!("LAN SPEEDTEST SERVER");
-    println!("  Listening: {}", args.bind);
-    println!(
-        "  Client:    speedtest lan <this-host>:{}",
-        args.bind.port()
-    );
+    println!("  Listening: {}", bound);
+    println!("  Client:    speedtest lan <this-host>:{}", bound.port());
     println!("  Stop with Ctrl+C.");
-    lan::serve(args.bind).await
+    if !bound.ip().is_loopback() {
+        output::diagnostic(format_args!("Warning: unauthenticated LAN service; use only on a trusted network with firewall rules."))?;
+    }
+    io::stdout().flush()?;
+    lan::serve_listener(listener).await
 }
 
 async fn run_lan(args: LanArgs) -> Result<()> {
@@ -569,47 +693,39 @@ async fn run_lan(args: LanArgs) -> Result<()> {
     if args.json {
         println!("{}", result.pretty_json()?);
     } else {
-        print_result(&result);
+        print_result(&result)?;
     }
     Ok(())
 }
 
-async fn run_non_interactive(engine: &InternetEngine) -> Result<TestResult> {
+async fn run_non_interactive(
+    engine: &InternetEngine,
+    limit: Duration,
+    progress: bool,
+) -> Result<TestResult> {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let engine = engine.clone();
-    let handle = tokio::spawn(async move { engine.run(tx).await });
-    while let Some(event) = rx.recv().await {
-        match event {
-            EngineEvent::Complete(result) => {
-                handle.await.context("measurement task panicked")??;
-                return Ok(result);
+    let measurement = runtime::deadline(limit, engine.run(tx));
+    tokio::pin!(measurement);
+    loop {
+        tokio::select! {
+            result = &mut measurement => return result,
+            Some(event) = rx.recv() => {
+                if progress {
+                    if let EngineEvent::PhaseChanged(phase) = event {
+                        output::diagnostic(format_args!("speedtest: {phase:?}"))?;
+                    }
+                }
             }
-            EngineEvent::Error(error) => bail!(error),
-            _ => {}
         }
     }
-    handle.await.context("measurement task panicked")?
 }
 
-async fn run_interactive(engine: InternetEngine, fps: u16) -> Result<TestResult> {
+async fn run_interactive(engine: InternetEngine, fps: u16, limit: Duration) -> Result<TestResult> {
     let (tx, rx) = mpsc::unbounded_channel();
-    let handle = tokio::spawn(async move {
-        if let Err(error) = engine.run(tx.clone()).await {
-            let _ = tx.send(EngineEvent::Error(format!("{error:#}")));
-            return Err(error);
-        }
-        Ok(())
-    });
-    match tui::run(rx, fps).await {
-        Ok(result) => {
-            handle.await.context("measurement task panicked")??;
-            Ok(result)
-        }
-        Err(error) => {
-            handle.abort();
-            Err(error)
-        }
-    }
+    // Both futures are owned here. Cancellation drops the measurement, not a
+    // detached JoinHandle; JoinSets inside the engine abort their workers.
+    let measurement = runtime::deadline(limit, engine.run(tx));
+    tokio::try_join!(measurement, tui::run(rx, fps)).map(|(_, result)| result)
 }
 
 async fn run_interactive_stability(
@@ -618,20 +734,59 @@ async fn run_interactive_stability(
     fps: u16,
 ) -> Result<StabilityResult> {
     let (tx, rx) = mpsc::unbounded_channel();
-    let handle = tokio::spawn(async move { stability::run(duration, interval, Some(tx)).await });
-    match tui::run_stability(rx, duration, fps).await {
-        Ok(result) => {
-            handle.await.context("stability task panicked")??;
-            Ok(result)
-        }
-        Err(error) => {
-            handle.abort();
-            Err(error)
-        }
-    }
+    tokio::try_join!(
+        stability::run(duration, interval, Some(tx)),
+        tui::run_stability(rx, duration, fps)
+    )
+    .map(|(_, result)| result)
 }
 
-fn print_result(result: &TestResult) {
+fn run_check(args: CheckArgs) -> Result<()> {
+    let result = if args.result == "-" {
+        check::read_result(io::stdin().lock())?
+    } else {
+        let file = std::fs::File::open(&args.result).context("failed to open result file")?;
+        check::read_result(file)?
+    };
+    let limits = check::Thresholds {
+        min_download: args.min_download,
+        min_upload: args.min_upload,
+        max_latency: args.max_latency,
+        max_jitter: args.max_jitter,
+        max_loaded_latency: args.max_loaded_latency,
+        max_age: args.max_age,
+    };
+    let report = check::evaluate(&result, &limits, chrono::Utc::now())?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "THRESHOLD CHECK: {}",
+            if report.passed { "PASS" } else { "FAIL" }
+        );
+        for check in &report.checks {
+            let actual = check
+                .actual
+                .map_or_else(|| "unavailable".to_string(), |n| format!("{n:.2}"));
+            println!(
+                "  {:4} {:<25} {} {} {} {:.2} {}",
+                if check.passed { "PASS" } else { "FAIL" },
+                check.metric,
+                actual,
+                check.unit,
+                check.operator,
+                check.limit,
+                check.unit
+            );
+        }
+    }
+    if !report.passed {
+        return Err(runtime::Outcome::ThresholdFailed.into());
+    }
+    Ok(())
+}
+
+fn print_result(result: &TestResult) -> Result<()> {
     println!("Speedtest");
     println!("  Backend:       {}", result.backend);
     println!(
@@ -691,9 +846,10 @@ fn print_result(result: &TestResult) {
             }
         }
     }
+    Ok(())
 }
 
-fn print_stability(result: &StabilityResult) {
+fn print_stability(result: &StabilityResult) -> Result<()> {
     println!("Network Stability");
     println!("  Duration:       {}s", result.duration_seconds);
     println!("  Probe interval: {} ms", result.interval_ms);
@@ -722,9 +878,10 @@ fn print_stability(result: &StabilityResult) {
     if let Some(tier) = result.tier_label() {
         println!("  Tier:           ◆ {tier}");
     }
+    Ok(())
 }
 
-fn print_stats(summary: &HistorySummary) {
+fn print_stats(summary: &HistorySummary) -> Result<()> {
     println!("NETWORK STATS · {} DAYS", summary.period_days);
     println!();
     println!("  Runs:              {}", summary.runs);
@@ -756,9 +913,10 @@ fn print_stats(summary: &HistorySummary) {
             println!("  {}  {}", anomaly.severity.label(), anomaly.message);
         }
     }
+    Ok(())
 }
 
-fn print_dns_test(result: &DnsProviderBenchmark) {
+fn print_dns_test(result: &DnsProviderBenchmark) -> Result<()> {
     println!("DNS HEALTH / SPEED TEST");
     println!();
     println!(
@@ -785,9 +943,10 @@ fn print_dns_test(result: &DnsProviderBenchmark) {
     if let Some(tier) = result.tier_label() {
         println!("  Tier:           ◆ {tier}");
     }
+    Ok(())
 }
 
-fn print_dns_benchmark(result: &DnsBenchmarkResult) {
+fn print_dns_benchmark(result: &DnsBenchmarkResult) -> Result<()> {
     println!("DNS BENCHMARK · {}", result.profile.to_ascii_uppercase());
     println!();
     println!("  #  RESOLVER                         MEDIAN     P95   SUCCESS   SCORE");
@@ -830,29 +989,31 @@ fn print_dns_benchmark(result: &DnsBenchmarkResult) {
             winner.grade.label()
         );
     }
+    Ok(())
 }
 
 fn print_dns_change(
     state: &dns::system::DnsSystemState,
     label: &str,
     servers: &[std::net::IpAddr],
-) {
+) -> Result<()> {
     println!("DNS CONFIGURATION CHANGE");
     println!();
     println!("  Interface:      {}", state.interface);
     println!("  Current:        {}", format_servers(&state.servers));
     println!("  New provider:   {label}");
     println!("  New servers:    {}", format_servers(servers));
+    Ok(())
 }
 
-fn print_comparison(result: &CompareResult) {
+fn print_comparison(result: &CompareResult) -> Result<()> {
     println!("NETWORK COMPARISON");
     println!();
     println!("                    BEFORE         AFTER        CHANGE");
-    print_metric("Download", &result.download_mbps, "Mbps");
-    print_metric("Upload", &result.upload_mbps, "Mbps");
-    print_metric("Ping", &result.ping_ms, "ms");
-    print_metric("Jitter", &result.jitter_ms, "ms");
+    print_metric("Download", &result.download_mbps, "Mbps")?;
+    print_metric("Upload", &result.upload_mbps, "Mbps")?;
+    print_metric("Ping", &result.ping_ms, "ms")?;
+    print_metric("Jitter", &result.jitter_ms, "ms")?;
     if let (Some(before), Some(after), Some(change)) = (
         result.quality_score.before,
         result.quality_score.after,
@@ -866,9 +1027,10 @@ fn print_comparison(result: &CompareResult) {
     println!();
     println!("  VERDICT    {}", result.verdict.to_ascii_uppercase());
     println!("  HIGHLIGHT  {}", result.highlight);
+    Ok(())
 }
 
-fn print_metric(label: &str, metric: &compare::MetricDelta, unit: &str) {
+fn print_metric(label: &str, metric: &compare::MetricDelta, unit: &str) -> Result<()> {
     println!(
         "  {:<16} {:>10.1} {:<4} {:>10.1} {:<4} {:+.1}%",
         label,
@@ -878,9 +1040,10 @@ fn print_metric(label: &str, metric: &compare::MetricDelta, unit: &str) {
         unit,
         metric.percent_change.unwrap_or_default()
     );
+    Ok(())
 }
 
-fn print_doctor(report: &DoctorReport) {
+fn print_doctor(report: &DoctorReport) -> Result<()> {
     println!("NETWORK DOCTOR");
     if let Some(interface) = &report.interface {
         println!("  Interface: {interface}");
@@ -914,9 +1077,10 @@ fn print_doctor(report: &DoctorReport) {
     if let Some(recommendation) = &report.recommendation {
         println!("  Recommendation: {recommendation}");
     }
+    Ok(())
 }
 
-fn print_packet_loss(result: &loss::PacketLossResult) {
+fn print_packet_loss(result: &loss::PacketLossResult) -> Result<()> {
     println!("ICMP PACKET LOSS");
     println!();
     println!("  Target:          {}", result.target);
@@ -938,15 +1102,16 @@ fn print_packet_loss(result: &loss::PacketLossResult) {
     }
     println!();
     println!("  Note: {}", result.caveat);
+    Ok(())
 }
 
-fn print_wifi(result: &wifi::WifiSnapshot) {
+fn print_wifi(result: &wifi::WifiSnapshot) -> Result<()> {
     println!("WI-FI DIAGNOSTICS");
     println!();
     if !result.available {
         println!("  No active Wi-Fi link detected.");
         println!("  {}", result.detail);
-        return;
+        return Ok(());
     }
     println!(
         "  Interface:       {}",
@@ -975,9 +1140,10 @@ fn print_wifi(result: &wifi::WifiSnapshot) {
         println!("  Radio:           {radio}");
     }
     println!("  Detail:          {}", result.detail);
+    Ok(())
 }
 
-fn print_verify(report: &verify::VerifyReport) {
+fn print_verify(report: &verify::VerifyReport) -> Result<()> {
     println!("MULTI-BACKEND VERIFICATION");
     println!();
     println!("                    CLOUDFLARE     LIBRESPEED");
@@ -1010,6 +1176,7 @@ fn print_verify(report: &verify::VerifyReport) {
     );
     println!("  {}", report.verdict);
     println!("  Highlight:      {}", report.comparison.highlight);
+    Ok(())
 }
 
 fn dns_profile(profile: DnsBenchmarkProfileArg) -> BenchmarkProfile {
@@ -1024,8 +1191,11 @@ fn dns_profile(profile: DnsBenchmarkProfileArg) -> BenchmarkProfile {
 }
 
 fn confirm(prompt: &str) -> Result<bool> {
-    print!("{prompt} [y/N] ");
-    io::stdout()
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        bail!("DNS changes require an interactive terminal; inspect --dry-run, then use --yes explicitly");
+    }
+    write!(io::stderr().lock(), "{} [y/N] ", output::safe_text(prompt))?;
+    io::stderr()
         .flush()
         .context("failed to flush confirmation prompt")?;
     let mut answer = String::new();

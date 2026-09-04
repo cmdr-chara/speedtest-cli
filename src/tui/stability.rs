@@ -84,6 +84,7 @@ pub(super) async fn run(
     target_duration: Duration,
     render_fps: u16,
 ) -> Result<StabilityResult> {
+    let _guard = super::TerminalGuard;
     let mut terminal = enter_terminal()?;
     let result = run_loop(&mut terminal, &mut rx, target_duration, render_fps).await;
     restore_terminal(&mut terminal)?;
@@ -147,7 +148,7 @@ fn handle_input(app: &StabilityApp) -> Result<Option<StabilityResult>> {
         || key.code == KeyCode::Esc
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
     {
-        return Err(anyhow!("stability test cancelled"));
+        return Err(anyhow!(crate::runtime::Outcome::Cancelled));
     }
     Ok(None)
 }

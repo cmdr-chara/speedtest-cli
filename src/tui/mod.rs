@@ -28,6 +28,7 @@ use self::app::App;
 const PHYSICS_RATE: Duration = Duration::from_nanos(4_166_667);
 
 pub async fn run(mut rx: UnboundedReceiver<EngineEvent>, render_fps: u16) -> Result<TestResult> {
+    let _guard = TerminalGuard;
     let mut terminal = enter_terminal()?;
     let result = run_loop(&mut terminal, &mut rx, render_fps).await;
     restore_terminal(&mut terminal)?;
@@ -111,7 +112,7 @@ fn handle_input(app: &App) -> Result<Option<TestResult>> {
         || key.code == KeyCode::Esc
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
     {
-        return Err(anyhow!("speed test cancelled"));
+        return Err(crate::runtime::Outcome::Cancelled.into());
     }
 
     Ok(None)
@@ -130,6 +131,14 @@ pub(super) fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>
         .context("failed to leave alternate screen")?;
     terminal.show_cursor().context("failed to restore cursor")?;
     Ok(())
+}
+
+pub(super) struct TerminalGuard;
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+    }
 }
 
 #[cfg(test)]

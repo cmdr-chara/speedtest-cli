@@ -7,7 +7,6 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use bytes::Bytes;
 use chrono::Utc;
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, Url};
@@ -19,13 +18,13 @@ use tokio::{
 
 use crate::{
     analysis,
-    engine::{EngineConfig, EngineEvent},
+    engine::{finish_phase, http, EngineConfig, EngineEvent},
     model::{ServerInfo, TestPhase, TestResult, ThroughputResult},
 };
 
 const IDLE_SAMPLES: usize = 20;
 const DOWNLOAD_CHUNK_MB: u32 = 32;
-const UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 const LOADED_LATENCY_INTERVAL: Duration = Duration::from_millis(400);
 
@@ -108,8 +107,10 @@ struct ResolvedServer {
 
 impl LibreSpeedEngine {
     pub fn new(config: EngineConfig, custom_server: Option<&str>) -> Result<Self> {
+        config.validate()?;
         let client = Client::builder()
             .user_agent(concat!("speedtest-cli/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(25))
             .pool_max_idle_per_host(config.streams.saturating_add(4))
@@ -191,19 +192,12 @@ impl LibreSpeedEngine {
                 deadline,
             ));
         }
-        let loaded = tokio::spawn(measure_loaded_latency(
-            self.client.clone(),
-            server.clone(),
-            deadline,
-        ));
-        self.sample_transfer(TestPhase::Download, Arc::clone(&total), deadline, tx)
-            .await;
-        while let Some(result) = workers.join_next().await {
-            result.context("LibreSpeed download worker panicked")??;
-        }
-        let loaded_samples = loaded
-            .await
-            .context("LibreSpeed loaded-latency task panicked")?;
+        let loaded_samples = finish_phase(
+            workers,
+            self.sample_transfer(TestPhase::Download, Arc::clone(&total), deadline, tx),
+            measure_loaded_latency(self.client.clone(), server.clone(), deadline),
+        )
+        .await?;
         let bytes = total.load(Ordering::Relaxed);
         if bytes == 0 {
             return Err(anyhow!("LibreSpeed server delivered no download data"));
@@ -225,30 +219,22 @@ impl LibreSpeedEngine {
     ) -> Result<(ThroughputResult, Vec<f64>)> {
         let total = Arc::new(AtomicU64::new(0));
         let deadline = Instant::now() + self.config.phase_duration;
-        let payload = Bytes::from(vec![0x6d_u8; UPLOAD_CHUNK_BYTES]);
         let mut workers = JoinSet::new();
         for _ in 0..self.config.streams.max(1) {
             workers.spawn(upload_worker(
                 self.client.clone(),
                 server.clone(),
                 Arc::clone(&total),
-                payload.clone(),
+                UPLOAD_CHUNK_BYTES,
                 deadline,
             ));
         }
-        let loaded = tokio::spawn(measure_loaded_latency(
-            self.client.clone(),
-            server.clone(),
-            deadline,
-        ));
-        self.sample_transfer(TestPhase::Upload, Arc::clone(&total), deadline, tx)
-            .await;
-        while let Some(result) = workers.join_next().await {
-            result.context("LibreSpeed upload worker panicked")??;
-        }
-        let loaded_samples = loaded
-            .await
-            .context("LibreSpeed loaded-latency task panicked")?;
+        let loaded_samples = finish_phase(
+            workers,
+            self.sample_transfer(TestPhase::Upload, Arc::clone(&total), deadline, tx),
+            measure_loaded_latency(self.client.clone(), server.clone(), deadline),
+        )
+        .await?;
         let bytes = total.load(Ordering::Relaxed);
         if bytes == 0 {
             return Err(anyhow!("LibreSpeed server accepted no upload data"));
@@ -302,12 +288,7 @@ impl LibreSpeedEngine {
 }
 
 fn resolve_custom_server(base: &str) -> Result<ResolvedServer> {
-    let base = if base.ends_with('/') {
-        base.to_string()
-    } else {
-        format!("{base}/")
-    };
-    let base = Url::parse(&base).context("invalid LibreSpeed server URL")?;
+    let base = http::base_url(base)?;
     Ok(ResolvedServer {
         name: "Custom LibreSpeed server".to_string(),
         base,
@@ -374,7 +355,7 @@ async fn measure_latency(
             .context("LibreSpeed latency request failed")?
             .error_for_status()
             .context("LibreSpeed latency endpoint returned an error")?;
-        let _ = response.bytes().await?;
+        http::drain(response, 64 * 1024).await?;
         samples.push(started.elapsed().as_secs_f64() * 1000.0);
         sleep(Duration::from_millis(75)).await;
     }
@@ -411,10 +392,10 @@ async fn download_worker(
             chunk_mb = (chunk_mb / 2).max(4);
             continue;
         }
-        let response = response
-            .error_for_status()
-            .context("LibreSpeed download endpoint returned an error")?;
+        let response =
+            http::success(response).context("LibreSpeed download endpoint returned an error")?;
         let mut body = response.bytes_stream();
+        let mut request_bytes = 0u64;
         loop {
             let next = tokio::select! {
                 value = body.next() => value,
@@ -422,6 +403,7 @@ async fn download_worker(
             };
             match next {
                 Some(Ok(chunk)) => {
+                    request_bytes += chunk.len() as u64;
                     total.fetch_add(chunk.len() as u64, Ordering::Relaxed);
                 }
                 Some(Err(error)) => return Err(error).context("LibreSpeed download stream failed"),
@@ -431,6 +413,10 @@ async fn download_worker(
                 break;
             }
         }
+        anyhow::ensure!(
+            request_bytes > 0 || Instant::now() >= deadline,
+            "LibreSpeed returned an empty download body"
+        );
     }
     Ok(())
 }
@@ -439,29 +425,44 @@ async fn upload_worker(
     client: Client,
     server: ResolvedServer,
     total: Arc<AtomicU64>,
-    initial_payload: Bytes,
+    initial_payload: usize,
     deadline: Instant,
 ) -> Result<()> {
-    let mut payload = initial_payload;
+    let mut payload_len = initial_payload;
     while Instant::now() < deadline {
+        let submitted = Arc::new(AtomicU64::new(0));
+        let started = Instant::now();
         let url = server.base.join(&server.upload_path)?;
         let response = tokio::select! {
             value = client
                 .post(url)
                 .query(&[("cors", "true"), ("r", &Utc::now().timestamp_micros().to_string())])
                 .header("content-type", "application/octet-stream")
-                .body(payload.clone())
+                .header(reqwest::header::CONTENT_LENGTH, payload_len)
+                .body(http::upload_body(Arc::clone(&submitted), payload_len))
                 .send() => value.context("LibreSpeed upload request failed")?,
             _ = sleep_until(deadline) => break,
         };
-        if response.status() == StatusCode::PAYLOAD_TOO_LARGE && payload.len() > 1024 * 1024 {
-            payload = payload.slice(..payload.len() / 2);
+        if response.status() == StatusCode::PAYLOAD_TOO_LARGE && payload_len > 16 * 1024 {
+            payload_len = (payload_len / 2).max(16 * 1024);
             continue;
         }
-        response
-            .error_for_status()
-            .context("LibreSpeed upload endpoint returned an error")?;
-        total.fetch_add(payload.len() as u64, Ordering::Relaxed);
+        let response =
+            http::success(response).context("LibreSpeed upload endpoint returned an error")?;
+        tokio::select! {
+            result = http::drain(response, 1024 * 1024) => result?,
+            _ = sleep_until(deadline) => break,
+        }
+        anyhow::ensure!(
+            submitted.load(Ordering::Relaxed) == payload_len as u64,
+            "upload endpoint responded before the complete request body was submitted"
+        );
+        total.fetch_add(payload_len as u64, Ordering::Relaxed);
+        if started.elapsed() < Duration::from_millis(250) {
+            payload_len = (payload_len * 2).min(8 * 1024 * 1024);
+        } else if started.elapsed() > Duration::from_secs(1) {
+            payload_len = (payload_len / 2).max(16 * 1024);
+        }
     }
     Ok(())
 }
@@ -487,8 +488,13 @@ async fn measure_loaded_latency(
                 .send() => value.ok(),
             _ = sleep_until(deadline) => None,
         };
-        if response.is_some_and(|response| response.status().is_success()) {
-            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        if let Some(response) = response {
+            if matches!(
+                tokio::time::timeout_at(deadline, http::drain(response, 64 * 1024)).await,
+                Ok(Ok(()))
+            ) {
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
         }
         index += 1;
         let now = Instant::now();

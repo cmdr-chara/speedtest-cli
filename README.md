@@ -21,6 +21,8 @@ A fast, polished terminal network quality analyzer written in Rust.
 - Real ICMP echo response-loss measurement with `speedtest loss`
 - Native Wi-Fi diagnostics on Windows, macOS, and Linux
 - Built-in self-hosted LAN speed-test server/client
+- Script-safe terminal detection, explicit progress/color policy, and stable exit statuses
+- Offline threshold/freshness checks for saved JSON results
 - JSON output, CSV export, per-run JSON, and JSONL history
 - Native release binaries for Windows, Linux, Intel macOS, and Apple Silicon macOS
 
@@ -107,17 +109,13 @@ PHY/link rate is not presented as Internet throughput.
 
 ### Self-hosted LAN mode
 
-Run a server on another machine in the LAN:
+Run a server on another machine in the LAN, binding its trusted LAN address explicitly:
 
 ```bash
-speedtest serve
+speedtest serve --bind 192.168.1.50:9876
 ```
 
-Default bind address:
-
-```text
-0.0.0.0:9876
-```
+Without `--bind`, the server listens only on `127.0.0.1:9876`. The LAN protocol is unauthenticated and unencrypted: do not expose it to the Internet. Use firewall rules on shared networks. The server bounds live connections and expires idle or overlong sessions; those limits are not authentication.
 
 Then from another machine:
 
@@ -285,7 +283,7 @@ Each packaged release includes SHA-256 checksum files.
 ### Install from source
 
 ```bash
-cargo install --git https://github.com/cmdr-chara/speedtest-cli --branch determination --force
+cargo install --locked --git https://github.com/cmdr-chara/speedtest-cli --branch determination --force
 speedtest --version
 ```
 
@@ -317,9 +315,56 @@ Main options:
 --output <PATH>              also write completed result
 --format <FORMAT>            json or csv
 --no-save                    disable automatic history/result persistence
+--timeout <SEC>              overall Internet measurement deadline (default: 120)
+--color <POLICY>             auto, always, or never
+--progress <POLICY>          auto, always, or never; phase lines use stderr
 ```
 
 The speedometer physics run independently of the render cap, so lowering `--fps` reduces terminal work without changing network measurements.
+
+## Terminal and automation behavior
+
+Normal tests automatically use plain output when stdin or stdout is redirected. `TERM=dumb`, nonempty `NO_COLOR`, `CLICOLOR=0`, `--color never`, and `--progress never` also select the non-animated interface. `--color always` overrides color environment preferences but never forces raw mode on a pipe or a dumb terminal. Completed interactive results remain in terminal scrollback.
+
+Results go to stdout. Default-test phase progress goes to stderr: `auto` shows it only on a terminal and keeps JSON mode quiet; `always` explicitly enables it; `never` suppresses it. Plain reports use text labels rather than relying on color. JSON field names and units do not vary with terminal preferences.
+
+```bash
+speedtest --json --no-save --timeout 45 > result.json
+speedtest --plain --progress always --no-save > result.txt 2> progress.log
+speedtest --color never
+```
+
+`--timeout` bounds the default Internet measurement, including server selection. Ctrl+C cancels default, stability, verify, LAN, server, and loss operations; owned network work is dropped and terminal state is restored. Configuration-changing DNS operations retain their existing rollback lifecycle rather than being interrupted halfway through a write. DNS confirmation without a terminal fails with guidance to use `--dry-run` or an explicit `--yes`.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Success; also a consumer deliberately closing stdout early |
+| 1 | Runtime, input-file, network, or persistence failure |
+| 2 | Invalid command/arguments (Clap usage error) |
+| 3 | A valid offline threshold check failed |
+| 124 | Overall Internet measurement deadline exceeded |
+| 130 | Handled cancellation |
+
+In JSON mode, runtime failures emit `{"error":{"code":1,"message":"..."}}` on **stderr**, without a success result on stdout. Usage errors remain human-readable on stderr. Explicit file exports and automatic persistence must succeed before a completed default/stability result is printed. A broken pipe is handled without a panic/backtrace; it does not roll back already completed persistence.
+
+Color/progress flags are global. Measurement flags are command-specific: use `speedtest verify --duration 5`, not `speedtest --duration 5 verify`. Options that would otherwise be silently ignored before a subcommand are rejected. `--format` requires `--output`, and `--librespeed-server` requires `--backend librespeed`; these mistakes fail before any measurement starts.
+
+## Offline checks for scripts
+
+Evaluate a saved canonical result without contacting the network or changing history:
+
+```bash
+speedtest --json --no-save > result.json
+speedtest check result.json --min-download 100 --min-upload 20 --max-latency 30
+speedtest check result.json --max-jitter 5 --max-loaded-latency 80 --max-age 300 --json
+cat result.json | speedtest check - --min-download 100 --json
+```
+
+At least one threshold is required. Throughput thresholds use decimal **Mbps**, latency/jitter use **ms**, and `--max-age` uses **seconds**. Equality passes. `--max-loaded-latency` checks both download and upload loaded latency; a missing value fails, rather than becoming zero. Freshness rejects future timestamps. Input is limited to one JSON document of at most 4 MiB. Nonfinite or negative thresholds are rejected.
+
+The versioned check report contains `schema_version`, `passed`, `result_timestamp`, and per-metric `checks` with `actual`, `limit`, `operator`, `unit`, and `passed`. A missing measurement has `actual: null`. Failed thresholds return **3**; malformed input returns **1**. These are user-selected acceptance criteria, not a certified diagnosis or proof that a saved file is authentic.
+
+For concurrent automation, use `--no-save` and distinct explicit output files: the existing shared JSONL history does not yet coordinate concurrent writers.
 
 ## Result semantics
 
@@ -352,6 +397,10 @@ Normal Internet and LAN tests use the existing canonical result structure:
   }
 }
 ```
+
+**Upload accounting:** only complete requests acknowledged by a successful HTTP response count toward Cloudflare/LibreSpeed upload goodput. Rejected, buffered-only, and deadline-cancelled requests do not count. Adaptive payloads start small, but a final in-flight request may still be excluded, so this is a conservative application-level measurement—not TCP wire throughput. LAN upload timing includes acknowledgement drain and validates the returned byte count. Old upload results may not be directly comparable after this correction.
+
+Custom LibreSpeed URLs must use HTTP(S) without credentials, query strings, or fragments. Measurement redirects are not followed; supply the final endpoint URL. HTTPS certificate verification remains enabled. Do not place secrets in URL paths: server metadata is part of the result.
 
 Standalone `speedtest loss` does not silently inject ICMP loss into an unrelated saved throughput run. That separation keeps protocol semantics explicit.
 
@@ -411,6 +460,8 @@ The quality score, workload grades, stability grades, history trend, anomaly fla
 A public speed-test server is part of the path being measured. Use `speedtest verify` when you need cross-backend evidence and `speedtest lan` when you need to isolate the local network from the WAN.
 
 ICMP echo loss measures ICMP echo response behavior; it does not prove every transport/application experiences identical loss.
+
+See [the assessment, competitive research, prioritized plan, and remaining risks](docs/cli-reliability-review.md) and [contributor verification instructions](CONTRIBUTING.md).
 
 ## Roadmap
 

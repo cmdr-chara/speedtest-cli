@@ -8,12 +8,11 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use bytes::Bytes;
 use chrono::Utc;
 use futures_util::StreamExt;
 use reqwest::{
     header::{CONTENT_LENGTH, RETRY_AFTER},
-    Body, Client, Response, StatusCode,
+    Client, Response, StatusCode,
 };
 use tokio::{
     sync::mpsc::UnboundedSender,
@@ -23,7 +22,7 @@ use tokio::{
 
 use crate::{
     analysis,
-    engine::{EngineConfig, EngineEvent},
+    engine::{finish_phase, http, EngineConfig, EngineEvent},
     model::{ServerInfo, TestPhase, TestResult, ThroughputResult},
 };
 
@@ -31,9 +30,9 @@ const DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down";
 const UPLOAD_URL: &str = "https://speed.cloudflare.com/__up";
 const DOWNLOAD_LADDER: [u64; 4] = [95_000_000, 25_000_000, 10_000_000, 1_000_000];
 const DOWNLOAD_START_INDEX: usize = 1;
-const UPLOAD_START_BYTES: usize = 25_000_000;
-const UPLOAD_MIN_BYTES: usize = 1_000_000;
-const UPLOAD_BODY_CHUNK_BYTES: usize = 64 * 1024;
+const UPLOAD_START_BYTES: usize = 64 * 1024;
+const UPLOAD_MAX_BYTES: usize = 25_000_000;
+const UPLOAD_MIN_BYTES: usize = 16 * 1024;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 const THROUGHPUT_WINDOW: Duration = Duration::from_millis(900);
 const DISPLAY_WARMUP: Duration = Duration::from_millis(400);
@@ -52,8 +51,10 @@ pub struct CloudflareEngine {
 
 impl CloudflareEngine {
     pub fn new(config: EngineConfig) -> Result<Self> {
+        config.validate()?;
         let client = Client::builder()
             .user_agent(concat!("speedtest-cli/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(25))
             .pool_max_idle_per_host(config.streams.saturating_add(4))
@@ -122,16 +123,13 @@ impl CloudflareEngine {
                 .await
                 .context("Cloudflare warm-up request failed")?;
             if response.status().is_success() {
-                let _ = response
-                    .bytes()
+                http::drain(response, 1_100_000)
                     .await
                     .context("Cloudflare warm-up body failed")?;
                 return Ok(());
             }
             if !is_size_rejection(response.status()) {
-                response
-                    .error_for_status()
-                    .context("Cloudflare warm-up endpoint returned an error")?;
+                http::success(response).context("Cloudflare warm-up endpoint returned an error")?;
             }
         }
         Err(anyhow!(
@@ -162,13 +160,12 @@ impl CloudflareEngine {
                 deadline,
             ));
         }
-        let loaded = tokio::spawn(measure_loaded_latency(self.client.clone(), deadline));
-        self.sample_transfer(TestPhase::Download, Arc::clone(&total), deadline, tx)
-            .await;
-        while let Some(result) = workers.join_next().await {
-            result.context("Cloudflare download worker panicked")??;
-        }
-        let loaded_samples = loaded.await.context("loaded-latency task panicked")?;
+        let loaded_samples = finish_phase(
+            workers,
+            self.sample_transfer(TestPhase::Download, Arc::clone(&total), deadline, tx),
+            measure_loaded_latency(self.client.clone(), deadline),
+        )
+        .await?;
         let bytes = total.load(Ordering::Relaxed);
         if bytes == 0 {
             return Err(anyhow!(
@@ -195,15 +192,15 @@ impl CloudflareEngine {
                 Arc::clone(&total),
                 UPLOAD_START_BYTES,
                 deadline,
+                UPLOAD_URL.to_string(),
             ));
         }
-        let loaded = tokio::spawn(measure_loaded_latency(self.client.clone(), deadline));
-        self.sample_transfer(TestPhase::Upload, Arc::clone(&total), deadline, tx)
-            .await;
-        while let Some(result) = workers.join_next().await {
-            result.context("Cloudflare upload worker panicked")??;
-        }
-        let loaded_samples = loaded.await.context("loaded-latency task panicked")?;
+        let loaded_samples = finish_phase(
+            workers,
+            self.sample_transfer(TestPhase::Upload, Arc::clone(&total), deadline, tx),
+            measure_loaded_latency(self.client.clone(), deadline),
+        )
+        .await?;
         let bytes = total.load(Ordering::Relaxed);
         if bytes == 0 {
             return Err(anyhow!(
@@ -290,9 +287,11 @@ async fn download_worker(client: Client, total: Arc<AtomicU64>, deadline: Instan
 
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             rate_limit_retries += 1;
-            if rate_limit_retries > MAX_RATE_LIMIT_RETRIES
-                || !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline)
-                    .await
+            if rate_limit_retries > MAX_RATE_LIMIT_RETRIES {
+                return Err(anyhow!("Cloudflare rate limit retry budget exhausted; try later or --backend librespeed"));
+            }
+            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline)
+                .await
             {
                 break;
             }
@@ -312,11 +311,11 @@ async fn download_worker(client: Client, total: Arc<AtomicU64>, deadline: Instan
         }
 
         rate_limit_retries = 0;
-        let response = response
-            .error_for_status()
-            .context("Cloudflare download endpoint returned an error")?;
+        let response =
+            http::success(response).context("Cloudflare download endpoint returned an error")?;
         let mut body = response.bytes_stream();
         let mut completed = true;
+        let mut request_bytes = 0u64;
         loop {
             let next = tokio::select! {
                 chunk = body.next() => chunk,
@@ -327,6 +326,7 @@ async fn download_worker(client: Client, total: Arc<AtomicU64>, deadline: Instan
             };
             match next {
                 Some(Ok(chunk)) => {
+                    request_bytes += chunk.len() as u64;
                     total.fetch_add(chunk.len() as u64, Ordering::Relaxed);
                 }
                 Some(Err(error)) => return Err(error).context("Cloudflare download stream failed"),
@@ -338,6 +338,10 @@ async fn download_worker(client: Client, total: Arc<AtomicU64>, deadline: Instan
             }
         }
 
+        anyhow::ensure!(
+            !completed || request_bytes > 0,
+            "Cloudflare returned an empty download body"
+        );
         if completed
             && request_started.elapsed() < Duration::from_millis(700)
             && chunk_index > floor_index
@@ -353,27 +357,32 @@ async fn upload_worker(
     total: Arc<AtomicU64>,
     initial_payload_len: usize,
     deadline: Instant,
+    endpoint: String,
 ) -> Result<()> {
     let mut payload_len = initial_payload_len;
     let mut rate_limit_retries = 0_usize;
     while Instant::now() < deadline {
+        let submitted = Arc::new(AtomicU64::new(0));
+        let started = Instant::now();
         let response = tokio::select! {
             response = client
-                .post(UPLOAD_URL)
+                .post(&endpoint)
                 .query(&[("r", cache_buster())])
                 .header("content-type", "application/octet-stream")
                 .header("cache-control", "no-store")
                 .header(CONTENT_LENGTH, payload_len.to_string())
-                .body(counted_upload_body(Arc::clone(&total), payload_len))
+                .body(http::upload_body(Arc::clone(&submitted), payload_len))
                 .send() => response.context("Cloudflare upload request failed")?,
             _ = sleep_until(deadline) => break,
         };
 
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             rate_limit_retries += 1;
-            if rate_limit_retries > MAX_RATE_LIMIT_RETRIES
-                || !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline)
-                    .await
+            if rate_limit_retries > MAX_RATE_LIMIT_RETRIES {
+                return Err(anyhow!("Cloudflare rate limit retry budget exhausted; try later or --backend librespeed"));
+            }
+            if !sleep_before_deadline(rate_limit_delay(&response, rate_limit_retries), deadline)
+                .await
             {
                 break;
             }
@@ -385,28 +394,26 @@ async fn upload_worker(
         }
 
         rate_limit_retries = 0;
-        response
-            .error_for_status()
-            .context("Cloudflare upload endpoint returned an error")?;
+        let response =
+            http::success(response).context("Cloudflare upload endpoint returned an error")?;
+        tokio::select! {
+            result = http::drain(response, 1024 * 1024) => result?,
+            _ = sleep_until(deadline) => break,
+        }
+        anyhow::ensure!(
+            submitted.load(Ordering::Relaxed) == payload_len as u64,
+            "upload endpoint responded before the complete request body was submitted"
+        );
+        // Only a completed, successful response commits this request's bytes.
+        // Rejected, buffered, or deadline-cancelled requests are not goodput.
+        total.fetch_add(payload_len as u64, Ordering::Relaxed);
+        if started.elapsed() < Duration::from_millis(250) {
+            payload_len = (payload_len * 2).min(UPLOAD_MAX_BYTES);
+        } else if started.elapsed() > Duration::from_secs(1) {
+            payload_len = (payload_len / 2).max(UPLOAD_MIN_BYTES);
+        }
     }
     Ok(())
-}
-
-fn counted_upload_body(total: Arc<AtomicU64>, payload_len: usize) -> Body {
-    let chunk = Bytes::from(vec![0_u8; UPLOAD_BODY_CHUNK_BYTES]);
-    let stream = futures_util::stream::unfold(
-        (payload_len, chunk, total),
-        |(remaining, chunk, total)| async move {
-            if remaining == 0 {
-                return None;
-            }
-            let len = remaining.min(chunk.len());
-            total.fetch_add(len as u64, Ordering::Relaxed);
-            let item = Ok::<Bytes, std::io::Error>(chunk.slice(..len));
-            Some((item, (remaining - len, chunk, total)))
-        },
-    );
-    Body::wrap_stream(stream)
 }
 
 async fn latency_probe(client: &Client) -> Result<f64> {
@@ -432,11 +439,9 @@ async fn latency_probe(client: &Client) -> Result<f64> {
             if is_size_rejection(response.status()) && bytes == 0 {
                 break;
             }
-            let response = response
-                .error_for_status()
-                .context("Cloudflare latency endpoint returned an error")?;
-            let _ = response
-                .bytes()
+            let response =
+                http::success(response).context("Cloudflare latency endpoint returned an error")?;
+            http::drain(response, 64 * 1024)
                 .await
                 .context("Cloudflare latency body failed")?;
             return Ok(started.elapsed().as_secs_f64() * 1000.0);
@@ -547,5 +552,63 @@ mod tests {
     #[test]
     fn decimal_mbps_conversion_is_correct() {
         assert!((mbps(125_000_000, 1.0) - 1000.0).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    use crate::engine::test_support::upload_peer;
+
+    #[tokio::test]
+    async fn rejected_uploads_never_count_as_goodput() {
+        let (url, peer) = upload_peer(vec![(413, Duration::ZERO), (500, Duration::ZERO)]).await;
+        let total = Arc::new(AtomicU64::new(0));
+        let result = upload_worker(
+            Client::builder().no_proxy().build().unwrap(),
+            Arc::clone(&total),
+            64 * 1024,
+            Instant::now() + Duration::from_secs(2),
+            url,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+        assert_eq!(peer.await.unwrap(), vec![64 * 1024, 32 * 1024]);
+    }
+
+    #[tokio::test]
+    async fn deadline_cancelled_upload_is_not_counted() {
+        let (url, peer) = upload_peer(vec![(200, Duration::from_millis(250))]).await;
+        let total = Arc::new(AtomicU64::new(0));
+        upload_worker(
+            Client::builder().no_proxy().build().unwrap(),
+            Arc::clone(&total),
+            64 * 1024,
+            Instant::now() + Duration::from_millis(100),
+            url,
+        )
+        .await
+        .unwrap();
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+        peer.abort();
+        let _ = peer.await;
+    }
+
+    #[tokio::test]
+    async fn only_successful_complete_requests_commit_bytes() {
+        let (url, peer) = upload_peer(vec![(200, Duration::ZERO), (500, Duration::ZERO)]).await;
+        let total = Arc::new(AtomicU64::new(0));
+        assert!(upload_worker(
+            Client::builder().no_proxy().build().unwrap(),
+            Arc::clone(&total),
+            64 * 1024,
+            Instant::now() + Duration::from_secs(2),
+            url
+        )
+        .await
+        .is_err());
+        assert_eq!(total.load(Ordering::Relaxed), 64 * 1024);
+        peer.await.unwrap();
     }
 }
