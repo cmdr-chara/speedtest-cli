@@ -7,14 +7,38 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  source:
+    name: Review source snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive tracked source
+        run: git archive --format=tar.gz --output=source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-snapshot
+          path: source.tar.gz
+          retention-days: 3
+
   check:
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -25,3 +49,23 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --all-features
+      - name: Build CLI
+        run: cargo build --bin speedtest
+      - name: CLI help and version smoke tests
+        shell: bash
+        run: |
+          mkdir -p verification
+          cargo run --quiet --bin speedtest -- --help > verification/help.txt
+          cargo run --quiet --bin speedtest -- --version > verification/version.txt
+      - name: Preserve CLI and dependency resolution for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ runner.os }}
+          path: |
+            verification/
+            Cargo.lock
+            target/debug/speedtest
+            target/debug/speedtest.exe
+          if-no-files-found: warn
+          retention-days: 3
