@@ -1,0 +1,25 @@
+name: Review tools
+on:
+  push:
+    branches: [improve/cli-reliability-and-automation]
+    paths: [.github/workflows/review-tools.yml]
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Archive compiler runtime library
+        run: |
+          mkdir -p runtime
+          cp -L "$(rustc --print sysroot)"/lib/libLLVM.so.* runtime/
+          sha256sum runtime/* > runtime/SHA256SUMS
+          tar -czf compiler-runtime.tar.gz runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compiler-runtime
+          path: compiler-runtime.tar.gz
+          compression-level: 0
+          retention-days: 1
