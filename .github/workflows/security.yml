@@ -1,0 +1,38 @@
+name: Dependency audit
+
+on:
+  push:
+    paths: [Cargo.toml, Cargo.lock, .github/workflows/security.yml]
+  pull_request:
+    paths: [Cargo.toml, Cargo.lock, .github/workflows/security.yml]
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned auditor
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Resolve dependencies when reviewing a pre-lockfile base
+        run: test -f Cargo.lock || cargo generate-lockfile
+      - name: Audit
+        run: |
+          mkdir -p verification
+          cargo audit --json > verification/audit.json
+      - name: Preserve audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit
+          path: verification/audit.json
+          retention-days: 7
