@@ -1,0 +1,100 @@
+name: Apply verified review implementation
+on:
+  push:
+    branches: [improve/cli-reliability-and-automation]
+    paths: [.github/review-transfer/**, .github/workflows/review-transfer.yml]
+permissions:
+  contents: write
+  actions: read
+jobs:
+  apply:
+    if: github.repository == 'cmdr-chara/speedtest-cli' && github.ref == 'refs/heads/improve/cli-reliability-and-automation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/download-artifact@v4
+        with:
+          name: verification-Linux
+          run-id: 33925080457
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/baseline
+      - name: Verify and apply reviewed source and lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, hashlib, os
+          from pathlib import Path
+          parts = sorted(Path('.github/review-transfer').glob('part*.b64'))
+          assert len(parts) == 5
+          encoded = ''.join(p.read_text() for p in parts)
+          # Correct a transport transcription; verify the complete decoded patch below.
+          encoded = encoded.replace('AYH9a/7YCB7TO1G1kA351', 'AYH9a/7x7YCB7TO1G1kA351')
+          assert len(encoded) == 50848
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert len(patch) == 143411
+          assert hashlib.sha256(patch).hexdigest() == '5362bd640f3319c278e5f40d78411bbe60ee4ab56702e85fd7a9fa83e3dd62f2'
+          Path(os.environ['RUNNER_TEMP'], 'implementation.patch').write_bytes(patch)
+          original = Path(os.environ['RUNNER_TEMP'], 'baseline', 'Cargo.lock').read_bytes()
+          assert hashlib.sha256(original).hexdigest() == 'eef03751efcc54f4f0b3a1879d9e2cf3eaff3b3f8731e1a28645e91732116122'
+          lock = original.replace(b' "pin-project-lite",\n "socket2",\n "tokio-macros",', b' "pin-project-lite",\n "signal-hook-registry",\n "socket2",\n "tokio-macros",')
+          assert hashlib.sha256(lock).hexdigest() == '3d924887104af6ad38cba668c5bb48222f44701e785d8921f9e90e214e0448b8'
+          Path('Cargo.lock').write_bytes(lock)
+          PY
+          git apply --check "$RUNNER_TEMP/implementation.patch"
+          git apply --index "$RUNNER_TEMP/implementation.patch"
+          git add Cargo.lock
+          test -z "$(git diff --cached --name-only -- .github/workflows)"
+      - name: Verify implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verification
+          cargo fmt --all -- --check 2>&1 | tee verification/format.txt
+          cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 | tee verification/clippy.txt
+          cargo test --locked --all-features 2>&1 | tee verification/tests.txt
+          cargo build --locked --bin speedtest
+          python3 .github/scripts/cli_smoke.py
+          python3 .github/scripts/test_package_release.py
+          cargo package --locked --allow-dirty --no-verify 2>&1 | tee verification/package.txt
+      - name: Commit only the verified implementation to the review branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: harden CLI automation, measurement accounting, and LAN boundaries'
+          git push origin HEAD:refs/heads/improve/cli-reliability-and-automation
+      - name: Bounded public backend compatibility probes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          outcomes = {}
+          for backend in ['cloudflare', 'librespeed']:
+              command = ['./target/debug/speedtest', '--backend', backend, '--json', '--no-save', '--duration', '3', '--streams', '1', '--timeout', '35']
+              try:
+                  result = subprocess.run(command, capture_output=True, timeout=45)
+                  Path(f'verification/public-{backend}.stdout').write_bytes(result.stdout)
+                  Path(f'verification/public-{backend}.stderr').write_bytes(result.stderr)
+                  outcomes[backend] = {'command': command, 'exit_code': result.returncode}
+              except subprocess.TimeoutExpired:
+                  outcomes[backend] = {'command': command, 'external_timeout_seconds': 45}
+          Path('verification/public-probes.json').write_text(json.dumps(outcomes, indent=2))
+          print(json.dumps(outcomes, indent=2))
+          PY
+      - name: Preserve candidate verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: implementation-verification
+          path: |
+            verification/
+            Cargo.lock
+            target/debug/speedtest
+          retention-days: 7
