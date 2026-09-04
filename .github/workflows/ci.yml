@@ -12,22 +12,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  source:
-    name: Review source snapshot
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Archive tracked source
-        run: git archive --format=tar.gz --output=source.tar.gz HEAD
-      - uses: actions/upload-artifact@v4
-        with:
-          name: source-snapshot
-          path: source.tar.gz
-          retention-days: 3
-
   check:
     timeout-minutes: 20
     strategy:
@@ -42,22 +26,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Test
-        run: cargo test --all-features
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Unit, protocol, CLI contract, and serialization tests
+        run: cargo test --locked --all-features
       - name: Build CLI
-        run: cargo build --bin speedtest
-      - name: CLI help and version smoke tests
+        run: cargo build --locked --bin speedtest
+      - name: Loopback CLI and terminal smoke tests (no Internet)
+        run: python .github/scripts/cli_smoke.py
+      - name: Packaging tests (no publication)
+        run: python .github/scripts/test_package_release.py
+      - name: Verify crate packaging (no publication)
+        if: runner.os == 'Linux'
+        run: cargo package --locked --allow-dirty --no-verify
+      - name: CLI help and version
         shell: bash
         run: |
           mkdir -p verification
-          cargo run --quiet --bin speedtest -- --help > verification/help.txt
-          cargo run --quiet --bin speedtest -- --version > verification/version.txt
-      - name: Preserve CLI and dependency resolution for review
+          cargo run --quiet --locked --bin speedtest -- --help > verification/help.txt
+          cargo run --quiet --locked --bin speedtest -- --version > verification/version.txt
+      - name: Preserve verification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -68,47 +62,4 @@ jobs:
             target/debug/speedtest
             target/debug/speedtest.exe
           if-no-files-found: warn
-          retention-days: 3
-      - name: Prepare isolated offline review kit
-        if: runner.os == 'Linux' && github.ref == 'refs/heads/improve/cli-reliability-and-automation'
-        shell: bash
-        run: |
-          set -euo pipefail
-          TOOLCHAIN="$(rustc --print sysroot)"
-          mkdir -p offline/toolchain/bin offline/toolchain/lib offline/cargo/registry
-          cp "$TOOLCHAIN"/bin/{rustc,cargo,rustfmt,cargo-fmt,clippy-driver,cargo-clippy} offline/toolchain/bin/
-          cp "$TOOLCHAIN"/lib/*.so offline/toolchain/lib/
-          cp -a "$TOOLCHAIN/lib/rustlib" offline/toolchain/lib/
-          cp -a "$HOME/.cargo/registry/"{index,cache,src} offline/cargo/registry/
-          rustc --version > offline/versions.txt
-          cargo --version >> offline/versions.txt
-          tar -czf offline-review-kit.tar.gz offline
-      - name: Preserve isolated offline review kit
-        if: runner.os == 'Linux' && github.ref == 'refs/heads/improve/cli-reliability-and-automation'
-        uses: actions/upload-artifact@v4
-        with:
-          name: offline-review-kit
-          path: offline-review-kit.tar.gz
-          compression-level: 0
-          retention-days: 1
-      - name: Inspect publisher-provided Ookla manual without installing or running it
-        if: runner.os == 'Linux' && github.ref == 'refs/heads/improve/cli-reliability-and-automation'
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p research
-          curl --fail --location --connect-timeout 10 --max-time 45 'https://packagecloud.io/ookla/speedtest-cli/packages/ubuntu/bionic/speedtest_1.2.0.84-1.ea6b6773cf_armhf.deb/download.deb?distro_version_id=190' -o research/ookla.deb
-          echo 'f00c46b4945e3e1fea08e4858db78c9d8f3e35a8c9d8f3e35a8c9d8f3e35a8c9d8f3e3  research/ookla.deb' > /dev/null
-          ACTUAL="$(sha256sum research/ookla.deb | cut -d' ' -f1)"
-          test "$ACTUAL" = 'f00c46b4945e3e1fea08e4858db78c9d8f3e35a8c9daa4c033df7eb03931294d'
-          dpkg-deb --fsys-tarfile research/ookla.deb | tar -xOf - ./usr/share/man/man5/speedtest.5 > research/speedtest.5
-          rm research/ookla.deb
-      - name: Preserve competitive research evidence
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: research-primary-sources
-          path: research/speedtest.5
-          if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 7

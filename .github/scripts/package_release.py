@@ -56,8 +56,15 @@ def main() -> None:
                 if path.is_file():
                     handle.write(path, path.relative_to(dist))
     elif archive.name.endswith(".tar.gz"):
+        def executable_mode(member: tarfile.TarInfo) -> tarfile.TarInfo:
+            # Windows chmod cannot represent POSIX execute bits; set the archive
+            # contract explicitly instead of depending on the build host's mode.
+            if member.isfile() and member.name == f"{args.artifact}/speedtest":
+                member.mode = 0o755
+            return member
+
         with tarfile.open(archive, "w:gz") as handle:
-            handle.add(package_dir, arcname=args.artifact)
+            handle.add(package_dir, arcname=args.artifact, filter=executable_mode)
     else:
         raise SystemExit(f"unsupported archive format: {archive.name}")
 
