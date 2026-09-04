@@ -69,3 +69,46 @@ jobs:
             target/debug/speedtest.exe
           if-no-files-found: warn
           retention-days: 3
+      - name: Prepare isolated offline review kit
+        if: runner.os == 'Linux' && github.ref == 'refs/heads/improve/cli-reliability-and-automation'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOOLCHAIN="$(rustc --print sysroot)"
+          mkdir -p offline/toolchain/bin offline/toolchain/lib offline/cargo/registry
+          cp "$TOOLCHAIN"/bin/{rustc,cargo,rustfmt,cargo-fmt,clippy-driver,cargo-clippy} offline/toolchain/bin/
+          cp "$TOOLCHAIN"/lib/*.so offline/toolchain/lib/
+          cp -a "$TOOLCHAIN/lib/rustlib" offline/toolchain/lib/
+          cp -a "$HOME/.cargo/registry/"{index,cache,src} offline/cargo/registry/
+          rustc --version > offline/versions.txt
+          cargo --version >> offline/versions.txt
+          tar -czf offline-review-kit.tar.gz offline
+      - name: Preserve isolated offline review kit
+        if: runner.os == 'Linux' && github.ref == 'refs/heads/improve/cli-reliability-and-automation'
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-review-kit
+          path: offline-review-kit.tar.gz
+          compression-level: 0
+          retention-days: 1
+      - name: Inspect publisher-provided Ookla manual without installing or running it
+        if: runner.os == 'Linux' && github.ref == 'refs/heads/improve/cli-reliability-and-automation'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p research
+          curl --fail --location --connect-timeout 10 --max-time 45 'https://packagecloud.io/ookla/speedtest-cli/packages/ubuntu/bionic/speedtest_1.2.0.84-1.ea6b6773cf_armhf.deb/download.deb?distro_version_id=190' -o research/ookla.deb
+          echo 'f00c46b4945e3e1fea08e4858db78c9d8f3e35a8c9d8f3e35a8c9d8f3e35a8c9d8f3e3  research/ookla.deb' > /dev/null
+          ACTUAL="$(sha256sum research/ookla.deb | cut -d' ' -f1)"
+          test "$ACTUAL" = 'f00c46b4945e3e1fea08e4858db78c9d8f3e35a8c9daa4c033df7eb03931294d'
+          dpkg-deb --fsys-tarfile research/ookla.deb | tar -xOf - ./usr/share/man/man5/speedtest.5 > research/speedtest.5
+          rm research/ookla.deb
+      - name: Preserve competitive research evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-primary-sources
+          path: research/speedtest.5
+          if-no-files-found: ignore
+          retention-days: 3
