@@ -11,21 +11,19 @@ use speedtest_cli::{
         CheckArgs, Cli, ColorMode, Command, CompareArgs, DnsArgs, DnsBenchmarkArgs,
         DnsBenchmarkProfileArg, DnsCommand, DnsListArgs, DnsOptimizeArgs, DnsProtocolArg,
         DnsResetArgs, DnsRollbackArgs, DnsSetArgs, DnsShowArgs, DnsTestArgs, DoctorArgs,
-        HistoryArgs, InternetBackendArg, LanArgs, LossArgs, OutputFormat, ServeArgs, StabilityArgs,
-        StatsArgs, VerifyArgs, WifiArgs,
+        HistoryArgs, InternetBackendArg, LanArgs, LossArgs, ServeArgs, StabilityArgs, StatsArgs,
+        VerifyArgs, WifiArgs,
     },
     compare::{self, CompareResult},
     dns::{self, BenchmarkProfile, DnsBenchmarkResult, DnsProviderBenchmark},
     dns_custom,
     doctor::{self, DoctorReport},
-    engine::{
-        cloudflare::CloudflareEngine, internet::InternetEngine, librespeed::LibreSpeedEngine,
-        EngineConfig, EngineEvent,
-    },
+    engine::{cloudflare::CloudflareEngine, internet::InternetEngine, EngineConfig, EngineEvent},
     history::{self, HistorySummary},
     lan, loss,
     model::TestResult,
     output, runtime,
+    session::TestOptions,
     stability::{self, StabilityResult},
     storage, tui, verify, wifi,
 };
@@ -67,6 +65,7 @@ async fn main() -> std::process::ExitCode {
     let matches = Cli::command().color(clap_color).get_matches_from(arguments);
     if matches.subcommand().is_some() {
         for name in [
+            "run",
             "timeout",
             "backend",
             "librespeed_server",
@@ -157,24 +156,16 @@ async fn dispatch(mut cli: Cli) -> Result<()> {
         Some(Command::Verify(args)) => run_verify(args).await,
         Some(Command::Serve(args)) => run_serve(args).await,
         Some(Command::Lan(args)) => run_lan(args).await,
+        None if can_interact && !cli.plain && !cli.json && !cli.run => {
+            tui::run_cockpit(TestOptions::from(&cli)).await
+        }
         None => run_speedtest(cli).await,
     }
 }
 
 async fn run_speedtest(cli: Cli) -> Result<()> {
-    let config = EngineConfig {
-        streams: usize::from(cli.streams),
-        phase_duration: Duration::from_secs(cli.duration),
-    };
-    let engine = match cli.backend {
-        InternetBackendArg::Cloudflare => {
-            InternetEngine::Cloudflare(CloudflareEngine::new(config)?)
-        }
-        InternetBackendArg::Librespeed => InternetEngine::LibreSpeed(LibreSpeedEngine::new(
-            config,
-            cli.librespeed_server.as_deref(),
-        )?),
-    };
+    let options = TestOptions::from(&cli);
+    let engine = options.engine()?;
 
     let result = if cli.plain || cli.json {
         run_non_interactive(
@@ -187,15 +178,7 @@ async fn run_speedtest(cli: Cli) -> Result<()> {
         run_interactive(engine, cli.fps, Duration::from_secs(cli.timeout)).await?
     };
 
-    if let Some(path) = &cli.output {
-        match cli.format {
-            OutputFormat::Json => storage::write_json(path, &result)?,
-            OutputFormat::Csv => storage::write_csv(path, &result)?,
-        }
-    }
-    if !cli.no_save {
-        storage::persist_default(&result).context("failed to persist speed-test history")?;
-    }
+    options.finish(&result)?;
     if cli.json {
         println!("{}", result.pretty_json()?);
     } else {

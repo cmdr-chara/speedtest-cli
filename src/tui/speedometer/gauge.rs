@@ -23,6 +23,18 @@ pub fn render(
     accent: Color,
     show_value: bool,
 ) {
+    render_with_background(frame, area, state, accent, show_value, Color::Black);
+}
+
+/// Embed the existing gauge in a shell without painting a black canvas over its theme.
+pub fn render_with_background(
+    frame: &mut Frame,
+    area: Rect,
+    state: &SpeedometerState,
+    accent: Color,
+    show_value: bool,
+    background: Color,
+) {
     if area.width < 40 || area.height < 8 {
         render_fallback(frame, area, state, accent, show_value);
         return;
@@ -49,6 +61,7 @@ pub fn render(
     };
 
     let canvas = Canvas::default()
+        .background_color(background)
         .block(Block::default().borders(Borders::NONE))
         .marker(Marker::Braille)
         .x_bounds([-1.28, 1.28])
