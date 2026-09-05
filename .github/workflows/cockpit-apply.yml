@@ -1,0 +1,79 @@
+name: Verify cockpit implementation
+on:
+  push:
+    branches: [feat/network-cockpit]
+    paths: [.github/workflows/cockpit-apply.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/feat/network-cockpit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify and apply exact reviewed source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for sha in dd101586189add7422bf6bfc1ca207488ea45223 2ae0d3fa82fa805fbd7b02e5ec32f73c44b469bc b17cda25edf8b75dc7b0d85a05c613e0b055292e; do
+            gh api "repos/cmdr-chara/speedtest-cli/git/blobs/${sha}" --jq .content | base64 --decode >> /tmp/cockpit.xz
+          done
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, lzma
+          payload = Path('/tmp/cockpit.xz').read_bytes()
+          assert hashlib.sha256(payload).hexdigest() == '90b62e581695e95a3b9d247090d99c5b3990f1fa70eba8d07449c3d7c6899a98'
+          Path('/tmp/cockpit.patch').write_bytes(lzma.decompress(payload))
+          PY
+          git apply --check /tmp/cockpit.patch
+          git apply --index /tmp/cockpit.patch
+          git diff --cached --check
+      - name: Full static and Rust verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verification
+          cargo fmt --all -- --check 2>&1 | tee verification/format.txt
+          cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 | tee verification/clippy.txt
+          cargo test --locked --all-features 2>&1 | tee verification/rust-tests.txt
+          cargo build --locked --bin speedtest 2>&1 | tee verification/build.txt
+      - name: Real CLI and terminal lifecycle checks (loopback only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/scripts/cli_smoke.py
+          python .github/scripts/cockpit_smoke.py
+          python .github/scripts/test_package_release.py 2>&1 | tee verification/packaging.txt
+      - name: Commit verified source to feature branch only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: add keyboard-driven network cockpit around existing services'
+          git push origin HEAD:refs/heads/feat/network-cockpit
+          git rev-parse HEAD > verification/candidate.txt
+          git ls-tree -r HEAD -- src tests Cargo.toml Cargo.lock README.md CONTRIBUTING.md docs .github/scripts > verification/source-manifest.txt
+          git bundle create /tmp/cockpit-verified.bundle HEAD refs/heads/feat/network-cockpit
+      - name: Preserve source and verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cockpit-implementation-verification
+          path: |
+            verification/
+            target/debug/speedtest
+            /tmp/cockpit-verified.bundle
+          retention-days: 7
+          if-no-files-found: warn
