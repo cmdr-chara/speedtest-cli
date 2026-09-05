@@ -1,0 +1,8 @@
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "backend": "fixture",
+  "server": {"host": "localhost", "name": "Offline fixture"},
+  "latency": {"idle_ms": 10.0, "jitter_ms": 2.0, "download_loaded_ms": 20.0, "upload_loaded_ms": 30.0, "packet_loss_percent": null},
+  "download": {"mbps": 100.0, "bytes": 12500000, "seconds": 1.0},
+  "upload": {"mbps": 20.0, "bytes": 2500000, "seconds": 1.0}
+}

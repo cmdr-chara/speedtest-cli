@@ -7,7 +7,7 @@ use crate::{
     compare::{self, CompareResult},
     engine::{
         cloudflare::CloudflareEngine, internet::InternetEngine, librespeed::LibreSpeedEngine,
-        EngineConfig, EngineEvent,
+        EngineConfig,
     },
     loss::{self, PacketLossResult},
     model::TestResult,
@@ -66,23 +66,9 @@ pub async fn run(config: EngineConfig, librespeed_server: Option<&str>) -> Resul
 }
 
 async fn run_engine(engine: InternetEngine) -> Result<TestResult> {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let runner = engine.clone();
-    let handle = tokio::spawn(async move { runner.run(tx).await });
-
-    while let Some(event) = rx.recv().await {
-        match event {
-            EngineEvent::Complete(result) => {
-                handle
-                    .await
-                    .context("verification engine task panicked")??;
-                return Ok(result);
-            }
-            EngineEvent::Error(error) => anyhow::bail!(error),
-            _ => {}
-        }
-    }
-    handle.await.context("verification engine task panicked")?
+    let (tx, rx) = mpsc::unbounded_channel();
+    drop(rx);
+    crate::runtime::deadline(std::time::Duration::from_secs(120), engine.run(tx)).await
 }
 
 fn throughput_agrees(left: f64, right: f64, tolerance: f64) -> bool {

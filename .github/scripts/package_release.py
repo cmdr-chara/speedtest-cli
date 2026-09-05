@@ -2,22 +2,31 @@
 
 import argparse
 import hashlib
+import re
 import shutil
 import tarfile
 import zipfile
 from pathlib import Path
 
 
+def safe_name(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
+        raise argparse.ArgumentTypeError("expected a plain filename, not a path")
+    return value
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Package a speedtest release binary")
     parser.add_argument("--binary", required=True)
-    parser.add_argument("--artifact", required=True)
-    parser.add_argument("--archive", required=True)
+    parser.add_argument("--artifact", required=True, type=safe_name)
+    parser.add_argument("--archive", required=True, type=safe_name)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if not args.archive.endswith((".zip", ".tar.gz")):
+        raise SystemExit("archive must end in .zip or .tar.gz")
     root = Path.cwd()
     binary = root / args.binary
     if not binary.is_file():
@@ -47,8 +56,15 @@ def main() -> None:
                 if path.is_file():
                     handle.write(path, path.relative_to(dist))
     elif archive.name.endswith(".tar.gz"):
+        def executable_mode(member: tarfile.TarInfo) -> tarfile.TarInfo:
+            # Windows chmod cannot represent POSIX execute bits; set the archive
+            # contract explicitly instead of depending on the build host's mode.
+            if member.isfile() and member.name == f"{args.artifact}/speedtest":
+                member.mode = 0o755
+            return member
+
         with tarfile.open(archive, "w:gz") as handle:
-            handle.add(package_dir, arcname=args.artifact)
+            handle.add(package_dir, arcname=args.artifact, filter=executable_mode)
     else:
         raise SystemExit(f"unsupported archive format: {archive.name}")
 

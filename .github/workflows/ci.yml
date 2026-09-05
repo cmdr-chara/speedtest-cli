@@ -7,21 +7,59 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Test
-        run: cargo test --all-features
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Unit, protocol, CLI contract, and serialization tests
+        run: cargo test --locked --all-features
+      - name: Build CLI
+        run: cargo build --locked --bin speedtest
+      - name: Loopback CLI and terminal smoke tests (no Internet)
+        run: python .github/scripts/cli_smoke.py
+      - name: Packaging tests (no publication)
+        run: python .github/scripts/test_package_release.py
+      - name: Verify crate packaging (no publication)
+        if: runner.os == 'Linux'
+        run: cargo package --locked --allow-dirty --no-verify
+      - name: CLI help and version
+        shell: bash
+        run: |
+          mkdir -p verification
+          cargo run --quiet --locked --bin speedtest -- --help > verification/help.txt
+          cargo run --quiet --locked --bin speedtest -- --version > verification/version.txt
+      - name: Preserve verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ runner.os }}
+          path: |
+            verification/
+            Cargo.lock
+            target/debug/speedtest
+            target/debug/speedtest.exe
+          if-no-files-found: warn
+          retention-days: 7
