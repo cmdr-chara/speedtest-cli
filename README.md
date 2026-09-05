@@ -6,6 +6,7 @@ A fast, polished terminal network quality analyzer written in Rust.
 
 ## Highlights
 
+- Full-screen keyboard-driven network cockpit with an offline home dashboard
 - Download/upload throughput with concurrent streams
 - Idle and loaded latency, jitter, p95/p99 tails
 - Explainable 0–100 quality score with A+–F grades
@@ -25,6 +26,80 @@ A fast, polished terminal network quality analyzer written in Rust.
 - Offline threshold/freshness checks for saved JSON results
 - JSON output, CSV export, per-run JSON, and JSONL history
 - Native release binaries for Windows, Linux, Intel macOS, and Apple Silicon macOS
+
+## Network cockpit
+
+In an interactive terminal, `speedtest` opens a full-screen home dashboard rather than
+starting a measurement immediately. Opening the menu reads **local history only**:
+no connectivity check, DNS query, server discovery, or throughput test runs until you
+explicitly start a network operation. The connection status says **NETWORK NOT PROBED**
+instead of guessing whether you are online.
+
+```bash
+speedtest                 # Open the dashboard; no automatic network traffic
+speedtest --run           # Bypass the menu; start the existing live speedometer
+speedtest --plain         # Run immediately, with noninteractive text output
+speedtest --json          # Run immediately, with the existing canonical JSON output
+```
+
+The main flow is **Home → Run Speed Test → configuration → Start test → live gauge →
+results**. Review duration, concurrent streams, backend, render rate, timeout, and
+history preference before starting. Existing command-line options seed those values;
+for example, `speedtest --backend librespeed --duration 5 --no-save` opens the cockpit
+with that profile. `--run` retains the immediate-test workflow with the same options.
+
+Home also provides **History**, **Statistics**, **DNS Tools**, **Diagnostics**, and
+**Settings**. The recent result opens with `v`. History shows the last 30 days with
+keyboard selection; `Enter` opens a saved result without saving it again, and `c`
+compares the two newest saved runs. Statistics and comparison reuse the CLI's existing
+analysis, including explicit better/worse labels rather than color alone.
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` or `k` / `j` | Select a row; scroll on report/result screens |
+| `Enter` | Open, start, or edit the selected item |
+| `Tab` / `Shift+Tab`, `←` / `→` | Switch sibling sections |
+| `Esc` / `Backspace` | Back to the previous screen, preserving its selection |
+| `+` / `-`, `Space` | Change the selected configuration/setting value |
+| `PgUp` / `PgDn` | Scroll long reports |
+| `r` | Reload history or retry/start the current tool or failed test |
+| `?` | Open/close the keyboard guide |
+| `q` | Quit; ask before cancelling active work |
+| `Ctrl+C` | Cancel and exit (130); keyboard cancellation waits for an ongoing save |
+
+During a test or diagnostic, section navigation pauses but help, resize, and cancellation
+remain responsive. `Esc` opens a confirmation with **Continue** selected by default;
+choose **Cancel** or press `y` to stop. Incomplete measurements are never saved. A
+completed result remains visible if export/history fails, with a **SAVE FAILED** notice.
+
+Settings apply to **this session only**; they do not change a configuration file or the
+CLI defaults for future launches. They include a reduced-motion option that removes
+needle interpolation and animated activity markers. The balanced timing preset uses
+8-second phases, 2 streams, 60 FPS, and a 120-second deadline. CLI `--timeout` starts
+when an operation starts, not while browsing the menu.
+
+DNS and diagnostic tools have a separate **Ready to start** screen. They run the
+existing read-only commands and show their reports in scrollable panels, with bounded
+output, timeout, cancellation, and retry. Available tools include DNS configuration
+inspection/catalog/testing/UDP and DoH benchmarks, Network Doctor, Wi-Fi, ICMP loss,
+stability monitoring, and backend verification. They do **not** change DNS settings;
+configuration/rollback and all specialized options remain available through the
+unchanged CLI subcommands. Stability in the menu runs for 60 seconds without saving.
+
+The cockpit supports **80×24** and larger terminals. Below that size, navigation is
+preserved behind a resize notice and hidden controls cannot start a test. It uses
+true color when advertised, otherwise 256-color or basic ANSI colors, and never
+requires a mouse. For screen readers, no-color environments, pipes, or non-animated
+reports, use `--plain`; automatic terminal detection is unchanged.
+
+`--output` and `--format json|csv` keep their existing export behavior. In a menu
+session, the explicit output path is reused for each completed test (overwriting
+that file); history remains controlled independently by `--no-save` or the session
+setting. Use distinct paths between launches to keep separate exports. Browsing an
+old result never exports or persists it again.
+
+See [cockpit architecture and verification](docs/network-cockpit.md) for the state
+machine, service boundaries, and test commands.
 
 ## v0.5 Network Lab
 
@@ -291,6 +366,7 @@ speedtest --version
 
 ```bash
 speedtest
+speedtest --run
 speedtest --backend cloudflare
 speedtest --backend librespeed
 speedtest --fps 144
@@ -305,6 +381,7 @@ speedtest --no-save
 Main options:
 
 ```text
+--run                        bypass the menu and start immediately
 --backend <BACKEND>          cloudflare or librespeed
 --librespeed-server <URL>    custom LibreSpeed base URL
 --streams <N>                concurrent transfer streams (default: 2)
@@ -324,7 +401,7 @@ The speedometer physics run independently of the render cap, so lowering `--fps`
 
 ## Terminal and automation behavior
 
-Normal tests automatically use plain output when stdin or stdout is redirected. `TERM=dumb`, nonempty `NO_COLOR`, `CLICOLOR=0`, `--color never`, and `--progress never` also select the non-animated interface. `--color always` overrides color environment preferences but never forces raw mode on a pipe or a dumb terminal. Completed interactive results remain in terminal scrollback.
+Normal tests automatically use plain output when stdin or stdout is redirected. `TERM=dumb`, nonempty `NO_COLOR`, `CLICOLOR=0`, `--color never`, and `--progress never` also select the non-animated interface. `--color always` overrides color environment preferences but never forces raw mode on a pipe or a dumb terminal. The `--run` speedometer keeps its completed result in terminal scrollback. The cockpit keeps results in its Results screen and, when enabled, local history.
 
 Results go to stdout. Default-test phase progress goes to stderr: `auto` shows it only on a terminal and keeps JSON mode quiet; `always` explicitly enables it; `never` suppresses it. Plain reports use text labels rather than relying on color. JSON field names and units do not vary with terminal preferences.
 
@@ -345,7 +422,7 @@ speedtest --color never
 | 124 | Overall Internet measurement deadline exceeded |
 | 130 | Handled cancellation |
 
-In JSON mode, runtime failures emit `{"error":{"code":1,"message":"..."}}` on **stderr**, without a success result on stdout. Usage errors remain human-readable on stderr. Explicit file exports and automatic persistence must succeed before a completed default/stability result is printed. A broken pipe is handled without a panic/backtrace; it does not roll back already completed persistence.
+In JSON mode, runtime failures emit `{"error":{"code":1,"message":"..."}}` on **stderr**, without a success result on stdout. Usage errors remain human-readable on stderr. In immediate CLI runs, explicit file exports and automatic persistence must succeed before a completed default/stability result is printed. The menu instead retains the completed result on screen and labels a save/export failure explicitly. A broken pipe is handled without a panic/backtrace; it does not roll back already completed persistence.
 
 Color/progress flags are global. Measurement flags are command-specific: use `speedtest verify --duration 5`, not `speedtest --duration 5 verify`. Options that would otherwise be silently ignored before a subcommand are rejected. `--format` requires `--output`, and `--librespeed-server` requires `--backend librespeed`; these mistakes fail before any measurement starts.
 
@@ -444,6 +521,8 @@ src/
 ├── stability.rs
 ├── storage/
 ├── tui/
+│   ├── cockpit/            # reducer, runtime, views, theme, read-only adapters
+│   └── speedometer/        # shared live gauge and physics
 ├── verify.rs
 ├── wifi.rs
 └── lib.rs

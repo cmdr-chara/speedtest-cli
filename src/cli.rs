@@ -22,7 +22,7 @@ pub enum InternetBackendArg {
 #[command(name = "speedtest")]
 #[command(version, about = "Measure network throughput, latency, and quality")]
 #[command(
-    after_help = "Examples:\n  speedtest --plain --no-save\n  speedtest --json > result.json\n  speedtest check result.json --min-download 100 --max-latency 30\n  speedtest lan 192.168.1.50:9876 --json\n\nThroughput uses decimal Mbps; latency uses milliseconds.\nRun `speedtest <COMMAND> --help` for command-specific options."
+    after_help = "Examples:\n  speedtest                         # open the network cockpit\n  speedtest --run                   # start immediately\n  speedtest --plain --no-save\n  speedtest --json > result.json\n  speedtest check result.json --min-download 100 --max-latency 30\n  speedtest lan 192.168.1.50:9876 --json\n\nThroughput uses decimal Mbps; latency uses milliseconds.\nRun `speedtest <COMMAND> --help` for command-specific options."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -59,6 +59,10 @@ pub struct Cli {
     /// Maximum interactive TUI render rate. The speedometer physics always run at 240 Hz.
     #[arg(long, default_value_t = 240, value_parser = clap::value_parser!(u16).range(30..=240))]
     pub fps: u16,
+
+    /// Start a speed test immediately, bypassing the home menu.
+    #[arg(long)]
+    pub run: bool,
 
     /// Disable the interactive terminal UI.
     #[arg(long)]

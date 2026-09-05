@@ -41,6 +41,7 @@ fn help_is_discoverable_uncolored_and_documents_units() {
     let text = String::from_utf8(result.stdout).unwrap();
     assert!(text.contains("check"));
     assert!(text.contains("Examples:"));
+    assert!(text.contains("--run"));
     assert!(text.contains("Mbps"));
     assert!(!text.contains('\x1b'));
     assert!(result.stderr.is_empty());
@@ -161,4 +162,32 @@ fn closed_stdout_is_a_quiet_success_not_a_panic() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn menu_shortcut_does_not_override_machine_output_or_accept_ignored_command_flags() {
+    let result = run(&["--run", "history"], None);
+    assert_eq!(result.status.code(), Some(2));
+    assert!(result.stdout.is_empty());
+    for mode in ["--json", "--plain"] {
+        let result = run(
+            &[
+                "--run",
+                mode,
+                "--backend",
+                "librespeed",
+                "--librespeed-server",
+                "file:///invalid",
+                "--no-save",
+            ],
+            None,
+        );
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        assert!(!result.stderr.contains(&0x1b));
+        if mode == "--json" {
+            let error: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
+            assert_eq!(error["error"]["code"], 1);
+        }
+    }
 }

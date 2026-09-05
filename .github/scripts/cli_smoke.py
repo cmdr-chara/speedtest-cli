@@ -154,7 +154,7 @@ def pty_check(binary, options, env, transcript):
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 100, 0, 0))
     tty_env = {k: v for k, v in env.items() if k not in ("NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE")}
     tty_env["TERM"] = "xterm-256color"
-    child = subprocess.Popen([binary, *options], env=tty_env, stdin=slave, stdout=slave, stderr=slave)
+    child = subprocess.Popen([binary, "--run", *options], env=tty_env, stdin=slave, stdout=slave, stderr=slave)
     data = bytearray()
     try:
         deadline = time.monotonic() + 5

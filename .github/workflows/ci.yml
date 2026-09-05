@@ -40,6 +40,8 @@ jobs:
         run: cargo build --locked --bin speedtest
       - name: Loopback CLI and terminal smoke tests (no Internet)
         run: python .github/scripts/cli_smoke.py
+      - name: Full-screen cockpit navigation and lifecycle (Unix PTY)
+        run: python .github/scripts/cockpit_smoke.py
       - name: Packaging tests (no publication)
         run: python .github/scripts/test_package_release.py
       - name: Verify crate packaging (no publication)

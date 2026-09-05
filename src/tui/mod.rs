@@ -1,3 +1,5 @@
+mod cockpit;
+pub use cockpit::run as run_cockpit;
 mod app;
 mod speedometer;
 mod stability;

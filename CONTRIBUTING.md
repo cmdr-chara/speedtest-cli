@@ -10,12 +10,38 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 cargo build --locked --bin speedtest
 python .github/scripts/cli_smoke.py
+python .github/scripts/cockpit_smoke.py
 python .github/scripts/test_package_release.py
 ```
 
 The Rust suites cover units, serialization compatibility, subprocess arguments, HTTP/LAN protocol failures, and black-box command contracts. The Python CLI suite uses only loopback servers and temporary data directories. It verifies human/JSON output, explicit stderr progress, exports, no-save, thresholds, timeout, refusal, LAN throughput, readiness, and (on Unix) SIGINT and PTY restoration. Its transcript is written to `verification/cli-smoke.txt`. Windows runs the network/output cases; Unix PTY assertions are deliberately not claimed for Windows.
 
 Packaging tests exercise ZIP/tar contents, executable permissions, checksums, and path validation in temporary directories. They do not publish or execute release artifacts. CI runs the checks on Linux, Windows, and macOS and retains verification artifacts.
+
+## Cockpit checks
+
+The cockpit's Rust tests exercise the pure navigation reducer, modal defaults, task
+completion/cancellation, persistence errors, small-screen input guards, and every
+screen through Ratatui's test backend at multiple sizes. The separate
+`cockpit_smoke.py` uses a real Unix PTY at 80×24 and local HTTP fixtures. It checks
+bare offline startup, help/back/tabs, resize, the legacy `--plain` path, successful
+measurement/export, failure/retry, cancellation, local diagnostic command execution,
+and terminal restoration. The diagnostic cancellation fixture is a rejecting local
+HTTPS proxy, not a public endpoint. No system DNS writes run.
+
+On Windows the PTY script reports **SKIPPED**, while the cross-platform Rust
+navigation/render tests and existing CLI/network tests still run. This is not proof
+of Windows console restoration; verify that manually in a real Windows Terminal.
+
+To inspect the exact synthetic test-backend frames (not WAN results), opt in:
+
+```bash
+COCKPIT_SNAPSHOT_DIR=/tmp/speedtest-frames cargo test --locked --lib capture_review_frames_when_explicitly_requested
+```
+
+Keep business logic in the engine/analysis/storage modules and shared completion
+policy in `session`. Do not start network work from a constructor, view, section
+selection, or history refresh. See [the architecture contract](docs/network-cockpit.md).
 
 ## Public network checks
 
