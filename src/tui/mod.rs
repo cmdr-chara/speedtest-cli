@@ -1,6 +1,7 @@
 mod cockpit;
 pub use cockpit::run as run_cockpit;
 mod app;
+mod numerals;
 mod speedometer;
 mod stability;
 mod view;

@@ -87,10 +87,20 @@ configuration/rollback and all specialized options remain available through the
 unchanged CLI subcommands. Stability in the menu runs for 60 seconds without saving.
 
 The cockpit supports **80×24** and larger terminals. Below that size, navigation is
-preserved behind a resize notice and hidden controls cannot start a test. It uses
-true color when advertised, otherwise 256-color or basic ANSI colors, and never
-requires a mouse. For screen readers, no-color environments, pipes, or non-animated
+preserved behind a resize notice and hidden controls cannot start a test. The default
+**Terminal (adaptive)** palette inherits the terminal's foreground, background, and
+ANSI colors on Linux, macOS, and Windows, rather than forcing a dark canvas. Settings
+also offers Graphite, Light, and Monochrome palettes. Fixed palettes use truecolor or
+256 colors when advertised and safely fall back to terminal-native colors otherwise.
+No terminal profile or palette is modified, and no mouse is required. For screen readers, no-color environments, pipes, or non-animated
 reports, use `--plain`; automatic terminal detection is unchanged.
+
+**Comfortable** layout uses three-row metric digits and extra spacing where they
+fit; **Compact** uses ordinary text. Related content stays in a centered workspace
+of at most 120 columns and 38 rows. Highlights cover the selected action label,
+not its description or an entire empty row. To enlarge all body text, use your
+terminal's Zoom In or font-size setting: the application reflows after resizing
+but never changes your font or window size. Appearance settings are session-only.
 
 `--output` and `--format json|csv` keep their existing export behavior. In a menu
 session, the explicit output path is reused for each completed test (overwriting

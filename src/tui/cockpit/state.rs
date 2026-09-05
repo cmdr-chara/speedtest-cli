@@ -6,7 +6,10 @@ use crate::{
     cli::InternetBackendArg, engine::EngineEvent, model::TestResult, session::TestOptions,
 };
 
-use super::services::{Archive, Tool};
+use super::{
+    services::{Archive, Tool},
+    theme::Palette,
+};
 use crate::tui::app::App;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +118,8 @@ pub(super) struct Cockpit {
     pub pages: Vec<Page>,
     pub options: TestOptions,
     pub reduced_motion: bool,
+    pub palette: Palette,
+    pub compact: bool,
     pub history: Load<Archive>,
     pub table: TableState,
     pub live: App,
@@ -136,6 +141,8 @@ impl Cockpit {
             pages: vec![Page::new(Screen::Home)],
             options,
             reduced_motion: false,
+            palette: Palette::default(),
+            compact: false,
             history: Load::Loading,
             table: TableState::default(),
             live: App::default(),
@@ -267,8 +274,8 @@ impl Cockpit {
     fn select_count(&self) -> usize {
         match self.screen() {
             Screen::Home => HOME.len(),
-            Screen::Configure => 9,
-            Screen::Settings => 8,
+            Screen::Configure => 11,
+            Screen::Settings => 10,
             Screen::History => self.history_count(),
             Screen::Dns => Tool::DNS.len(),
             Screen::Diagnostics => Tool::DIAGNOSTICS.len(),
@@ -280,6 +287,7 @@ impl Cockpit {
         let count = self.select_count();
         let page = self.page_mut();
         if count > 0 {
+            page.scroll = 0;
             page.selected = (page.selected as isize + delta).rem_euclid(count as isize) as usize;
         } else {
             page.scroll = page
@@ -362,6 +370,8 @@ impl Cockpit {
                 self.options.fps = 60;
                 self.options.timeout = 120;
             }
+            8 => self.palette = self.palette.cycle(forward),
+            9 => self.compact = !self.compact,
             _ => {}
         }
         self.notice = "Session settings updated. Nothing is written until a test completes.".into();

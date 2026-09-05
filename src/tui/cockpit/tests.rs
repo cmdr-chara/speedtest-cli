@@ -356,8 +356,15 @@ fn report_scroll_clamps_after_resize_and_external_controls_are_removed() {
     let text = render(&mut app, 80, 24).0;
     assert!(!text.contains(['\u{202e}', '\x1b', '\r', '\u{009b}']));
     assert!(app.page().scroll < 40);
-    render(&mut app, 100, 50);
-    assert_eq!(app.page().scroll, 0);
+    let small_scroll = app.page().scroll;
+    let text = render(&mut app, 100, 50).0;
+    // The new workspace has a deliberate height cap. A larger terminal exposes
+    // more lines but must not pretend the remaining overflow no longer exists.
+    assert!(app.page().scroll < small_scroll);
+    assert!(text.contains("PgUp/PgDn"));
+    let capped_scroll = app.page().scroll;
+    render(&mut app, 100, 100);
+    assert_eq!(app.page().scroll, capped_scroll);
 }
 
 #[test]
@@ -451,6 +458,7 @@ fn save_frame(root: &str, name: &str, text: &str, buffer: &ratatui::buffer::Buff
             serde_json::json!({
                 "symbol":cell.symbol(), "fg":format!("{:?}",cell.fg), "bg":format!("{:?}",cell.bg),
                 "bold":cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                "reversed":cell.modifier.contains(ratatui::style::Modifier::REVERSED),
             })
         })
         .collect();
@@ -532,4 +540,341 @@ fn basic_color_fallback_preserves_text_labels_and_selection_markers() {
         assert!(text.contains("NETWORK NOT PROBED"));
         assert!(text.contains("> Home"));
     }
+}
+
+#[test]
+fn terminal_colors_are_defaults_not_guessed_from_color_capability() {
+    use super::theme::{ColorDepth, Palette};
+    use ratatui::style::Color;
+    assert_eq!(app().palette, Palette::Terminal);
+    for depth in [
+        ColorDepth::TrueColor,
+        ColorDepth::Indexed,
+        ColorDepth::Basic,
+    ] {
+        let theme = Theme::resolve(Palette::Terminal, depth);
+        assert_eq!(theme.background, Color::Reset);
+        assert_eq!(theme.text, Color::Reset);
+        assert_eq!(theme.muted, Color::Reset);
+        assert_eq!(theme.focus, Color::Cyan);
+        assert_eq!(
+            Theme::resolve(Palette::Graphite, ColorDepth::Basic).background,
+            Color::Reset
+        );
+    }
+}
+
+#[test]
+fn every_native_and_monochrome_screen_avoids_hard_coded_color_pairs() {
+    use ratatui::style::{Color, Modifier};
+    let mut app = app();
+    app.set_history(Ok(Archive::from_results(vec![result(), result()])));
+    app.result = Some(result());
+    app.tool = Some(Tool::DnsList);
+    app.report = Some(Load::Ready("Example report".into()));
+    app.live.speedometer.snap_to_with_peak(34.7, 100.0);
+    for theme in [Theme::ansi(), Theme::monochrome()] {
+        for screen in [
+            Screen::Home,
+            Screen::Configure,
+            Screen::Settings,
+            Screen::Live,
+            Screen::Results,
+            Screen::History,
+            Screen::Statistics,
+            Screen::Compare,
+            Screen::Dns,
+            Screen::Diagnostics,
+            Screen::Tool,
+            Screen::Failure,
+        ] {
+            app.push(screen);
+            for (width, height) in [(80, 24), (120, 38), (180, 48)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| view::draw(frame, &mut app, theme, Duration::ZERO))
+                    .unwrap();
+                for cell in terminal.backend().buffer().content() {
+                    assert_eq!(cell.bg, Color::Reset, "{screen:?} must inherit background");
+                    assert!(!matches!(
+                        cell.fg,
+                        Color::Rgb(..)
+                            | Color::Indexed(_)
+                            | Color::Black
+                            | Color::White
+                            | Color::Gray
+                            | Color::DarkGray
+                    ));
+                    assert!(!cell.modifier.contains(Modifier::DIM));
+                    if theme.focus == Color::Reset {
+                        assert_eq!(cell.fg, Color::Reset);
+                    }
+                }
+            }
+            if app.pages.len() > 1 {
+                app.pages.pop();
+            }
+        }
+    }
+}
+
+#[test]
+fn home_highlight_is_one_label_not_a_three_row_painted_rectangle() {
+    use ratatui::style::Modifier;
+    let mut app = app();
+    app.set_history(Ok(Archive::from_results(vec![])));
+    for (width, height) in [(80, 24), (120, 38), (180, 48)] {
+        let (text, buffer) = render(&mut app, width, height);
+        let y = text
+            .lines()
+            .position(|line| line.contains("Run Speed Test"))
+            .unwrap() as u16;
+        let highlighted = (0..width)
+            .filter(|x| buffer[(*x, y)].modifier.contains(Modifier::REVERSED))
+            .count();
+        assert_eq!(highlighted, " Run Speed Test ".len());
+        for row in [y + 1, y + 2] {
+            assert!((0..width).all(|x| !buffer[(x, row)].modifier.contains(Modifier::REVERSED)));
+        }
+    }
+}
+
+#[test]
+fn workspace_caps_width_and_height_without_changing_terminal_dimensions() {
+    use ratatui::layout::Rect;
+    assert_eq!(
+        view::workspace(Rect::new(0, 0, 80, 24)),
+        Rect::new(0, 0, 80, 24)
+    );
+    assert_eq!(
+        view::workspace(Rect::new(10, 20, 180, 48)),
+        Rect::new(40, 25, 120, 38)
+    );
+    assert_eq!(view::workspace(Rect::new(0, 0, 300, 100)).width, 120);
+}
+
+#[test]
+fn appearance_edits_are_offline_and_do_not_change_measurement_or_export_options() {
+    use super::theme::Palette;
+    let mut app = app();
+    app.push(Screen::Settings);
+    let before = format!("{:?}", app.options);
+    app.page_mut().selected = 8;
+    assert_eq!(key(&mut app, KeyCode::Enter), Effect::None);
+    assert_eq!(app.palette, Palette::Graphite);
+    key(&mut app, KeyCode::Char('-'));
+    assert_eq!(app.palette, Palette::Terminal);
+    for _ in 0..4 {
+        key(&mut app, KeyCode::Enter);
+    }
+    assert_eq!(app.palette, Palette::Terminal);
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+    assert!(app.compact);
+    key(&mut app, KeyCode::Char('-'));
+    assert!(!app.compact);
+    assert_eq!(format!("{:?}", app.options), before);
+    assert_eq!(app.activity, None);
+}
+
+#[test]
+fn comfortable_metrics_are_large_and_compact_values_remain_exact() {
+    let mut app = app();
+    app.result = Some(result());
+    app.push(Screen::Results);
+    let text = render(&mut app, 120, 38).0;
+    assert!(
+        text.contains("█▀█"),
+        "three-row metric digits must be visible"
+    );
+    assert!(text.contains("Mbps"));
+    app.compact = true;
+    let compact = render(&mut app, 120, 38).0;
+    assert!(compact.contains("100.0 Mbps"));
+    assert!(!compact.contains("█▀█"));
+    // A large but finite value that cannot fit in block digits must stay intact.
+    app.compact = false;
+    app.result.as_mut().unwrap().download.mbps = 1_000_000_000.0;
+    assert!(render(&mut app, 120, 38).0.contains("1000000000.0 Mbps"));
+}
+
+#[test]
+fn settings_descriptions_are_contextual_and_scroll_without_losing_selection() {
+    let mut app = app();
+    app.push(Screen::Settings);
+    app.page_mut().selected = 8;
+    let text = render(&mut app, 80, 24).0;
+    assert!(text.contains("TERMINAL COLORS"));
+    key(&mut app, KeyCode::PageDown);
+    let text = render(&mut app, 80, 24).0;
+    assert!(text.contains("profile"));
+    assert_eq!(app.page().selected, 8);
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.page().scroll, 0);
+    let text = render(&mut app, 80, 24).0;
+    assert!(text.contains("READABILITY"));
+    key(&mut app, KeyCode::PageDown);
+    assert!(render(&mut app, 80, 24).0.contains("font"));
+}
+
+#[test]
+fn history_headers_and_numeric_cells_share_their_right_edge() {
+    let mut app = app();
+    app.set_history(Ok(Archive::from_results(vec![result()])));
+    app.push(Screen::History);
+    for (width, height) in [(80, 24), (180, 48)] {
+        let (text, _) = render(&mut app, width, height);
+        let header = text.lines().find(|line| line.contains("QUALITY")).unwrap();
+        let row = text
+            .lines()
+            .find(|line| line.contains("01-01 00:00 UTC"))
+            .unwrap();
+        let end_of = |text: &str, needle: &str| {
+            let prefix = &text[..text.find(needle).unwrap()];
+            prefix.chars().count() + needle.chars().count()
+        };
+        assert_eq!(end_of(header, "QUALITY"), end_of(row, "n/a"));
+        assert_eq!(end_of(header, "DOWN Mbps"), end_of(row, "100.0"));
+    }
+}
+
+#[test]
+fn optional_fixed_palettes_keep_normal_text_high_contrast() {
+    use ratatui::style::Color;
+    let luminance = |color| {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("RGB fixture");
+        };
+        let linear = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    };
+    for theme in [Theme::rgb(), Theme::light()] {
+        for color in [
+            theme.text,
+            theme.muted,
+            theme.focus,
+            theme.success,
+            theme.warning,
+            theme.error,
+        ] {
+            let (a, b) = (luminance(color), luminance(theme.background));
+            assert!((a.max(b) + 0.05) / (a.min(b) + 0.05) >= 4.5, "{color:?}");
+        }
+    }
+}
+
+#[test]
+fn capture_readability_frames_when_explicitly_requested() {
+    let Ok(root) = std::env::var("READABILITY_SNAPSHOT_DIR") else {
+        return;
+    };
+    std::fs::create_dir_all(&root).unwrap();
+    let mut app = app();
+    let mut latest = result();
+    latest.timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-05T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    latest.download.mbps = 742.8;
+    latest.upload.mbps = 128.4;
+    latest.download.bytes = 92_850_000;
+    latest.upload.bytes = 16_050_000;
+    latest.analysis = Some(crate::analysis::build_network_analysis(
+        &[8.0, 10.0, 12.0],
+        &[18.0, 20.0, 22.0],
+        &[28.0, 30.0, 32.0],
+        &latest.latency,
+        &latest.download,
+        &latest.upload,
+    ));
+    let samples = (0..8)
+        .map(|i| {
+            let mut sample = latest.clone();
+            sample.timestamp -= chrono::Duration::hours(7 - i);
+            sample.download.mbps =
+                [512.0, 630.0, 605.0, 680.0, 580.0, 720.0, 694.0, 742.8][i as usize];
+            sample
+        })
+        .collect();
+    app.set_history(Ok(Archive::from_results(samples)));
+    app.result = Some(latest.clone());
+    app.save_notice = "SAVED to local history · example data".into();
+    for (theme_name, theme) in [
+        ("native", Theme::ansi()),
+        ("graphite", Theme::rgb()),
+        ("light", Theme::light()),
+        ("mono", Theme::monochrome()),
+    ] {
+        for (name, screen) in [
+            ("home", Screen::Home),
+            ("results", Screen::Results),
+            ("settings", Screen::Settings),
+            ("history", Screen::History),
+            ("statistics", Screen::Statistics),
+            ("live", Screen::Live),
+        ] {
+            app.pages.truncate(1);
+            app.palette = match theme_name {
+                "graphite" => super::theme::Palette::Graphite,
+                "light" => super::theme::Palette::Light,
+                "mono" => super::theme::Palette::Monochrome,
+                _ => super::theme::Palette::Terminal,
+            };
+            if matches!(screen, Screen::Live | Screen::Results) {
+                app.push(Screen::Configure);
+            }
+            if screen != Screen::Home {
+                app.push(screen);
+            }
+            app.activity = if screen == Screen::Live {
+                Some(Activity::Test)
+            } else {
+                None
+            };
+            app.live.phase = crate::model::TestPhase::Download;
+            app.live.download_mbps = Some(642.7);
+            app.live.ping_ms = Some(10.0);
+            app.live.jitter_ms = Some(2.0);
+            app.live.speedometer.snap_to_with_peak(642.7, 700.0);
+            let mut terminal = Terminal::new(TestBackend::new(120, 38)).unwrap();
+            terminal
+                .draw(|frame| view::draw(frame, &mut app, theme, Duration::from_secs(6)))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = (0..38)
+                .map(|y| {
+                    (0..120)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            save_frame(&root, &format!("{theme_name}-{name}"), &text, buffer);
+            if app.pages.len() > 1 {
+                app.pages.pop();
+            }
+        }
+    }
+}
+
+#[test]
+fn wide_save_failures_remain_scrollable_without_displacing_the_quality_summary() {
+    let mut app = app();
+    app.result = Some(result());
+    app.save_notice = format!(
+        "SAVE FAILED · {} end-of-save-error",
+        "path context ".repeat(300)
+    );
+    app.push(Screen::Results);
+    let text = render(&mut app, 120, 38).0;
+    assert!(text.contains("See details"));
+    assert!(text.contains("LOADED LATENCY"));
+    app.page_mut().scroll = u16::MAX;
+    assert!(render(&mut app, 120, 38).0.contains("end-of-save-error"));
 }

@@ -130,7 +130,11 @@ class Tty:
         self.screen = Screen()
         self.raw = bytearray()
         self.transcript = transcript
-        self.process = subprocess.Popen([binary, *arguments], env=env, stdin=self.slave, stdout=self.slave, stderr=self.slave)
+        # Do not inherit the launching shell's controlling terminal: Crossterm
+        # reads /dev/tty before falling back to the supplied PTY descriptors.
+        # A fresh session keeps resize/raw-mode checks attached to this fixture.
+        self.process = subprocess.Popen([binary, *arguments], env=env, stdin=self.slave,
+                                        stdout=self.slave, stderr=self.slave, start_new_session=True)
 
     def pump(self, duration=0.1):
         until = time.monotonic() + duration
@@ -230,6 +234,40 @@ def main():
                 tty.send('q')
                 tty.finish()
             assert server.requests == 0
+
+            # Appearance is offline and reversible. Check the actual render loop,
+            # not just Theme::resolve, and preserve selection through a resize.
+            with session(options) as tty:
+                tty.wait('No tests yet')
+                assert b'38;2;' not in tty.raw and b'48;2;' not in tty.raw, 'native theme emitted RGB'
+                assert b'\x1b]' not in tty.raw, 'theme must not change terminal profile via OSC'
+                tty.resize(180, 48)
+                tty.wait('No tests yet')
+                tty.send('\t' * 6)
+                tty.wait('MAKE IT YOURS')
+                tty.send('j' * 8)
+                tty.wait('TERMINAL COLORS')
+                tty.send('\r')
+                tty.wait('Graphite')
+                assert b'48;2;' in tty.raw, 'explicit truecolor theme was not applied'
+                tty.send('\r')
+                tty.wait('Light')
+                tty.send('\r')
+                tty.wait('Monochrome')
+                tty.send('\r')
+                tty.wait('Terminal (adaptive)')
+                tty.send('j\r')
+                tty.wait('READABILITY')
+                tty.wait('Compact')
+                tty.snapshot('Appearance controls in a bounded 180x48 workspace')
+                tty.resize(80, 24)
+                tty.wait('READABILITY')
+                tty.send('\r')
+                tty.wait('Comfortable')
+                tty.send('q')
+                tty.finish()
+            assert server.requests == 0, 'appearance settings started network work'
+            transcript.append('PASS: native/Graphite/Light/Monochrome, Comfortable/Compact, 180x48 to 80x24 resizing, no hidden probes.\n')
 
             with session(options) as tty:
                 tty.wait('No tests yet')

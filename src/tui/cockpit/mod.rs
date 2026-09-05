@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use self::{
     services::Archive,
     state::{Activity, Cockpit, Effect},
-    theme::Theme,
+    theme::{ColorDepth, Theme},
 };
 use super::{enter_terminal, frame_interval, restore_terminal, TerminalGuard, PHYSICS_RATE};
 use crate::{engine::EngineEvent, model::TestResult, runtime, session::TestOptions};
@@ -68,7 +68,7 @@ pub async fn run(options: TestOptions) -> Result<()> {
     let _guard = TerminalGuard;
     let mut terminal = enter_terminal()?;
     let mut app = Cockpit::new(options);
-    let theme = Theme::detect();
+    let color_depth = ColorDepth::detect();
     let mut history = history_job(); // Local reads only; no engine/client is constructed here.
     let mut job: Job = None;
     let mut receiver = None;
@@ -104,6 +104,7 @@ pub async fn run(options: TestOptions) -> Result<()> {
                 dirty |= app.live.tick(PHYSICS_RATE);
             }
             _ = render.tick(), if dirty => {
+                let theme = Theme::resolve(app.palette, color_depth);
                 terminal.draw(|frame| view::draw(frame, &mut app, theme, started.elapsed()))
                     .context("failed to draw cockpit")?;
                 dirty = false;

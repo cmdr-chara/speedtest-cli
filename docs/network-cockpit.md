@@ -8,12 +8,21 @@ implementations, and immediate plain/JSON command paths are unchanged. `--run`
 explicitly opts into the original live-speedometer workflow. Redirected/dumb/no-color
 terminals still use the existing automatic plain path.
 
-The visual system uses a graphite/navy canvas, cyan focus, mint success, amber
-warnings, and red errors. A persistent section rail and predictable breadcrumbs
+The default visual system inherits the terminal's foreground, background, and ANSI
+palette, with cyan focus, green success, yellow warnings, and red errors. Terminal
+color depth is not treated as evidence of a dark or light theme. Graphite, Light,
+and Monochrome are explicit session preferences, not terminal-profile changes. A persistent section rail and predictable breadcrumbs
 anchor each screen; the dashboard has one prominent start action rather than a grid
 of identical menu boxes. Status words, selection markers, units, and better/worse
 labels carry meaning without depending on color. Settings include reduced motion.
-Truecolor, indexed-color, and basic ANSI palettes share the same semantic roles.
+Fixed palettes select truecolor/indexed rendering from advertised capabilities and
+fall back to native colors on basic terminals. Monochrome retains markers, bold
+labels, and inverse selection without emitting specific foreground/background colors.
+Comfortable layout uses multi-cell digits when complete values fit; Compact and
+small areas use exact ordinary values without rounding away data. The workspace
+is centered and bounded to 120 columns by 38 rows, keeping table values near their
+headers and limiting the gauge size. Body font size remains the terminal's setting.
+Action highlights are label-sized; descriptions and blank rows are not selected.
 
 ## Ownership
 
@@ -25,7 +34,8 @@ Truecolor, indexed-color, and basic ANSI palettes share the same semantic roles.
 | `src/tui/cockpit/mod.rs` | Own the terminal, asynchronous work, events, physics and rendering schedules |
 | `src/tui/cockpit/view.rs`, `theme.rs` | Compose widgets, accessible states, responsive geometry, semantic colors |
 | `src/tui/cockpit/services.rs` | Adapt existing local history/analysis and read-only CLI reports |
-| `src/tui/speedometer/` | Existing live gauge and physics; optional canvas background permits embedding |
+| `src/tui/speedometer/` | Existing gauge and physics; shell-supplied palette and optional large readout |
+| `src/tui/numerals.rs` | Three-row digit rendering with complete-value width validation and a caller fallback |
 
 There is no new network measurement implementation. UI configuration maps into
 `EngineConfig` through `TestOptions`; live data arrives through `EngineEvent` and
@@ -123,3 +133,18 @@ These tests do not calibrate WAN throughput or contact public speed-test provide
 No public network test, privileged DNS write, release publication, or deployment is
 required to verify this presentation-layer change. Existing storage collision and
 concurrent-writer limitations remain unchanged.
+
+### Readability regression coverage
+
+Appearance tests cover native/reset colors on every screen, monochrome rendering,
+fixed-palette text contrast, label-sized home focus, responsive workspace bounds,
+large/compact metrics, aligned history columns, settings navigation/scrolling, and
+long save errors. Appearance changes never construct an engine or alter test/export
+options. The real-PTY suite additionally switches palettes/layouts and resizes a
+maximized terminal back to 80×24.
+
+The PTY harness launches its child in a fresh session. Without isolation, a shell
+with a controlling terminal makes Crossterm query that terminal through `/dev/tty`
+instead of the fixture: an ioctl resize of the fixture then leaves the observed
+screen blank. This was reproduced with both the original cockpit and the revised
+binary, and resolved by changing only the harness session ownership.

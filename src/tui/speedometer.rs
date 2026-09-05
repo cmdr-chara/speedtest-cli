@@ -2,7 +2,7 @@ mod gauge;
 
 use std::time::Duration;
 
-pub use gauge::{render, render_with_background};
+pub use gauge::{render, render_themed, GaugePalette};
 
 const SPRING_STIFFNESS: f64 = 42.0;
 const SPRING_DAMPING: f64 = 12.0;
