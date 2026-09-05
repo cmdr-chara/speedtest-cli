@@ -277,8 +277,13 @@ fn render(app: &mut Cockpit, width: u16, height: u16) -> (String, ratatui::buffe
     let buffer = terminal.backend().buffer().clone();
     let mut text = String::new();
     for y in 0..height {
-        for x in 0..width {
-            text.push_str(buffer[(x, y)].symbol());
+        let mut x = 0;
+        while x < width {
+            let symbol = buffer[(x, y)].symbol();
+            text.push_str(symbol);
+            // Ratatui reserves the following cell for a wide glyph. Do not
+            // mistake that placeholder for a visible space in translated text.
+            x += ratatui::text::Line::from(symbol).width().max(1) as u16;
         }
         text.push('\n');
     }
@@ -339,7 +344,7 @@ fn dashboard_and_history_empty_loading_error_states_are_distinct() {
     let text = render(&mut app, 80, 24).0;
     assert!(text.contains("No tests yet"));
     assert!(text.contains("Run Speed Test"));
-    assert!(text.contains("NETWORK NOT PROBED"));
+    assert!(!text.contains("LAST RESULT AVAILABLE"));
     app.set_history(Err("corrupt record".into()));
     assert!(render(&mut app, 80, 24).0.contains("HISTORY UNAVAILABLE"));
     app.push(Screen::History);
@@ -537,7 +542,7 @@ fn basic_color_fallback_preserves_text_labels_and_selection_markers() {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("Run Speed Test"));
-        assert!(text.contains("NETWORK NOT PROBED"));
+        assert!(!text.contains("LAST RESULT AVAILABLE"));
         assert!(text.contains("> Home"));
     }
 }
@@ -684,14 +689,14 @@ fn comfortable_metrics_are_large_and_compact_values_remain_exact() {
     app.push(Screen::Results);
     let text = render(&mut app, 120, 38).0;
     assert!(
-        text.contains("█▀█"),
-        "three-row metric digits must be visible"
+        text.contains("███"),
+        "five-row metric digits must be visible"
     );
     assert!(text.contains("Mbps"));
     app.compact = true;
     let compact = render(&mut app, 120, 38).0;
     assert!(compact.contains("100.0 Mbps"));
-    assert!(!compact.contains("█▀█"));
+    assert!(!compact.contains("███"));
     // A large but finite value that cannot fit in block digits must stay intact.
     app.compact = false;
     app.result.as_mut().unwrap().download.mbps = 1_000_000_000.0;
@@ -877,4 +882,132 @@ fn wide_save_failures_remain_scrollable_without_displacing_the_quality_summary()
     assert!(text.contains("LOADED LATENCY"));
     app.page_mut().scroll = u16::MAX;
     assert!(render(&mut app, 120, 38).0.contains("end-of-save-error"));
+}
+
+#[test]
+fn eight_languages_render_every_screen_and_selected_tab_at_minimum_size() {
+    use crate::i18n::{text, Language};
+    for language in Language::ALL {
+        let mut app = app();
+        app.language = language;
+        app.set_history(Ok(Archive::from_results(vec![result(), result()])));
+        app.result = Some(result());
+        app.tool = Some(Tool::DnsList);
+        app.report = Some(Load::Ready("raw vendor output /CASE/{0}".into()));
+        for screen in [
+            Screen::Home,
+            Screen::Configure,
+            Screen::Live,
+            Screen::Results,
+            Screen::History,
+            Screen::Statistics,
+            Screen::Compare,
+            Screen::Dns,
+            Screen::Diagnostics,
+            Screen::Settings,
+            Screen::Tool,
+            Screen::Failure,
+        ] {
+            app.push(screen);
+            for (w, h) in [(80, 24), (120, 38), (79, 23), (1, 1)] {
+                let (buffer_text, _) = render(&mut app, w, h);
+                if w >= 80 {
+                    assert!(
+                        buffer_text.contains("SPEEDTEST"),
+                        "{} {screen:?}",
+                        language.code()
+                    );
+                    assert!(!buffer_text.contains("LAST RESULT AVAILABLE"));
+                    // The active tab, not only the beginning of a long translated
+                    // tab strip, must stay on screen after terminal font zoom.
+                    if screen == Screen::Settings {
+                        assert!(
+                            buffer_text.contains(&format!("> {}", text(language, "Settings"))),
+                            "{}: {buffer_text}",
+                            language.code()
+                        );
+                    }
+                }
+            }
+            app.pages.pop();
+        }
+    }
+}
+
+#[test]
+fn language_switch_is_presentation_only_and_font_guide_scroll_is_modal() {
+    use crate::i18n::Language;
+    let mut app = app();
+    app.push(Screen::Settings);
+    app.pages.last_mut().unwrap().selected = 10;
+    let options = format!("{:?}", app.options);
+    for expected in [
+        Language::It,
+        Language::Es,
+        Language::Fr,
+        Language::De,
+        Language::Pt,
+        Language::ZhCn,
+        Language::Ja,
+        Language::En,
+    ] {
+        assert_eq!(key(&mut app, KeyCode::Enter), Effect::None);
+        assert_eq!(app.language, expected);
+        assert_eq!(format!("{:?}", app.options), options);
+        assert_eq!(app.activity, None);
+    }
+    assert_eq!(key(&mut app, KeyCode::Char('z')), Effect::None);
+    assert_eq!(app.modal, Some(Modal::TextSize));
+    key(&mut app, KeyCode::PageDown);
+    assert!(app.modal_scroll > 0);
+    render(&mut app, 80, 24);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.modal, None);
+    assert_eq!(app.page().selected, 10);
+    assert_eq!(app.screen(), Screen::Settings);
+    assert_eq!(app.activity, None);
+}
+
+#[test]
+fn capture_localized_frames_when_requested() {
+    let Ok(root) = std::env::var("LOCALIZED_SNAPSHOT_DIR") else {
+        return;
+    };
+    std::fs::create_dir_all(&root).unwrap();
+    for language in crate::i18n::Language::ALL {
+        let mut app = app();
+        app.language = language;
+        app.set_history(Ok(Archive::from_results(vec![])));
+        for (name, screen) in [("home", Screen::Home), ("settings", Screen::Settings)] {
+            app.push(screen);
+            for (w, h) in [(80, 24), (120, 38)] {
+                let (text, buffer) = render(&mut app, w, h);
+                save_frame(
+                    &root,
+                    &format!("{}-{name}-{w}", language.code()),
+                    &text,
+                    &buffer,
+                );
+            }
+            app.pages.pop();
+        }
+    }
+}
+
+#[test]
+fn cancel_dialog_does_not_inherit_scrolled_help_position() {
+    let mut app = app();
+    start(&mut app);
+    key(&mut app, KeyCode::Char('z'));
+    key(&mut app, KeyCode::PageDown);
+    render(&mut app, 80, 24);
+    assert!(app.modal_scroll > 0);
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.modal_scroll, 0);
+    assert!(render(&mut app, 80, 24)
+        .0
+        .contains("Cancel the active task?"));
+    assert_eq!(key(&mut app, KeyCode::Enter), Effect::None);
+    assert_eq!(app.activity, Some(Activity::Test));
 }

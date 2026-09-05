@@ -42,6 +42,8 @@ jobs:
         run: python .github/scripts/cli_smoke.py
       - name: Full-screen cockpit navigation and lifecycle (Unix PTY)
         run: python .github/scripts/cockpit_smoke.py
+      - name: Localized cockpit and machine-output invariants (Unix PTY)
+        run: python .github/scripts/localization_smoke.py
       - name: Packaging tests (no publication)
         run: python .github/scripts/test_package_release.py
       - name: Verify crate packaging (no publication)

@@ -168,12 +168,13 @@ pub async fn run(options: TestOptions) -> Result<()> {
                 );
             }
             Effect::StartTool(tool) => {
+                let language = app.language;
                 let options = app.options.clone();
                 started = Instant::now();
                 job = Some(
                     async move {
                         Work::Tool(
-                            services::run_tool(tool, options)
+                            services::run_tool(tool, options, language)
                                 .await
                                 .map_err(|e| format!("{e:#}")),
                         )

@@ -211,6 +211,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix='cockpit-smoke-') as scratch:
             env = {k: v for k, v in os.environ.items() if k not in ('NO_COLOR', 'CLICOLOR', 'CLICOLOR_FORCE')}
             env.update(HOME=scratch, XDG_DATA_HOME=scratch, LOCALAPPDATA=scratch,
+                       LC_ALL='C', SPEEDTEST_LANGUAGE='en',
                        TERM='xterm-256color', COLORTERM='truecolor', NO_PROXY='*', no_proxy='*')
             options = ['--backend', 'librespeed', '--librespeed-server', base, '--duration', '3', '--streams', '1', '--timeout', '20', '--no-save']
             root = Path(scratch) / ('Library/Application Support/speedtest' if sys.platform == 'darwin' else 'speedtest')
@@ -229,7 +230,9 @@ def main():
 
             with session([]) as tty:
                 tty.wait('No tests yet')
-                tty.wait('NETWORK NOT PROBED')
+                tty.wait('No background network probes')
+                assert 'NETWORK NOT PROBED' not in tty.screen.text()
+                assert 'LAST RESULT AVAILABLE' not in tty.screen.text()
                 tty.snapshot('Bare speedtest / 80x24 home')
                 tty.send('q')
                 tty.finish()

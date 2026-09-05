@@ -1,3 +1,4 @@
+use crate::i18n::ui;
 use std::{collections::VecDeque, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
@@ -157,7 +158,7 @@ fn draw(frame: &mut Frame, app: &StabilityApp) {
     let area = frame.area();
     let outer = Block::default()
         .title(
-            Line::from(" NETWORK STABILITY ").style(
+            Line::from(ui(" NETWORK STABILITY ")).style(
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
@@ -217,7 +218,7 @@ fn render_trace(frame: &mut Frame, app: &StabilityApp, area: Rect) {
     let sparkline = Sparkline::default()
         .block(
             Block::default()
-                .title(" LATENCY TRACE ")
+                .title(ui(" LATENCY TRACE "))
                 .borders(Borders::TOP | Borders::BOTTOM)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
@@ -294,17 +295,17 @@ fn render_status(frame: &mut Frame, app: &StabilityApp, area: Rect) {
             .map_or(String::new(), |tier| format!("  ◆ {tier}"));
         Paragraph::new(vec![
             Line::from(Span::styled(
-                format!(
+                ui(format!(
                     "STABILITY {}/100 {}{tier}",
                     result.score,
                     result.grade.label()
-                ),
+                )),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )),
-            Line::from(format!(
+            Line::from(ui(format!(
                 "probe availability {:.2}%  •  {} failed  •  {} failure bursts",
                 result.probe_availability_percent, result.failed_probes, result.failure_bursts
-            )),
+            ))),
         ])
         .alignment(Alignment::Center)
     } else {
@@ -315,12 +316,12 @@ fn render_status(frame: &mut Frame, app: &StabilityApp, area: Rect) {
         };
         Paragraph::new(vec![
             Line::from(Span::styled(
-                "LIVE STABILITY PROBE",
+                ui("LIVE STABILITY PROBE"),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from(format!("probe availability {availability:.2}%")),
+            Line::from(ui(format!("probe availability {availability:.2}%"))),
         ])
         .alignment(Alignment::Center)
     };
@@ -335,8 +336,8 @@ fn render_footer(frame: &mut Frame, app: &StabilityApp, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Cloudflare Edge", Style::default().fg(Color::Gray)),
-            Span::raw("  •  "),
+            Span::styled(ui("Cloudflare Edge"), Style::default().fg(Color::Gray)),
+            Span::raw(ui("  •  ")),
             Span::styled(instruction, Style::default().fg(Color::DarkGray)),
         ]))
         .alignment(Alignment::Center),
@@ -346,7 +347,10 @@ fn render_footer(frame: &mut Frame, app: &StabilityApp, area: Rect) {
 
 fn metric_line(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!(" {label:<9}"), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            ui(format!(" {label:<9}")),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled(value, Style::default().fg(Color::White)),
     ])
 }

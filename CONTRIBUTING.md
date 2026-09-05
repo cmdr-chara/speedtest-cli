@@ -65,3 +65,16 @@ DNS configuration writes require separate transaction/rollback verification on r
 ## Dependency review
 
 The separate scheduled dependency workflow uses pinned `cargo-audit` against RustSec. Review the advisory details and dependency path before remediation; never add an ignore simply to make CI green. Current advisory data requires network access. A clean audit does not certify the program's security.
+
+## Localization
+
+Edit the embedded catalogs in `src/i18n/locales/` together. Keep normalized English
+source keys stable, preserve numbered placeholders exactly, and keep command names,
+flags, units and provider identifiers literal. Do not translate the model or saved
+JSON. Add explicit presentation templates for new dynamic text; never translate
+unknown filenames or OS/provider messages through substring replacement.
+
+Run `cargo test --locked --all-features` for all catalog/CLI/render contracts and
+`python .github/scripts/localization_smoke.py` after building for real Unix-terminal
+checks. The latter uses loopback only and explicitly skips on Windows. See
+[localization scope and checks](docs/localization.md).

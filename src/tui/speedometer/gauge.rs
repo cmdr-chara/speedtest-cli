@@ -1,3 +1,4 @@
+use crate::i18n::ui;
 use std::f64::consts::PI;
 
 use ratatui::{
@@ -238,13 +239,18 @@ fn render_center_readout(
         return;
     }
     let large = large_values && area.height >= 16;
+    let tall = large && area.height >= 23;
+    let digit_height = if tall { 5 } else { 3 };
     let width = area.width.min(38);
     let x = area.x + (area.width - width) / 2;
     let y = area.y + area.height.saturating_mul(if large { 32 } else { 53 }) / 100;
-    let height = area
-        .bottom()
-        .saturating_sub(y)
-        .min(if large { 6 } else { 3 });
+    let height = area.bottom().saturating_sub(y).min(if tall {
+        8
+    } else if large {
+        6
+    } else {
+        3
+    });
     let value = if show_value {
         format!("{:.1}", state.displayed_mbps())
     } else {
@@ -255,7 +261,7 @@ fn render_center_readout(
         && height >= 5
         && numerals::draw(
             frame,
-            Rect::new(x, y, width, 3),
+            Rect::new(x, y, width, digit_height),
             &value,
             base.add_modifier(Modifier::BOLD),
             Alignment::Center,
@@ -264,18 +270,18 @@ fn render_center_readout(
     if !big {
         lines.push(Line::styled(value, base.add_modifier(Modifier::BOLD)));
     }
-    lines.push(Line::styled("Mbps", base.fg(palette.secondary)));
+    lines.push(Line::styled(ui("Mbps"), base.fg(palette.secondary)));
     if show_value {
         lines.push(Line::styled(
-            format!(
+            ui(format!(
                 "peak {:.1}  •  scale {}",
                 state.peak_mbps(),
                 format_scale(state.scale_mbps())
-            ),
+            )),
             base.fg(palette.secondary),
         ));
     }
-    let offset = if big { 3 } else { 0 };
+    let offset = if big { digit_height } else { 0 };
     frame.render_widget(
         Paragraph::new(lines)
             .style(base)

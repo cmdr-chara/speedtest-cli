@@ -28,6 +28,10 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
+    /// Interface language: auto, en, it, es, fr, de, pt, zh-CN, ja. Machine data stays unchanged.
+    #[arg(long, global = true, value_name = "CODE", default_value = "auto", value_parser = crate::i18n::Language::parse)]
+    pub language: crate::i18n::Language,
+
     /// Color policy. Never also selects the accessible, non-animated interface.
     #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
     pub color: ColorMode,

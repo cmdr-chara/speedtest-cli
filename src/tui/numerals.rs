@@ -1,4 +1,4 @@
-//! Three-row terminal digits. Unsupported or oversized values use caller fallbacks.
+//! Three-/five-row terminal digits. Unsupported or oversized values use caller fallbacks.
 use ratatui::{
     layout::{Alignment, Rect},
     style::Style,
@@ -25,6 +25,24 @@ fn glyph(ch: char) -> Option<[&'static str; 3]> {
     })
 }
 
+fn glyph_tall(ch: char) -> Option<[&'static str; 5]> {
+    Some(match ch {
+        '0' => ["███", "█ █", "█ █", "█ █", "███"],
+        '1' => [" ██", "  █", "  █", "  █", "  █"],
+        '2' => ["███", "  █", "███", "█  ", "███"],
+        '3' => ["███", "  █", " ██", "  █", "███"],
+        '4' => ["█ █", "█ █", "███", "  █", "  █"],
+        '5' => ["███", "█  ", "███", "  █", "███"],
+        '6' => ["███", "█  ", "███", "█ █", "███"],
+        '7' => ["███", "  █", "  █", "  █", "  █"],
+        '8' => ["███", "█ █", "███", "█ █", "███"],
+        '9' => ["███", "█ █", "███", "  █", "███"],
+        '.' => [" ", " ", " ", " ", "█"],
+        '-' | '—' => ["   ", "   ", "███", "   ", "   "],
+        _ => return None,
+    })
+}
+
 /// Draw only when the complete value fits. Never truncate or round a measurement.
 pub(super) fn draw(
     frame: &mut Frame,
@@ -36,7 +54,18 @@ pub(super) fn draw(
     if area.height < 3 || value.is_empty() || value.len() > 64 {
         return false;
     }
-    let Some(glyphs) = value.chars().map(glyph).collect::<Option<Vec<_>>>() else {
+    let tall = area.height >= 5;
+    let Some(glyphs) = value
+        .chars()
+        .map(|ch| {
+            if tall {
+                glyph_tall(ch).map(|r| r.to_vec())
+            } else {
+                glyph(ch).map(|r| r.to_vec())
+            }
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
         return false;
     };
     let width =
@@ -44,7 +73,7 @@ pub(super) fn draw(
     if width > usize::from(area.width) {
         return false;
     }
-    let lines = (0..3)
+    let lines = (0..if tall { 5 } else { 3 })
         .map(|row| Line::from(glyphs.iter().map(|g| g[row]).collect::<Vec<_>>().join(" ")))
         .collect::<Vec<_>>();
     frame.render_widget(
