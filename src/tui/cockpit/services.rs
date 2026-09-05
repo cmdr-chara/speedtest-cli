@@ -132,10 +132,15 @@ impl Tool {
 /// platform-specific logic or formatting. No shell, inherited stdin, or TUI recursion.
 /// The child is owned by this future and killed on cancellation or output overflow.
 /// Native helper descendants retain the lifecycle of the existing CLI commands.
-pub(super) async fn run_tool(tool: Tool, options: TestOptions) -> Result<String> {
+pub(super) async fn run_tool(
+    tool: Tool,
+    options: TestOptions,
+    language: crate::i18n::Language,
+) -> Result<String> {
     let executable = std::env::current_exe().context("cannot locate speedtest executable")?;
     let mut child = Command::new(executable)
         .args(tool.arguments(&options))
+        .args(["--language", language.code()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

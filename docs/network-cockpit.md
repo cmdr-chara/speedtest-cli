@@ -35,7 +35,8 @@ Action highlights are label-sized; descriptions and blank rows are not selected.
 | `src/tui/cockpit/view.rs`, `theme.rs` | Compose widgets, accessible states, responsive geometry, semantic colors |
 | `src/tui/cockpit/services.rs` | Adapt existing local history/analysis and read-only CLI reports |
 | `src/tui/speedometer/` | Existing gauge and physics; shell-supplied palette and optional large readout |
-| `src/tui/numerals.rs` | Three-row digit rendering with complete-value width validation and a caller fallback |
+| `src/i18n/` | Embedded catalogs, locale selection, presentation-only formatting and safe built-in narrative translation |
+| `src/tui/numerals.rs` | Three-/five-row digit rendering with complete-value width validation and a caller fallback |
 
 There is no new network measurement implementation. UI configuration maps into
 `EngineConfig` through `TestOptions`; live data arrives through `EngineEvent` and
@@ -110,6 +111,7 @@ cargo test --locked --all-features
 cargo build --locked --bin speedtest
 python .github/scripts/cli_smoke.py
 python .github/scripts/cockpit_smoke.py
+python .github/scripts/localization_smoke.py
 python .github/scripts/test_package_release.py
 ```
 
@@ -148,3 +150,30 @@ with a controlling terminal makes Crossterm query that terminal through `/dev/tt
 instead of the fixture: an ioctl resize of the fixture then leaves the observed
 screen blank. This was reproduced with both the original cockpit and the revised
 binary, and resolved by changing only the harness session ownership.
+
+### Localization and sizing verification
+
+Idle header badges have been removed; running tasks still show a status. The `z`
+text-size guide is available even below the minimum size and scrolls independently
+from report pages. Opening a confirmation resets modal scrolling. Language and
+Text size help stay reachable at 80×24 through a stateful settings table. Explanatory
+translated paragraphs wrap, the selected tab stays visible, and CJK text is measured
+in terminal cells rather than UTF-8 bytes or codepoint counts.
+
+Locale state belongs to the cockpit, not to the stored result or engine. The CLI
+fixes its locale at startup and passes it to read-only diagnostic subprocesses.
+Narrative localization recognizes a closed set of built-in English templates without
+modifying numeric/direction evidence. It never recomputes scores or translates
+unknown user/OS content. The canonical model and serialization are unchanged.
+
+Tests cover eight-language key and placeholder parity; CLI grammar/metadata;
+locale precedence; byte-identical JSON, errors and exit codes across languages;
+all cockpit screens at 80×24 and larger; CJK menu widths; modal scrolling; and the
+results summary/details composition with five-row digits. The localized Unix PTY suite opens
+all eight languages, changes language live, resizes, runs the existing DNS catalog
+child, exercises the immediate gauge in Italian, and finishes a loopback test with
+an unchanged JSON export. Screenshots generated from Ratatui buffers are synthetic
+render fixtures, not observations of WAN speed or physical Windows consoles.
+
+See [localization and sizing](localization.md) for scope, contributor checks,
+terminal documentation and the distinction between metric glyphs and font zoom.

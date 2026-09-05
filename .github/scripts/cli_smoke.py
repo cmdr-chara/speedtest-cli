@@ -70,7 +70,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="speedtest-smoke-") as scratch:
         env = os.environ.copy()
         env.update(HOME=scratch, XDG_DATA_HOME=scratch, LOCALAPPDATA=scratch,
-                   NO_COLOR="1", TERM="dumb", NO_PROXY="*", no_proxy="*", RUST_BACKTRACE="0")
+                   LC_ALL="C", SPEEDTEST_LANGUAGE="en", NO_COLOR="1", TERM="dumb", NO_PROXY="*", no_proxy="*", RUST_BACKTRACE="0")
 
         def run(label, arguments, code=0, timeout=30):
             result = subprocess.run([binary, *arguments], env=env, stdin=subprocess.DEVNULL,

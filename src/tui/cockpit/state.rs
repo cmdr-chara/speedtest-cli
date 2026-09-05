@@ -99,6 +99,7 @@ pub(super) enum Activity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Modal {
     Help,
+    TextSize,
     Cancel { quit: bool, confirm: bool },
 }
 
@@ -120,6 +121,8 @@ pub(super) struct Cockpit {
     pub reduced_motion: bool,
     pub palette: Palette,
     pub compact: bool,
+    pub language: crate::i18n::Language,
+    pub modal_scroll: u16,
     pub history: Load<Archive>,
     pub table: TableState,
     pub live: App,
@@ -143,6 +146,8 @@ impl Cockpit {
             reduced_motion: false,
             palette: Palette::default(),
             compact: false,
+            language: crate::i18n::cli_language(),
+            modal_scroll: 0,
             history: Load::Loading,
             table: TableState::default(),
             live: App::default(),
@@ -204,7 +209,9 @@ impl Cockpit {
         if self.activity != Some(Activity::Test) {
             return;
         }
-        self.modal = self.modal.filter(|m| matches!(m, Modal::Help));
+        self.modal = self
+            .modal
+            .filter(|m| matches!(m, Modal::Help | Modal::TextSize));
         match result {
             Ok(result) => {
                 self.live.apply(EngineEvent::Complete(result.clone()));
@@ -256,7 +263,9 @@ impl Cockpit {
             return;
         }
         self.activity = None;
-        self.modal = self.modal.filter(|m| matches!(m, Modal::Help));
+        self.modal = self
+            .modal
+            .filter(|m| matches!(m, Modal::Help | Modal::TextSize));
         self.report = Some(match result {
             Ok(text) => Load::Ready(text),
             Err(error) => Load::Failed(error),
@@ -274,8 +283,8 @@ impl Cockpit {
     fn select_count(&self) -> usize {
         match self.screen() {
             Screen::Home => HOME.len(),
-            Screen::Configure => 11,
-            Screen::Settings => 10,
+            Screen::Configure => 12,
+            Screen::Settings => 11,
             Screen::History => self.history_count(),
             Screen::Dns => Tool::DNS.len(),
             Screen::Diagnostics => Tool::DIAGNOSTICS.len(),
@@ -372,6 +381,7 @@ impl Cockpit {
             }
             8 => self.palette = self.palette.cycle(forward),
             9 => self.compact = !self.compact,
+            10 => self.language = self.language.cycle(forward),
             _ => {}
         }
         self.notice = "Session settings updated. Nothing is written until a test completes.".into();
@@ -383,7 +393,11 @@ impl Cockpit {
             && self.modal.is_none()
             && !matches!(
                 key.code,
-                KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('q') | KeyCode::Char('?')
+                KeyCode::Esc
+                    | KeyCode::Backspace
+                    | KeyCode::Char('q')
+                    | KeyCode::Char('?')
+                    | KeyCode::Char('z')
             )
             && !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
@@ -421,7 +435,20 @@ impl Cockpit {
         }
         if let Some(modal) = self.modal {
             match modal {
-                Modal::Help => {
+                Modal::Help | Modal::TextSize => {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            self.modal_scroll = self.modal_scroll.saturating_add(1)
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            self.modal_scroll = self.modal_scroll.saturating_sub(1)
+                        }
+                        KeyCode::PageDown => {
+                            self.modal_scroll = self.modal_scroll.saturating_add(8)
+                        }
+                        KeyCode::PageUp => self.modal_scroll = self.modal_scroll.saturating_sub(8),
+                        _ => {}
+                    }
                     if matches!(
                         key.code,
                         KeyCode::Esc
@@ -472,7 +499,13 @@ impl Cockpit {
             }
             return Effect::None;
         }
+        if key.code == KeyCode::Char('z') {
+            self.modal_scroll = 0;
+            self.modal = Some(Modal::TextSize);
+            return Effect::None;
+        }
         if key.code == KeyCode::Char('?') {
+            self.modal_scroll = 0;
             self.modal = Some(Modal::Help);
             return Effect::None;
         }
@@ -485,6 +518,7 @@ impl Cockpit {
                 key.code,
                 KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('q')
             ) {
+                self.modal_scroll = 0;
                 self.modal = Some(Modal::Cancel {
                     quit: key.code == KeyCode::Char('q'),
                     confirm: false,

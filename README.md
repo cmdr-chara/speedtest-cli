@@ -32,8 +32,8 @@ A fast, polished terminal network quality analyzer written in Rust.
 In an interactive terminal, `speedtest` opens a full-screen home dashboard rather than
 starting a measurement immediately. Opening the menu reads **local history only**:
 no connectivity check, DNS query, server discovery, or throughput test runs until you
-explicitly start a network operation. The connection status says **NETWORK NOT PROBED**
-instead of guessing whether you are online.
+explicitly start a network operation. Idle status badges are intentionally omitted;
+the measurement profile explains that no background network probes run.
 
 ```bash
 speedtest                 # Open the dashboard; no automatic network traffic
@@ -64,6 +64,7 @@ analysis, including explicit better/worse labels rather than color alone.
 | `PgUp` / `PgDn` | Scroll long reports |
 | `r` | Reload history or retry/start the current tool or failed test |
 | `?` | Open/close the keyboard guide |
+| `z` | Open the scrollable text-size guide, including Arch/Omarchy guidance |
 | `q` | Quit; ask before cancelling active work |
 | `Ctrl+C` | Cancel and exit (130); keyboard cancellation waits for an ongoing save |
 
@@ -95,8 +96,8 @@ also offers Graphite, Light, and Monochrome palettes. Fixed palettes use truecol
 No terminal profile or palette is modified, and no mouse is required. For screen readers, no-color environments, pipes, or non-animated
 reports, use `--plain`; automatic terminal detection is unchanged.
 
-**Comfortable** layout uses three-row metric digits and extra spacing where they
-fit; **Compact** uses ordinary text. Related content stays in a centered workspace
+**Comfortable** layout uses five-row metric digits on spacious screens, three-row
+digits on medium screens, and ordinary values where space is limited; **Compact** uses ordinary text. Related content stays in a centered workspace
 of at most 120 columns and 38 rows. Highlights cover the selected action label,
 not its description or an entire empty row. To enlarge all body text, use your
 terminal's Zoom In or font-size setting: the application reflows after resizing
@@ -110,6 +111,47 @@ old result never exports or persists it again.
 
 See [cockpit architecture and verification](docs/network-cockpit.md) for the state
 machine, service boundaries, and test commands.
+
+## Interface language and text size
+
+The interface supports **English, Italian, Spanish, French, German, Portuguese,
+Simplified Chinese, and Japanese**. Select a language in **Settings → Language**
+without restarting or making a network request, or use the global option:
+
+```bash
+speedtest --language it
+speedtest --language ja --help
+speedtest dns benchmark --language de --help
+SPEEDTEST_LANGUAGE=fr speedtest history
+speedtest --language en --json --no-save > result.json
+```
+
+Supported codes: `en`, `it`, `es`, `fr`, `de`, `pt`, `zh-CN`, `ja`, and `auto`.
+Precedence: explicit `--language`, then `SPEEDTEST_LANGUAGE`, then the first nonempty
+`LC_ALL`, `LC_MESSAGES`, or `LANG`. Unsupported system locales fall back to English;
+unsupported explicit codes are usage errors. Regional tags such as `it_IT.UTF-8`
+and `pt-BR` resolve to their base language. Traditional Chinese locales are not
+mislabeled as Simplified Chinese. Windows users can select a language explicitly or
+use `SPEEDTEST_LANGUAGE`; a Windows display-language API is not queried.
+
+Navigation, settings, help, built-in human summaries, findings, and the immediate
+speedometer/stability views are localized. **Commands, flags, shortcuts, provider
+names, units, canonical JSON (including machine error records), CSV columns and
+stored results do not change language.** Native OS/provider error details and
+unknown/custom saved prose are preserved verbatim; generated parser annotations
+and some low-level error details remain English. Diagnostic reports retain the
+language used when started; rerun a report after changing the interface language.
+All translations are embedded, require no downloads, and have key/placeholder
+parity tests. Community linguistic review is welcome.
+
+For larger ordinary text, press **`z`** for guidance. The application cannot portably
+change a terminal's font size: larger panels do not enlarge each character.
+On **Omarchy's default Alacritty**, edit the existing `[font]` section in
+`~/.config/alacritty/alacritty.toml`, for example `size = 14.0`. Preserve the other
+settings and imports; do not add a duplicate `[font]` section. The cockpit reflows
+when the resulting terminal grid changes; keep at least **80 columns × 24 rows**.
+No terminal or desktop configuration is modified by Speedtest. Details and primary
+terminal documentation are in [localization and sizing](docs/localization.md).
 
 ## v0.5 Network Lab
 

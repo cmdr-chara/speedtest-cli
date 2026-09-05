@@ -8,6 +8,8 @@ fn run(arguments: &[&str], input: Option<&str>) -> Output {
     let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_speedtest"))
         .args(arguments)
+        .env("LC_ALL", "C")
+        .env("SPEEDTEST_LANGUAGE", "en")
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
         .env("RUST_BACKTRACE", "0")
@@ -188,6 +190,88 @@ fn menu_shortcut_does_not_override_machine_output_or_accept_ignored_command_flag
         if mode == "--json" {
             let error: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
             assert_eq!(error["error"]["code"], 1);
+        }
+    }
+}
+
+#[test]
+fn eight_language_help_and_human_reports_keep_cli_names_unchanged() {
+    use speedtest_cli::i18n::{message, Language};
+    for language in Language::ALL {
+        let help = run(&["--language", language.code(), "--help"], None);
+        assert!(help.status.success());
+        let help = String::from_utf8(help.stdout).unwrap();
+        assert!(help.contains("--language"));
+        assert!(help.contains("--json"));
+        assert!(help.contains("--run"));
+        let report = run(&["dns", "list", "--language", language.code()], None);
+        assert!(report.status.success());
+        assert!(report.stderr.is_empty());
+        let report = String::from_utf8(report.stdout).unwrap();
+        assert!(report.contains("cloudflare"));
+        assert!(
+            report.contains(&message(
+                language,
+                "DNS PROVIDERS · {0} PROFILES",
+                &["20".into()]
+            )),
+            "{}: {report}",
+            language.code()
+        );
+    }
+}
+
+#[test]
+fn languages_never_change_machine_records_or_exit_codes() {
+    let mut baseline = None;
+    for language in speedtest_cli::i18n::Language::ALL {
+        let output = run(
+            &[
+                "check",
+                "-",
+                "--min-download",
+                "101",
+                "--json",
+                "--language",
+                language.code(),
+            ],
+            Some(include_str!("fixtures/result.json")),
+        );
+        assert_eq!(output.status.code(), Some(3));
+        assert!(output.stderr.is_empty());
+        if let Some(expected) = &baseline {
+            assert_eq!(&output.stdout, expected);
+        } else {
+            baseline = Some(output.stdout);
+        }
+        let invalid = run(&["--language", "not-a-language", "--help"], None);
+        assert_eq!(invalid.status.code(), Some(2));
+        assert!(invalid.stdout.is_empty());
+    }
+}
+
+#[test]
+fn localized_commands_preserve_structured_runtime_errors() {
+    let mut baseline = None;
+    for language in speedtest_cli::i18n::Language::ALL {
+        let result = run(
+            &[
+                "check",
+                "-",
+                "--min-download",
+                "0",
+                "--json",
+                "--language",
+                language.code(),
+            ],
+            Some("not valid JSON"),
+        );
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        if let Some(expected) = &baseline {
+            assert_eq!(&result.stderr, expected);
+        } else {
+            baseline = Some(result.stderr);
         }
     }
 }

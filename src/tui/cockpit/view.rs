@@ -1,3 +1,4 @@
+use crate::i18n::ui;
 use std::time::Duration;
 
 use ratatui::{
@@ -30,6 +31,7 @@ const BRAND: [&str; 3] = [
 ];
 
 pub(super) fn draw(frame: &mut Frame, app: &mut Cockpit, theme: Theme, elapsed: Duration) {
+    let _locale = crate::i18n::scope(app.language);
     let area = frame.area();
     frame.render_widget(Block::default().style(theme.base()), area);
     if area.width < 80 || area.height < 24 {
@@ -59,7 +61,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut Cockpit, theme: Theme, elapsed: 
         footer(frame, app, theme, rows[3]);
     }
     if let Some(modal) = app.modal {
-        overlay(frame, modal, theme, area);
+        overlay(frame, app, modal, theme, area);
     }
 }
 
@@ -79,7 +81,7 @@ pub(super) fn workspace(area: Rect) -> Rect {
 
 fn metric_height(app: &Cockpit, area: Rect) -> u16 {
     if !app.compact && area.width >= 90 && area.height >= 19 {
-        6
+        8
     } else {
         3
     }
@@ -87,10 +89,11 @@ fn metric_height(app: &Cockpit, area: Rect) -> u16 {
 
 /// Highlight the label, never its description or trailing whitespace.
 fn choice(label: &str, selected: bool, t: Theme) -> Line<'static> {
+    let label = ui(label);
     Line::from(vec![
-        Span::styled(if selected { "› " } else { "  " }, t.focus()),
+        Span::styled(ui(if selected { "› " } else { "  " }), t.focus()),
         Span::styled(
-            format!(" {label} "),
+            ui(format!(" {label} ")),
             if selected { t.selected() } else { t.strong() },
         ),
     ])
@@ -106,13 +109,13 @@ fn chrome(frame: &mut Frame, app: &Cockpit, t: Theme, head: Rect, tabs: Rect) {
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("SPEEDTEST", t.focus()),
-                Span::styled(" / NETWORK COCKPIT", t.muted()),
+                Span::styled(ui("SPEEDTEST"), t.focus()),
+                Span::styled(ui(" / NETWORK COCKPIT"), t.muted()),
             ]),
             Line::styled(
                 app.pages
                     .iter()
-                    .map(|page| page.screen.title())
+                    .map(|page| ui(page.screen.title()))
                     .collect::<Vec<_>>()
                     .join(" / "),
                 t.muted(),
@@ -124,11 +127,10 @@ fn chrome(frame: &mut Frame, app: &Cockpit, t: Theme, head: Rect, tabs: Rect) {
         Some(Activity::Test) => ("● MEASURING", t.focus),
         Some(Activity::Saving) => ("● SAVING", t.warning),
         Some(Activity::Tool) => ("● DIAGNOSTIC RUNNING", t.focus),
-        None if app.latest().is_some() => ("○ LAST RESULT AVAILABLE", t.success),
-        None => ("○ NETWORK NOT PROBED", t.muted),
+        None => ("", t.muted),
     };
     frame.render_widget(
-        Paragraph::new(status)
+        Paragraph::new(ui(status))
             .style(t.base().fg(color))
             .alignment(Alignment::Right),
         columns[1],
@@ -152,16 +154,27 @@ fn chrome(frame: &mut Frame, app: &Cockpit, t: Theme, head: Rect, tabs: Rect) {
         .iter()
         .enumerate()
         .map(|(i, label)| {
-            Line::from(if i == index {
+            let label = ui(label);
+            Line::from(ui(if i == index {
                 format!("> {label}")
             } else {
                 label.to_string()
-            })
+            }))
         })
         .collect();
+    let mut start = 0;
+    while start < index
+        && titles[start..=index]
+            .iter()
+            .map(|line| line.width() + 2)
+            .sum::<usize>()
+            > usize::from(tabs.width)
+    {
+        start += 1;
+    }
     frame.render_widget(
-        Tabs::new(titles)
-            .select(index)
+        Tabs::new(titles.into_iter().skip(start).collect::<Vec<_>>())
+            .select(index - start)
             .style(t.muted())
             .highlight_style(t.selected())
             .divider(" ")
@@ -179,8 +192,8 @@ fn heading(frame: &mut Frame, title: &str, subtitle: &str, t: Theme, area: Rect)
     let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(area);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled(title, t.focus()),
-            Line::styled(single(subtitle), t.muted()),
+            Line::styled(ui(title), t.focus()),
+            Line::styled(ui(single(subtitle)), t.muted()),
         ])
         .wrap(Wrap { trim: true }),
         rows[0],
@@ -193,21 +206,22 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
     let hero =
         Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[0]);
     let mut logo: Vec<_> = BRAND.iter().map(|s| Line::styled(*s, t.focus())).collect();
-    logo.push(Line::styled("Your network, in focus.", t.strong()));
+    logo.push(Line::styled(ui("Your network, in focus."), t.strong()));
     frame.render_widget(Paragraph::new(logo), hero[0]);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled("MEASUREMENT PROFILE", t.strong()),
+            Line::styled(ui("MEASUREMENT PROFILE"), t.strong()),
             Line::styled(app.options.backend_label(), t.focus()),
             Line::styled(
-                format!(
+                ui(format!(
                     "{} s / phase  ·  {} streams",
                     app.options.duration, app.options.streams
-                ),
+                )),
                 t.muted(),
             ),
-            Line::styled("No background network probes", t.muted()),
-        ]),
+            Line::styled(ui("No background network probes"), t.muted()),
+        ])
+        .wrap(Wrap { trim: true }),
         hero[1],
     );
     let spacious = !app.compact && rows[1].height >= 18;
@@ -233,7 +247,7 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
         );
         if spacious || index == 0 {
             frame.render_widget(
-                Paragraph::new(*description).style(t.muted()),
+                Paragraph::new(ui(*description)).style(t.muted()),
                 Rect::new(
                     columns[0].x + 3,
                     y + 1,
@@ -253,7 +267,7 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
     let detail = divider.inner(columns[1]);
     frame.render_widget(divider, columns[1]);
     if let Some(result) = app.latest() {
-        let metric_rows = if spacious { 6 } else { 3 };
+        let metric_rows = if spacious { 8 } else { 3 };
         let rows = Layout::vertical([
             Constraint::Length(2),
             Constraint::Length(metric_rows),
@@ -262,13 +276,13 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
         .split(detail);
         frame.render_widget(
             Paragraph::new(vec![
-                Line::styled("LATEST RESULT", t.strong()),
+                Line::styled(ui("LATEST RESULT"), t.strong()),
                 Line::styled(
-                    format!(
+                    ui(format!(
                         "{} UTC · {}",
                         result.timestamp.format("%d %b %H:%M"),
                         single(&result.backend)
-                    ),
+                    )),
                     t.muted(),
                 ),
             ]),
@@ -291,37 +305,37 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
             t,
             metrics[1],
         );
-        let mut lines = vec![Line::from(format!(
+        let mut lines = vec![Line::from(ui(format!(
             "Idle {:.1} ms · jitter {:.1} ms",
             result.latency.idle_ms, result.latency.jitter_ms
-        ))];
+        )))];
         if let Some(analysis) = &result.analysis {
             lines.push(Line::styled(
-                format!(
+                ui(format!(
                     "Quality {}/100 · {} · {} confidence",
                     analysis.quality.score,
                     analysis.quality.grade.label(),
                     analysis.quality.confidence.label()
-                ),
+                )),
                 t.strong().fg(grade_color(analysis.quality.grade, t)),
             ));
             if spacious {
                 lines.push(Line::default());
                 if let Some(finding) = analysis.quality.findings.first() {
                     lines.push(Line::styled(
-                        single(&finding.title),
+                        ui(single(&finding.title)),
                         t.strong().fg(severity_color(finding.severity, t)),
                     ));
-                    lines.push(Line::from(single(&finding.evidence)));
+                    lines.push(Line::from(ui(single(&finding.evidence))));
                 } else {
-                    lines.push(Line::from(
+                    lines.push(Line::from(ui(
                         "No findings in this result. This is not a continuous connection monitor.",
-                    ));
+                    )));
                 }
                 lines.push(Line::default());
             }
         }
-        lines.push(Line::styled("v  Open result", t.focus()));
+        lines.push(Line::styled(ui("v  Open result"), t.focus()));
         frame.render_widget(
             Paragraph::new(lines)
                 .style(t.base())
@@ -335,12 +349,12 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
             Load::Ready(_) => ("No tests yet", "Start your first test to see throughput, latency and connection quality here.\n\nYour connection has not been probed.", t.text),
         };
         let mut lines = vec![
-            Line::styled("RECENT ACTIVITY", t.strong()),
+            Line::styled(ui("RECENT ACTIVITY"), t.strong()),
             Line::default(),
-            Line::styled(title, t.strong().fg(color)),
+            Line::styled(ui(title), t.strong().fg(color)),
             Line::default(),
         ];
-        lines.extend(text.lines().map(Line::from));
+        lines.extend(ui(text).lines().map(|s| Line::from(s.to_owned())));
         frame.render_widget(
             Paragraph::new(lines)
                 .style(t.base())
@@ -351,28 +365,34 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
 }
 
 fn metric(frame: &mut Frame, label: &str, value: &str, unit: &str, t: Theme, area: Rect) {
+    let digit_height = if area.height >= 7 { 5 } else { 3 };
     frame.render_widget(
-        Paragraph::new(label).style(t.strong()),
+        Paragraph::new(ui(label)).style(t.strong()),
         Rect::new(area.x, area.y, area.width, 1),
     );
     if area.height >= 5
         && numerals::draw(
             frame,
-            Rect::new(area.x, area.y + 1, area.width.saturating_sub(1), 3),
+            Rect::new(
+                area.x,
+                area.y + 1,
+                area.width.saturating_sub(1),
+                digit_height,
+            ),
             value,
             t.strong(),
             Alignment::Left,
         )
     {
         frame.render_widget(
-            Paragraph::new(unit).style(t.muted()),
-            Rect::new(area.x, area.y + 4, area.width, 1),
+            Paragraph::new(ui(unit)).style(t.muted()),
+            Rect::new(area.x, area.y + digit_height + 1, area.width, 1),
         );
     } else {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(value.to_owned(), t.strong()),
-                Span::styled(format!(" {unit}"), t.muted()),
+                Span::styled(ui(format!(" {unit}")), t.muted()),
             ])),
             Rect::new(
                 area.x,
@@ -435,6 +455,7 @@ fn configure(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
             .into(),
         ),
     ]);
+    fields.push(("Language", app.language.label().into()));
     let spacing = u16::from(!app.compact && columns[0].height >= (fields.len() * 2) as u16);
     let rows: Vec<_> = fields
         .iter()
@@ -443,7 +464,7 @@ fn configure(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
             let selected = index == app.page().selected;
             Row::new(vec![
                 Cell::from(choice(label, selected, t)),
-                Cell::from(value.clone()).style(if selected { t.focus() } else { t.strong() }),
+                Cell::from(ui(value.clone())).style(if selected { t.focus() } else { t.strong() }),
             ])
             .bottom_margin(spacing)
             .style(t.base())
@@ -476,37 +497,42 @@ fn configure(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
         Some(6) => ("REDUCED MOTION", "Use direct values and static activity indicators instead of an animated needle. Measurements are unchanged."),
         Some(7) => ("BALANCED PRESET", "Restore 8-second phases, 2 streams, 60 FPS and a 120-second deadline. Backend, history, appearance and export settings are preserved."),
         Some(8) => ("TERMINAL COLORS", "Terminal (adaptive) uses your terminal's foreground, background and ANSI palette on Linux, macOS and Windows.\n\nGraphite and Light are optional fixed palettes. Monochrome uses only your default text colors. Nothing modifies the terminal profile."),
+        Some(10) => ("Language", "Change the interface language immediately. Commands, flags, JSON and CSV remain unchanged. Preferences apply to this session."),
         _ => ("READABILITY", "Comfortable uses large metric digits and extra row spacing where space allows. Compact uses ordinary text.\n\nFor larger body text, use your terminal's Zoom In or profile font-size setting. The app reflows after resizing and never changes your terminal font."),
     };
-    let mut lines = vec![Line::styled(title, t.focus()), Line::default()];
-    lines.extend(description.lines().map(Line::from));
+    let mut lines = vec![Line::styled(ui(title), t.focus()), Line::default()];
+    lines.extend(
+        ui(description)
+            .lines()
+            .map(|line| Line::from(line.to_owned())),
+    );
     lines.extend([
         Line::default(),
-        Line::styled("Enter / + / -  Change selected value", t.strong()),
+        Line::styled(ui("Enter / + / -  Change selected value"), t.strong()),
         Line::default(),
     ]);
     if app.options.output.is_some() {
         lines.push(Line::styled(
-            "Explicit export enabled",
+            ui("Explicit export enabled"),
             t.base().fg(t.warning),
         ));
-        lines.push(Line::from(
+        lines.push(Line::from(ui(
             "--output is written after each test, even with history off. The same path is reused.",
-        ));
+        )));
     } else {
         lines.push(Line::styled(
-            if app.options.no_save {
+            ui(if app.options.no_save {
                 "History OFF · results stay in this session"
             } else {
                 "History ON · completed tests are saved locally"
-            },
+            }),
             t.muted(),
         ));
     }
     if app.options.librespeed_server.is_some() {
-        lines.push(Line::from(
+        lines.push(Line::from(ui(
             "Custom LibreSpeed endpoint configured; used when LibreSpeed is selected.",
-        ));
+        )));
     }
     scroll(frame, app, t, info, lines);
 }
@@ -531,12 +557,12 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
     {
         let active = *step == phase;
         rail.push(Span::styled(
-            format!(
+            ui(format!(
                 "{} {}{}  ",
                 index + 1,
                 if active { "› " } else { "" },
-                step.label()
-            ),
+                ui(step.label())
+            )),
             if active { t.focus() } else { t.muted() },
         ));
     }
@@ -574,15 +600,15 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
     let spacious = !app.compact && side.height >= 21;
     let mut lines = vec![
         Line::styled(
-            if app.activity == Some(Activity::Saving) {
+            ui(if app.activity == Some(Activity::Saving) {
                 "FINISHING"
             } else {
                 phase.label()
-            },
+            }),
             t.focus(),
         ),
         Line::styled(
-            format!("Elapsed {}s · latest samples", elapsed.as_secs()),
+            ui(format!("Elapsed {}s · latest samples", elapsed.as_secs())),
             t.muted(),
         ),
         Line::default(),
@@ -616,32 +642,30 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
         Rect::new(side.x, side.y + 15, side.width, side.height - 15)
     } else {
         lines.extend([
-            Line::from(format!("Down   {}", speed(app.live.download_mbps))),
-            Line::from(format!("Up     {}", speed(app.live.upload_mbps))),
+            Line::from(ui(format!("Down   {}", speed(app.live.download_mbps)))),
+            Line::from(ui(format!("Up     {}", speed(app.live.upload_mbps)))),
             Line::default(),
         ]);
         side
     };
     lines.extend([
-        Line::from(format!("Idle   {}", ms(app.live.ping_ms))),
-        Line::from(format!("Jitter {}", ms(app.live.jitter_ms))),
-        Line::from(format!("Load ↓ {}", ms(app.live.download_loaded_ms))),
-        Line::from(format!("Load ↑ {}", ms(app.live.upload_loaded_ms))),
+        Line::from(ui(format!("Idle   {}", ms(app.live.ping_ms)))),
+        Line::from(ui(format!("Jitter {}", ms(app.live.jitter_ms)))),
+        Line::from(ui(format!("Load ↓ {}", ms(app.live.download_loaded_ms)))),
+        Line::from(ui(format!("Load ↑ {}", ms(app.live.upload_loaded_ms)))),
     ]);
     frame.render_widget(Paragraph::new(lines).style(t.base()), details);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled(
-                format!(
+            Line::styled(ui(format!(
                     "{} · {} streams · {}s per transfer phase",
                     app.options.backend_label(),
                     app.options.streams,
                     app.options.duration
-                ),
+                )),
                 t.muted(),
             ),
-            Line::styled(
-                "Gauge is smoothed; samples are provisional. Final results use completed measurements.",
+            Line::styled(ui("Gauge is smoothed; samples are provisional. Final results use completed measurements."),
                 t.muted(),
             ),
         ]),
@@ -663,14 +687,14 @@ fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
     let height = metric_height(app, area);
     let rows = Layout::vertical([Constraint::Length(height), Constraint::Min(1)]).split(area);
     result_metrics(frame, result, t, rows[0]);
-    let roomy = height == 6 && area.width >= 100 && rows[1].height >= 12;
+    let roomy = height >= 6 && area.width >= 100 && rows[1].height >= 12;
     let mut summary = vec![
         Line::styled(
-            if roomy && app.save_notice.starts_with("SAVE FAILED") {
+            ui(if roomy && app.save_notice.starts_with("SAVE FAILED") {
                 "SAVE FAILED · See details →".into()
             } else {
                 single(&app.save_notice)
-            },
+            }),
             t.strong()
                 .fg(if app.save_notice.starts_with("SAVE FAILED") {
                     t.error
@@ -682,95 +706,110 @@ fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
     ];
     if roomy {
         summary.extend([
-            Line::styled("LOADED LATENCY", t.strong()),
-            Line::from(format!(
+            Line::styled(ui("LOADED LATENCY"), t.strong()),
+            Line::from(ui(format!(
                 "Download  {}",
                 ms(result.latency.download_loaded_ms)
-            )),
-            Line::from(format!("Upload    {}", ms(result.latency.upload_loaded_ms))),
+            ))),
+            Line::from(ui(format!(
+                "Upload    {}",
+                ms(result.latency.upload_loaded_ms)
+            ))),
             Line::default(),
         ]);
     } else {
-        summary.push(Line::from(format!(
+        summary.push(Line::from(ui(format!(
             "Loaded latency   Download {}   /   Upload {}",
             ms(result.latency.download_loaded_ms),
             ms(result.latency.upload_loaded_ms)
-        )));
+        ))));
     }
     let mut findings = Vec::new();
     if roomy && app.save_notice.starts_with("SAVE FAILED") {
         findings.extend([
-            Line::styled("SAVE FAILED", t.strong().fg(t.error)),
-            Line::from(single(&app.save_notice)),
+            Line::styled(ui("SAVE FAILED"), t.strong().fg(t.error)),
+            Line::from(ui(single(&app.save_notice))),
             Line::default(),
         ]);
     }
     if let Some(analysis) = &result.analysis {
         let q = &analysis.quality;
         summary.push(Line::styled(
-            format!(
+            ui(format!(
                 "QUALITY  {}/100  {}{}",
                 q.score,
                 q.grade.label(),
                 if q.is_s_tier() { " / S-TIER" } else { "" }
-            ),
+            )),
             t.strong().fg(grade_color(q.grade, t)),
         ));
-        summary.push(Line::from(format!(
+        summary.push(Line::from(ui(format!(
             "{} confidence · bufferbloat {}",
             q.confidence.label(),
             q.bufferbloat.grade.map_or("n/a", QualityGrade::label)
-        )));
-        summary.push(Line::from(format!(
+        ))));
+        summary.push(Line::from(ui(format!(
             "Idle p95 {:.1} / p99 {:.1} ms",
             analysis.latency.idle.p95_ms, analysis.latency.idle.p99_ms
-        )));
+        ))));
         if roomy {
             summary.extend([
                 Line::default(),
-                Line::styled("APPLICATION READINESS", t.strong()),
-                Line::from(format!("Gaming        {}", q.workloads.gaming.label())),
-                Line::from(format!("Video calls   {}", q.workloads.video_calls.label())),
-                Line::from(format!("Streaming     {}", q.workloads.streaming.label())),
-                Line::from(format!(
+                Line::styled(ui("APPLICATION READINESS"), t.strong()),
+                Line::from(ui(format!("Gaming        {}", q.workloads.gaming.label()))),
+                Line::from(ui(format!(
+                    "Video calls   {}",
+                    q.workloads.video_calls.label()
+                ))),
+                Line::from(ui(format!(
+                    "Streaming     {}",
+                    q.workloads.streaming.label()
+                ))),
+                Line::from(ui(format!(
                     "Cloud gaming  {}",
                     q.workloads.cloud_gaming.label()
-                )),
+                ))),
             ]);
         } else {
-            summary.push(Line::from(format!(
+            summary.push(Line::from(ui(format!(
                 "Gaming {}   Calls {}   Streaming {}   Cloud gaming {}",
                 q.workloads.gaming.label(),
                 q.workloads.video_calls.label(),
                 q.workloads.streaming.label(),
                 q.workloads.cloud_gaming.label()
-            )));
+            ))));
         }
         if q.findings.is_empty() {
             findings.extend([
-                Line::styled("NO FINDINGS", t.strong().fg(t.success)),
-                Line::from("No issues were flagged by the local analysis of this result."),
+                Line::styled(ui("NO FINDINGS"), t.strong().fg(t.success)),
+                Line::from(ui(
+                    "No issues were flagged by the local analysis of this result.",
+                )),
             ]);
         }
         for finding in &q.findings {
             findings.push(Line::styled(
-                format!("{} · {}", finding.severity.label(), single(&finding.title)),
+                ui(format!(
+                    "{} · {}",
+                    finding.severity.label(),
+                    single(&finding.title)
+                )),
                 t.strong().fg(severity_color(finding.severity, t)),
             ));
-            findings.push(Line::from(single(&finding.evidence)));
+            findings.push(Line::from(ui(single(&finding.evidence))));
             if let Some(recommendation) = &finding.recommendation {
                 findings.push(Line::default());
-                findings.push(Line::from(single(recommendation)));
+                findings.push(Line::from(ui(single(recommendation))));
             }
             findings.push(Line::default());
         }
     } else {
-        findings.push(Line::from(
+        findings.push(Line::from(ui(
             "Quality analysis unavailable for this saved result.",
-        ));
+        )));
     }
     findings.push(Line::styled(
-        "Mbps = decimal megabits/s. HTTP latency is not ICMP; scores are local heuristics.",
+        ui("Mbps = decimal megabits/s. HTTP latency is not ICMP; scores are local heuristics."),
         t.muted(),
     ));
     if roomy {
@@ -820,8 +859,8 @@ fn archive_state(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> 
         _ => None,
     };
     if let Some((title, message)) = state {
-        let mut lines = vec![Line::styled(title, t.focus()), Line::default()];
-        lines.extend(message.lines().map(|line| Line::from(line.to_owned())));
+        let mut lines = vec![Line::styled(ui(title), t.focus()), Line::default()];
+        lines.extend(ui(message).lines().map(|line| Line::from(line.to_owned())));
         scroll(frame, app, t, area, lines);
         true
     } else {
@@ -882,8 +921,8 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
         )
         .header(
             Row::new(vec![
-                Cell::from("DATE / UTC"),
-                Cell::from("BACKEND"),
+                Cell::from(ui("DATE / UTC")),
+                Cell::from(ui("BACKEND")),
                 right("DOWN Mbps".into()),
                 right("UP Mbps".into()),
                 right("IDLE ms".into()),
@@ -904,18 +943,18 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
             let block = Block::default()
                 .borders(Borders::TOP)
                 .border_style(t.base().fg(t.line))
-                .title(" SELECTED RESULT ")
+                .title(ui(" SELECTED RESULT "))
                 .title_style(t.strong());
             let detail = block.inner(layout[1]);
             frame.render_widget(block, layout[1]);
             let parts =
                 Layout::vertical([Constraint::Length(2), Constraint::Length(6)]).split(detail);
             frame.render_widget(
-                Paragraph::new(format!(
+                Paragraph::new(ui(format!(
                     "{} UTC · {} · Enter opens details",
                     selected.timestamp.format("%d %b %Y %H:%M"),
                     single(&selected.backend)
-                ))
+                )))
                 .style(t.muted()),
                 parts[0],
             );
@@ -925,7 +964,7 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
 }
 
 fn right(value: String) -> Cell<'static> {
-    Cell::from(Line::from(value).alignment(Alignment::Right))
+    Cell::from(Line::from(ui(value)).alignment(Alignment::Right))
 }
 
 fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
@@ -1011,21 +1050,21 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
                 .style(t.base())
                 .block(
                     Block::default()
-                        .title("Download · saved samples, not continuous monitoring")
+                        .title(ui("Download · saved samples, not continuous monitoring"))
                         .title_style(t.strong()),
                 )
                 .x_axis(
                     Axis::default()
                         .bounds([0.0, (data.len() - 1) as f64])
-                        .labels(vec![Line::from("oldest"), Line::from("latest")])
+                        .labels(vec![Line::from(ui("oldest")), Line::from(ui("latest"))])
                         .style(t.base().fg(t.line)),
                 )
                 .y_axis(
                     Axis::default()
                         .bounds([0.0, maximum])
                         .labels(vec![
-                            Line::from("0"),
-                            Line::from(format!("{maximum:.1} Mbps")),
+                            Line::from(ui("0")),
+                            Line::from(ui(format!("{maximum:.1} Mbps"))),
                         ])
                         .style(t.base().fg(t.line)),
                 ),
@@ -1033,9 +1072,9 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
             );
         } else {
             frame.render_widget(
-                Paragraph::new(
+                Paragraph::new(ui(
                     "ONE SAVED SAMPLE\n\nSave another test to see a download history chart.",
-                )
+                ))
                 .style(t.base()),
                 parts[0],
             );
@@ -1043,47 +1082,47 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
     }
     let mut lines = vec![
         Line::styled(
-            format!(
+            ui(format!(
                 "{} RUNS  ·  TREND: {}",
                 summary.runs,
                 summary.trend.label().to_uppercase()
-            ),
+            )),
             t.focus(),
         ),
         Line::styled(
-            if plot {
+            ui(if plot {
                 String::new()
             } else {
                 summary.download_sparkline.clone()
-            },
+            }),
             t.focus(),
         ),
-        Line::from(format!(
+        Line::from(ui(format!(
             "Best down {:.1} Mbps  /  best up {:.1} Mbps  /  p95 idle {:.1} ms",
             summary.best_download_mbps, summary.best_upload_mbps, summary.p95_ping_ms
-        )),
-        Line::from(format!(
+        ))),
+        Line::from(ui(format!(
             "Median quality {}  /  S-tier runs {}",
             summary
                 .median_quality_score
                 .map_or("n/a".into(), |n| format!("{n:.0}/100")),
             summary.s_tier_runs
-        )),
+        ))),
         Line::default(),
     ];
     if summary.anomalies.is_empty() {
         lines.push(Line::styled(
-            "No anomaly flags in this sample. This is not a guarantee of stability.",
+            ui("No anomaly flags in this sample. This is not a guarantee of stability."),
             t.muted(),
         ));
     }
     for anomaly in &summary.anomalies {
         lines.push(Line::styled(
-            format!(
+            ui(format!(
                 "{} · {}",
                 anomaly.severity.label(),
                 single(&anomaly.message)
-            ),
+            )),
             t.base().fg(t.warning),
         ));
     }
@@ -1105,21 +1144,21 @@ fn compare(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
         return;
     };
     let Some(c) = &archive.comparison else {
-        frame.render_widget(Paragraph::new("Two saved tests are needed for a comparison.\n\nRun another test with history enabled, then press r to reload.").style(t.base()).wrap(Wrap { trim: true }), area);
+        frame.render_widget(Paragraph::new(ui("Two saved tests are needed for a comparison.\n\nRun another test with history enabled, then press r to reload.")).style(t.base()).wrap(Wrap { trim: true }), area);
         return;
     };
     let mut lines = vec![
         Line::styled(
-            format!(
+            ui(format!(
                 "BEFORE {}  →  AFTER {} UTC",
                 c.before_timestamp.format("%d %b %H:%M"),
                 c.after_timestamp.format("%d %b %H:%M")
-            ),
+            )),
             t.muted(),
         ),
         Line::default(),
         Line::styled(
-            "METRIC             BEFORE        AFTER       CHANGE",
+            ui("METRIC             BEFORE        AFTER       CHANGE"),
             t.muted(),
         ),
     ];
@@ -1137,10 +1176,10 @@ fn compare(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
             "worse"
         };
         lines.push(Line::styled(
-            format!(
+            ui(format!(
                 "{label:<16} {:>9.1}  {:>11.1}  {:+9.1} {unit} ({direction})",
                 delta.before, delta.after, delta.absolute_change
-            ),
+            )),
             t.base().fg(if direction == "same" {
                 t.text
             } else if delta.improved {
@@ -1155,7 +1194,7 @@ fn compare(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
         Line::styled(single(&c.verdict), t.focus()),
         Line::default(),
         Line::styled(
-            "Paths, backends and test conditions can differ; compare like-for-like runs.",
+            ui("Paths, backends and test conditions can differ; compare like-for-like runs."),
             t.muted(),
         ),
     ]);
@@ -1198,24 +1237,24 @@ fn tools(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
     frame.render_widget(block, columns[1]);
     let mut lines = vec![
         Line::styled(
-            if selected.network() {
+            ui(if selected.network() {
                 "NETWORK CHECK · MANUAL START"
             } else {
                 "LOCAL INSPECTION"
-            },
+            }),
             t.focus(),
         ),
         Line::default(),
         Line::from(selected.description()),
         Line::default(),
-        Line::styled("Enter  Open tool", t.focus()),
+        Line::styled(ui("Enter  Open tool"), t.focus()),
         Line::default(),
     ];
     if dns {
-        lines.push(Line::styled("DNS changes stay in the CLI: set, optimize, reset and rollback retain their confirmation/rollback flow.", t.muted()));
+        lines.push(Line::styled(ui("DNS changes stay in the CLI: set, optimize, reset and rollback retain their confirmation/rollback flow."), t.muted()));
     } else {
         lines.push(Line::styled(
-            "LAN server/client and advanced command options remain available from the CLI.",
+            ui("LAN server/client and advanced command options remain available from the CLI."),
             t.muted(),
         ));
     }
@@ -1239,21 +1278,21 @@ fn report(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect, elapsed: D
     );
     let lines = match &app.report {
         None => vec![
-            Line::styled("READY TO START", t.focus()), Line::default(), Line::from(tool.description()), Line::default(),
+            Line::styled(ui("READY TO START"), t.focus()), Line::default(), Line::from(tool.description()), Line::default(),
             choice("Enter  Start diagnostic", true, t), Line::default(),
-            Line::styled(format!("Overall deadline: {} seconds. Settings apply to this session.", app.options.timeout), t.muted()),
+            Line::styled(ui(format!("Overall deadline: {} seconds. Settings apply to this session.", app.options.timeout)), t.muted()),
         ],
         Some(Load::Loading) => {
             let pulse = if app.reduced_motion { "●" } else { ["◐", "◓", "◑", "◒"][(elapsed.as_millis() / 150 % 4) as usize] };
-            vec![Line::styled(format!("{pulse} RUNNING  ·  {}s elapsed", elapsed.as_secs()), t.focus()), Line::default(),
-                Line::from(tool.description()), Line::default(), Line::styled("The interface stays responsive. Esc cancels with confirmation.", t.muted())]
+            vec![Line::styled(ui(format!("{pulse} RUNNING  ·  {}s elapsed", elapsed.as_secs())), t.focus()), Line::default(),
+                Line::from(tool.description()), Line::default(), Line::styled(ui("The interface stays responsive. Esc cancels with confirmation."), t.muted())]
         }
-        Some(Load::Failed(error)) => vec![Line::styled("DIAGNOSTIC FAILED", t.base().fg(t.error).add_modifier(Modifier::BOLD)),
+        Some(Load::Failed(error)) => vec![Line::styled(ui("DIAGNOSTIC FAILED"), t.base().fg(t.error).add_modifier(Modifier::BOLD)),
             Line::default(), Line::from(single(error)), Line::default(),
-            Line::from("Check connectivity, permissions or availability of native tools. No configuration was changed."),
-            Line::default(), Line::styled("Enter / r  Retry    Esc  Back", t.focus())],
+            Line::from(ui("Check connectivity, permissions or availability of native tools. No configuration was changed.")),
+            Line::default(), Line::styled(ui("Enter / r  Retry    Esc  Back"), t.focus())],
         Some(Load::Ready(text)) => {
-            let mut lines = vec![Line::styled("COMPLETED · Enter / r runs again", t.base().fg(t.success)), Line::default()];
+            let mut lines = vec![Line::styled(ui("COMPLETED · Enter / r runs again"), t.base().fg(t.success)), Line::default()];
             lines.extend(output::safe_text(text).lines().map(|line| Line::from(line.to_owned())));
             lines
         }
@@ -1269,10 +1308,10 @@ fn failure(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
         t,
         area,
     );
-    let lines = vec![Line::styled("ERROR", t.base().fg(t.error).add_modifier(Modifier::BOLD)), Line::default(),
+    let lines = vec![Line::styled(ui("ERROR"), t.base().fg(t.error).add_modifier(Modifier::BOLD)), Line::default(),
         Line::from(single(&app.failure)), Line::default(),
-        Line::from("Check connectivity, return to Test to change backend, or increase the deadline in Settings."),
-        Line::default(), Line::styled("Enter / r  Retry    Esc  Configuration    Tab  Another section", t.focus())];
+        Line::from(ui("Check connectivity, return to Test to change backend, or increase the deadline in Settings.")),
+        Line::default(), Line::styled(ui("Enter / r  Retry    Esc  Configuration    Tab  Another section"), t.focus())];
     scroll(frame, app, t, area, lines);
 }
 
@@ -1294,12 +1333,12 @@ fn scroll(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect, lines: Vec
     );
     if overflow {
         frame.render_widget(
-            Paragraph::new(format!(
+            Paragraph::new(ui(format!(
                 "↑↓ {}–{} / {} · PgUp/PgDn",
                 usize::from(app.page().scroll) + 1,
                 (usize::from(app.page().scroll) + usize::from(visible)).min(count),
                 count
-            ))
+            )))
             .style(t.muted()),
             Rect::new(area.x, area.y + visible, area.width, 1),
         );
@@ -1342,48 +1381,48 @@ fn footer(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
     };
     let bindings = if app.activity.is_some() {
         Line::from(vec![
-            Span::styled("?", t.focus()),
-            Span::styled(" help  ·  ", t.muted()),
-            Span::styled("q", t.focus()),
-            Span::styled(" quit  ·  ", t.muted()),
-            Span::styled("Navigation resumes when the task finishes.", t.muted()),
+            Span::styled(ui("?"), t.focus()),
+            Span::styled(ui(" help  ·  "), t.muted()),
+            Span::styled(ui("q"), t.focus()),
+            Span::styled(ui(" quit  ·  "), t.muted()),
+            Span::styled(ui("Navigation resumes when the task finishes."), t.muted()),
         ])
     } else {
         Line::from(vec![
-            Span::styled("j/k", t.focus()),
-            Span::styled(" move  ·  ", t.muted()),
-            Span::styled("Tab / ←→", t.focus()),
-            Span::styled(" sections  ·  ", t.muted()),
-            Span::styled("Esc", t.focus()),
-            Span::styled(" back  ·  ", t.muted()),
-            Span::styled("?", t.focus()),
-            Span::styled(" help  ·  ", t.muted()),
-            Span::styled("q", t.focus()),
-            Span::styled(" quit", t.muted()),
+            Span::styled(ui("j/k"), t.focus()),
+            Span::styled(ui(" move  ·  "), t.muted()),
+            Span::styled(ui("Tab / ←→"), t.focus()),
+            Span::styled(ui(" sections  ·  "), t.muted()),
+            Span::styled(ui("Esc"), t.focus()),
+            Span::styled(ui(" back  ·  "), t.muted()),
+            Span::styled(ui("?"), t.focus()),
+            Span::styled(ui(" help  ·  "), t.muted()),
+            Span::styled(ui("q"), t.focus()),
+            Span::styled(ui(" quit"), t.muted()),
         ])
     };
     frame.render_widget(
-        Paragraph::new(vec![Line::styled(context, t.muted()), bindings]),
+        Paragraph::new(vec![Line::styled(ui(context), t.muted()), bindings]),
         area,
     );
 }
 
 fn small(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
     let text = vec![
-        Line::styled("SPEEDTEST / NETWORK COCKPIT", t.focus()),
+        Line::styled(ui("SPEEDTEST / NETWORK COCKPIT"), t.focus()),
         Line::default(),
-        Line::styled("TERMINAL TOO SMALL", t.base().fg(t.warning)),
-        Line::from(format!(
+        Line::styled(ui("TERMINAL TOO SMALL"), t.base().fg(t.warning)),
+        Line::from(ui(format!(
             "{} × {} detected; resize to at least 80 × 24.",
             area.width, area.height
-        )),
-        Line::from(if app.activity.is_some() {
+        ))),
+        Line::from(ui(if app.activity.is_some() {
             "A task is still running. Esc / q asks before cancelling."
         } else {
             "No test starts automatically. Navigation is preserved."
-        }),
+        })),
         Line::default(),
-        Line::from("? help · Esc back · q quit · Ctrl+C stop"),
+        Line::from(ui("? help · Esc back · q quit · Ctrl+C stop")),
     ];
     frame.render_widget(
         Paragraph::new(text)
@@ -1396,55 +1435,76 @@ fn small(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
     );
 }
 
-fn overlay(frame: &mut Frame, modal: Modal, t: Theme, area: Rect) {
+fn overlay(frame: &mut Frame, app: &mut Cockpit, modal: Modal, t: Theme, area: Rect) {
     let (title, lines) = match modal {
+        Modal::TextSize => (
+            " TEXT SIZE ",
+            vec![
+                Line::styled(ui("LARGER TEXT, NOT JUST LARGER PANELS"), t.focus()),
+                Line::from(ui("Your terminal controls the size of every character. Use its Zoom In action or increase the profile font size.")),
+                Line::from(ui("Keep at least 80 columns and 24 rows. The cockpit reflows when you zoom or resize. Comfortable layout enlarges metrics only.")),
+                Line::default(),
+                Line::styled(ui("ARCH / OMARCHY"), t.focus()),
+                Line::from(ui("Omarchy defaults to Alacritty, but other terminals are supported. For Alacritty, edit the existing [font] size in:")),
+                Line::from(ui("~/.config/alacritty/alacritty.toml")),
+                Line::from("[font]"),
+                Line::from("size = 14.0"),
+                Line::default(),
+                Line::styled(ui("OTHER TERMINALS"), t.focus()),
+                Line::from(ui("Ghostty: font-size = 14 in its config. macOS Terminal and Windows Terminal: increase font size in profile settings.")),
+                Line::from(ui("Keep your other settings and imports. Do not add a duplicate [font] section.")),
+                Line::default(),
+                Line::from(ui("No terminal, desktop, font or configuration setting is changed by this guide.")),
+                Line::from(ui("")),
+                Line::default(),
+                Line::styled(ui("↑↓ scroll · Esc / Enter close"), t.focus()),
+            ],
+        ),
         Modal::Help => (
             " KEYBOARD FIELD GUIDE ",
             vec![
-                Line::styled("NAVIGATION", t.focus()),
-                Line::from("↑/↓ or j/k     Move selection / scroll a report"),
-                Line::from("Enter           Open, start or change a value"),
-                Line::from("Tab / ←/→       Switch sibling sections"),
-                Line::from("Shift+Tab        Previous section"),
-                Line::from("Esc / Backspace  Back; confirm before cancelling"),
-                Line::from("+ / - / Space   Edit a selected setting"),
-                Line::from("PgUp / PgDn      Scroll report details"),
-                Line::from("r               Reload history / retry a test"),
-                Line::from("q               Quit; confirm if a task is running"),
-                Line::from("Ctrl+C          Stop immediately (save finishes first)"),
+                Line::styled(ui("NAVIGATION"), t.focus()),
+                Line::from(ui("↑/↓ or j/k     Move selection / scroll a report")),
+                Line::from(ui("Enter           Open, start or change a value")),
+                Line::from(ui("Tab / ←/→       Switch sibling sections")),
+                Line::from(ui("Shift+Tab        Previous section")),
+                Line::from(ui("Esc / Backspace  Back; confirm before cancelling")),
+                Line::from(ui("+ / - / Space   Edit a selected setting")),
+                Line::from(ui("PgUp / PgDn      Scroll report details")),
+                Line::from(ui("r               Reload history / retry a test")),
+                Line::from(ui("q               Quit; confirm if a task is running")),
+                Line::from(ui("Ctrl+C          Stop immediately (save finishes first)")),
                 Line::default(),
-                Line::styled("READABILITY", t.focus()),
-                Line::from("Settings: adaptive colors and comfortable / compact layout."),
-                Line::from("Larger body text: terminal Zoom In / profile font size."),
-                Line::styled("Esc / ? / Enter  Close help", t.focus()),
+                Line::styled(ui("READABILITY"), t.focus()),
+                Line::from(ui("z  Text size guide; terminal font controls body text.")),
+                Line::from(ui("Settings: adaptive colors and comfortable / compact layout.")),
+                Line::from(ui("Your terminal controls the size of every character. Use its Zoom In action or increase the profile font size.")),
+                Line::styled(ui("Esc / ? / Enter  Close help"), t.focus()),
             ],
         ),
         Modal::Cancel { quit, confirm } => (
             " CONFIRM CANCELLATION ",
             vec![
-                Line::styled(
-                    if quit {
+                Line::styled(ui(if quit {
                         "Cancel the active task and quit?"
                     } else {
                         "Cancel the active task?"
-                    },
+                    }),
                     t.base().fg(t.warning).add_modifier(Modifier::BOLD),
                 ),
                 Line::default(),
-                Line::from("No incomplete speed-test result will be saved."),
-                Line::from("A running diagnostic command will be stopped."),
+                Line::from(ui("No incomplete speed-test result will be saved.")),
+                Line::from(ui("A running diagnostic command will be stopped.")),
                 Line::default(),
-                Line::styled(
-                    if confirm {
+                Line::styled(ui(if confirm {
                         "  Continue task       › Yes, cancel"
                     } else {
                         "› Continue task         Yes, cancel"
-                    },
+                    }),
                     t.focus(),
                 ),
                 Line::default(),
-                Line::styled(
-                    "←/→ select · Enter confirm · y cancel · Esc continue",
+                Line::styled(ui("←/→ select · Enter confirm · y cancel · Esc continue"),
                     t.muted(),
                 ),
             ],
@@ -1462,21 +1522,24 @@ fn overlay(frame: &mut Frame, modal: Modal, t: Theme, area: Rect) {
         height,
     );
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(t.base())
-            .wrap(Wrap { trim: true })
-            .block(
-                Block::default()
-                    .title(title)
-                    .title_style(t.focus())
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(t.base().fg(t.focus))
-                    .padding(Padding::new(2, 2, 1, 1)),
-            ),
-        popup,
+    let block = Block::default()
+        .title(ui(title))
+        .title_style(t.focus())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.base().fg(t.focus))
+        .padding(Padding::new(2, 2, 1, 1));
+    let inner = block.inner(popup);
+    let paragraph = Paragraph::new(lines)
+        .style(t.base())
+        .wrap(Wrap { trim: true });
+    app.modal_scroll = app.modal_scroll.min(
+        paragraph
+            .line_count(inner.width)
+            .saturating_sub(usize::from(inner.height))
+            .min(usize::from(u16::MAX)) as u16,
     );
+    frame.render_widget(paragraph.scroll((app.modal_scroll, 0)).block(block), popup);
 }
 
 fn speed(value: Option<f64>) -> String {

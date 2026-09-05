@@ -1,3 +1,4 @@
+use crate::i18n::ui;
 use ratatui::{
     prelude::{
         Alignment, Color, Constraint, Direction, Frame, Layout, Line, Modifier, Rect, Span, Style,
@@ -117,7 +118,7 @@ fn draw_compact(frame: &mut Frame, app: &App) {
 fn shell() -> Block<'static> {
     Block::default()
         .title(
-            Line::from(" SPEEDTEST ").style(
+            Line::from(ui(" SPEEDTEST ")).style(
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
@@ -135,7 +136,7 @@ fn phase_header(app: &App) -> Paragraph<'static> {
     };
 
     Paragraph::new(Line::from(Span::styled(
-        label,
+        ui(label),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
@@ -168,7 +169,7 @@ fn render_sparkline(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
         .block(
             Block::default()
                 .title(Line::from(Span::styled(
-                    " THROUGHPUT TRACE ",
+                    ui(" THROUGHPUT TRACE "),
                     Style::default().fg(Color::DarkGray),
                 )))
                 .borders(Borders::ALL)
@@ -246,7 +247,7 @@ fn render_completion_panel(frame: &mut Frame, app: &App, area: Rect) {
     let quality_card = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
-                format!("{}/100 {}", quality.score, quality.grade.label()),
+                ui(format!("{}/100 {}", quality.score, quality.grade.label())),
                 Style::default()
                     .fg(quality_color)
                     .add_modifier(Modifier::BOLD),
@@ -254,14 +255,14 @@ fn render_completion_panel(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(tier, Style::default().fg(S_TIER_ACCENT)),
         ]),
         Line::from(Span::styled(
-            format!("{} confidence", quality.confidence.label()),
+            ui(format!("{} confidence", quality.confidence.label())),
             Style::default().fg(Color::DarkGray),
         )),
-        Line::from(format!(
+        Line::from(ui(format!(
             "Bufferbloat {buffer_grade}   ↓ {}   ↑ {}",
             format_delta(quality.bufferbloat.download_increase_ms),
             format_delta(quality.bufferbloat.upload_increase_ms)
-        )),
+        ))),
     ])
     .block(card_block(" QUALITY ", quality_color));
 
@@ -273,15 +274,15 @@ fn render_completion_panel(frame: &mut Frame, app: &App, area: Rect) {
     .block(card_block(" WORKLOADS ", Color::Gray));
 
     let tails = Paragraph::new(vec![
-        Line::from(format!(
+        Line::from(ui(format!(
             "Idle p95      {:>6.1} ms",
             analysis.latency.idle.p95_ms
-        )),
-        Line::from(format!(
+        ))),
+        Line::from(ui(format!(
             "Idle p99      {:>6.1} ms",
             analysis.latency.idle.p99_ms
-        )),
-        Line::from(format!("Jitter p95    {:>6.1} ms", jitter_p95)),
+        ))),
+        Line::from(ui(format!("Jitter p95    {:>6.1} ms", jitter_p95))),
     ])
     .block(card_block(" TAIL LATENCY ", Color::Gray));
 
@@ -297,7 +298,7 @@ fn render_completion_panel(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
-                    format!(" {} ", finding.severity.label()),
+                    ui(format!(" {} ", finding.severity.label())),
                     Style::default()
                         .fg(severity_color(finding.severity))
                         .add_modifier(Modifier::BOLD),
@@ -310,20 +311,20 @@ fn render_completion_panel(frame: &mut Frame, app: &App, area: Rect) {
                 ),
             ]),
             Line::from(Span::styled(
-                format!("  {recommendation}"),
+                ui(format!("  {recommendation}")),
                 Style::default().fg(Color::Gray),
             )),
         ])
     } else {
         Paragraph::new(vec![
             Line::from(Span::styled(
-                " HEALTHY ",
+                ui(" HEALTHY "),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                "  No material network-quality finding was detected in this run.",
+                ui("  No material network-quality finding was detected in this run."),
                 Style::default().fg(Color::Gray),
             )),
         ])
@@ -339,7 +340,7 @@ fn render_completion_panel(frame: &mut Frame, app: &App, area: Rect) {
 fn card_block(title: &'static str, color: Color) -> Block<'static> {
     Block::default()
         .title(Line::from(Span::styled(
-            title,
+            ui(title),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )))
         .borders(Borders::ALL)
@@ -348,7 +349,10 @@ fn card_block(title: &'static str, color: Color) -> Block<'static> {
 
 fn workload_line(label: &'static str, grade: QualityGrade) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label:<13}"), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            ui(format!("{label:<13}")),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled(
             grade.label(),
             Style::default()
@@ -380,29 +384,29 @@ fn compact_quality(app: &App) -> Paragraph<'static> {
     Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
-                format!(
+                ui(format!(
                     "QUALITY {}/100 {}{tier}",
                     quality.score,
                     quality.grade.label()
-                ),
+                )),
                 Style::default()
                     .fg(quality_color)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("  •  "),
-            Span::raw(format!(
+            Span::raw(ui("  •  ")),
+            Span::raw(ui(format!(
                 "game {}  calls {}  stream {}",
                 quality.workloads.gaming.label(),
                 quality.workloads.video_calls.label(),
                 quality.workloads.streaming.label()
-            )),
+            ))),
         ]),
-        Line::from(format!(
+        Line::from(ui(format!(
             "buffer {}  ↓ {}  ↑ {}",
             quality.bufferbloat.grade.map_or("—", QualityGrade::label),
             format_delta(quality.bufferbloat.download_increase_ms),
             format_delta(quality.bufferbloat.upload_increase_ms)
-        )),
+        ))),
     ])
     .alignment(Alignment::Center)
 }
@@ -411,7 +415,7 @@ fn legacy_completion(app: &App) -> Paragraph<'static> {
     let download = app.download_mbps.unwrap_or_default();
     let upload = app.upload_mbps.unwrap_or_default();
     Paragraph::new(Line::from(Span::styled(
-        format!("result  ↓ {download:.1} Mbps   ↑ {upload:.1} Mbps"),
+        ui(format!("result  ↓ {download:.1} Mbps   ↑ {upload:.1} Mbps")),
         Style::default().fg(Color::Gray),
     )))
     .block(
@@ -430,8 +434,8 @@ fn footer(app: &App) -> Paragraph<'static> {
     };
 
     Paragraph::new(Line::from(vec![
-        Span::styled("Cloudflare Edge", Style::default().fg(Color::Gray)),
-        Span::raw("  •  "),
+        Span::styled(ui("Cloudflare Edge"), Style::default().fg(Color::Gray)),
+        Span::raw(ui("  •  ")),
         Span::styled(instruction, Style::default().fg(Color::DarkGray)),
     ]))
     .alignment(Alignment::Center)
@@ -471,7 +475,7 @@ fn severity_color(severity: FindingSeverity) -> Color {
 fn metric_line(label: &'static str, value: String, color: Color) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!(" {label:<10}"),
+            ui(format!(" {label:<10}")),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
