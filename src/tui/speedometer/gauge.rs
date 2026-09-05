@@ -10,6 +10,17 @@ use ratatui::{
 };
 
 use super::SpeedometerState;
+use crate::tui::numerals;
+
+/// Shell-supplied colors; legacy direct-run rendering retains its original palette.
+#[derive(Debug, Clone, Copy)]
+pub struct GaugePalette {
+    pub background: Color,
+    pub accent: Color,
+    pub text: Color,
+    pub secondary: Color,
+    pub track: Color,
+}
 
 const START_ANGLE: f64 = PI * 1.15;
 const SWEEP_ANGLE: f64 = PI * 1.30;
@@ -35,8 +46,35 @@ pub fn render_with_background(
     show_value: bool,
     background: Color,
 ) {
+    render_themed(
+        frame,
+        area,
+        state,
+        show_value,
+        GaugePalette {
+            background,
+            accent,
+            text: Color::White,
+            secondary: Color::Gray,
+            track: Color::DarkGray,
+        },
+        false,
+    );
+}
+
+pub fn render_themed(
+    frame: &mut Frame,
+    area: Rect,
+    state: &SpeedometerState,
+    show_value: bool,
+    palette: GaugePalette,
+    large_values: bool,
+) {
+    let GaugePalette {
+        background, accent, ..
+    } = palette;
     if area.width < 40 || area.height < 8 {
-        render_fallback(frame, area, state, accent, show_value);
+        render_fallback(frame, area, state, palette, show_value);
         return;
     }
 
@@ -70,7 +108,7 @@ pub fn render_with_background(
             for coords in &track_layers {
                 ctx.draw(&Points {
                     coords,
-                    color: Color::DarkGray,
+                    color: palette.track,
                 });
             }
 
@@ -85,12 +123,12 @@ pub fn render_with_background(
                 }
                 ctx.draw(&Points {
                     coords: &[active_cap],
-                    color: Color::White,
+                    color: palette.text,
                 });
             }
 
-            draw_ticks(ctx, ratio, accent);
-            draw_needle(ctx, needle_angle, accent);
+            draw_ticks(ctx, ratio, palette);
+            draw_needle(ctx, needle_angle, palette);
 
             for (x, y, label) in &labels {
                 ctx.print(
@@ -98,17 +136,18 @@ pub fn render_with_background(
                     *y,
                     Line::from(Span::styled(
                         label.clone(),
-                        Style::default().fg(Color::Gray),
+                        Style::default().fg(palette.secondary),
                     )),
                 );
             }
         });
 
     frame.render_widget(canvas, area);
-    render_center_readout(frame, area, state, show_value);
+    render_center_readout(frame, area, state, show_value, palette, large_values);
 }
 
-fn draw_ticks(ctx: &mut ratatui::widgets::canvas::Context<'_>, ratio: f64, accent: Color) {
+fn draw_ticks(ctx: &mut ratatui::widgets::canvas::Context<'_>, ratio: f64, palette: GaugePalette) {
+    let accent = palette.accent;
     for index in 0..=20 {
         let fraction = index as f64 / 20.0;
         let angle = angle_for_ratio(fraction);
@@ -119,12 +158,12 @@ fn draw_ticks(ctx: &mut ratatui::widgets::canvas::Context<'_>, ratio: f64, accen
             if major {
                 accent
             } else {
-                Color::Gray
+                palette.secondary
             }
         } else if major {
-            Color::Gray
+            palette.secondary
         } else {
-            Color::DarkGray
+            palette.track
         };
 
         ctx.draw(&CanvasLine {
@@ -137,13 +176,18 @@ fn draw_ticks(ctx: &mut ratatui::widgets::canvas::Context<'_>, ratio: f64, accen
     }
 }
 
-fn draw_needle(ctx: &mut ratatui::widgets::canvas::Context<'_>, needle_angle: f64, accent: Color) {
+fn draw_needle(
+    ctx: &mut ratatui::widgets::canvas::Context<'_>,
+    needle_angle: f64,
+    palette: GaugePalette,
+) {
+    let accent = palette.accent;
     ctx.draw(&CanvasLine {
         x1: 0.0,
         y1: 0.0,
         x2: 0.82 * needle_angle.cos(),
         y2: 0.82 * needle_angle.sin(),
-        color: Color::DarkGray,
+        color: palette.track,
     });
 
     for offset in [-0.008_f64, 0.0, 0.008] {
@@ -162,7 +206,7 @@ fn draw_needle(ctx: &mut ratatui::widgets::canvas::Context<'_>, needle_angle: f6
         y1: 0.0,
         x2: -0.13 * needle_angle.cos(),
         y2: -0.13 * needle_angle.sin(),
-        color: Color::Gray,
+        color: palette.secondary,
     });
 
     let hub = [
@@ -178,7 +222,7 @@ fn draw_needle(ctx: &mut ratatui::widgets::canvas::Context<'_>, needle_angle: f6
     });
     ctx.draw(&Points {
         coords: &[(0.0, 0.0)],
-        color: Color::White,
+        color: palette.text,
     });
 }
 
@@ -187,49 +231,56 @@ fn render_center_readout(
     area: Rect,
     state: &SpeedometerState,
     show_value: bool,
+    palette: GaugePalette,
+    large_values: bool,
 ) {
     if area.width < 20 || area.height < 6 {
         return;
     }
-
+    let large = large_values && area.height >= 16;
     let width = area.width.min(38);
     let x = area.x + (area.width - width) / 2;
-    let y = area.y + area.height.saturating_mul(53) / 100;
-    let height = area.height.saturating_sub(y.saturating_sub(area.y)).min(3);
-    if height == 0 {
-        return;
-    }
-
+    let y = area.y + area.height.saturating_mul(if large { 32 } else { 53 }) / 100;
+    let height = area
+        .bottom()
+        .saturating_sub(y)
+        .min(if large { 6 } else { 3 });
     let value = if show_value {
         format!("{:.1}", state.displayed_mbps())
     } else {
-        "—".to_string()
+        "—".into()
     };
-
-    let mut lines = vec![
-        Line::from(Span::styled(
-            value,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled("Mbps", Style::default().fg(Color::Gray))),
-    ];
-
-    if height >= 3 && show_value {
-        lines.push(Line::from(Span::styled(
+    let base = Style::default().fg(palette.text).bg(palette.background);
+    let big = large
+        && height >= 5
+        && numerals::draw(
+            frame,
+            Rect::new(x, y, width, 3),
+            &value,
+            base.add_modifier(Modifier::BOLD),
+            Alignment::Center,
+        );
+    let mut lines = Vec::new();
+    if !big {
+        lines.push(Line::styled(value, base.add_modifier(Modifier::BOLD)));
+    }
+    lines.push(Line::styled("Mbps", base.fg(palette.secondary)));
+    if show_value {
+        lines.push(Line::styled(
             format!(
                 "peak {:.1}  •  scale {}",
                 state.peak_mbps(),
                 format_scale(state.scale_mbps())
             ),
-            Style::default().fg(Color::DarkGray),
-        )));
+            base.fg(palette.secondary),
+        ));
     }
-
+    let offset = if big { 3 } else { 0 };
     frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        Rect::new(x, y, width, height),
+        Paragraph::new(lines)
+            .style(base)
+            .alignment(Alignment::Center),
+        Rect::new(x, y + offset, width, height - offset),
     );
 }
 
@@ -237,7 +288,7 @@ fn render_fallback(
     frame: &mut Frame,
     area: Rect,
     state: &SpeedometerState,
-    accent: Color,
+    palette: GaugePalette,
     show_value: bool,
 ) {
     let value = if show_value {
@@ -248,7 +299,10 @@ fn render_fallback(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             value,
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.accent)
+                .bg(palette.background)
+                .add_modifier(Modifier::BOLD),
         )))
         .alignment(Alignment::Center),
         area,
