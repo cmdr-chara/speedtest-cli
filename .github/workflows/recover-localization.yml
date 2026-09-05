@@ -1,0 +1,57 @@
+name: Recover localization source
+on:
+  push:
+    branches: [feat/localized-cockpit]
+    paths: [.github/workflows/recover-localization.yml]
+permissions:
+  contents: read
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Recover exact saved Git objects without executing their contents
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p recovery
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, urllib.request
+          shas = '''eeed3f2eaa957b64e221d2a31a3b5a4e592bfa35
+          b0b32a8bc6bfe0548628be209b39d51f2758c01f
+          884a3ebae2b28c8052ba731050e17265bfb55009
+          3a8edce4f79653ca5f4f97e6151df2f8cbf7ae2b
+          4bb3bfc49910deafed497f9dcfa45957eb02eb20
+          e8453638822dadbf96bdede73eb9bcb4690f9042
+          218281b16e6d2cd8e480421960df041d08a66a6e
+          cc0192c7c4e93ba7f948646db134a8418c4cdda9
+          38732c2718874a6302b6f2dea1c3e55f7d67ab89
+          19cfd4c6320e2b04854a0f2bd468aa4df7a2b1be
+          090d743a260911527c47d54e113ddd108f8222a3
+          3b98fcb06a7bf08033db516a65fd74d0e78d0817'''.split()
+          manifest = []
+          joined = b''
+          for i, sha in enumerate(shas):
+              req = urllib.request.Request('https://api.github.com/repos/cmdr-chara/speedtest-cli/git/blobs/' + sha, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  obj = json.load(response)
+              data = base64.b64decode(obj['content'])
+              assert hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == sha
+              pathlib.Path(f'recovery/part{i:02}').write_bytes(data)
+              joined += data
+              manifest.append({'part': i, 'sha': sha, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+          pathlib.Path('recovery/manifest.json').write_text(json.dumps(manifest, indent=2))
+          pathlib.Path('recovery/joined.xz').write_bytes(joined)
+          decoder = lzma.LZMADecompressor()
+          try:
+              decoded = decoder.decompress(joined, max_length=16000000)
+              pathlib.Path('recovery/decoded').write_bytes(decoded)
+              print('Recovered', len(joined), 'bytes; decompressed', len(decoded), 'bytes; complete stream:', decoder.eof)
+          except lzma.LZMAError as error:
+              print('Saved individual source objects; concatenated stream:', error)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recovered-localization
+          path: recovery/
+          retention-days: 3
