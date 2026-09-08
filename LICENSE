@@ -1,3 +1,117 @@
+speedtest-cli Source Available License 1.0
+Copyright (c) 2026 cmdr-chara
+
+This is a custom source-available license, not the GNU AGPL and not an
+OSI-approved open-source license.
+
+1. Scope and existing permissions
+
+"Software" means the speedtest-cli code and documentation to which the copyright
+holder applies this license. "Modified Version" means a work modifying or
+incorporating the Software, excluding independent programs merely communicating
+with it through ordinary command-line, file, or network interfaces.
+"You" means the person or legal entity exercising permissions under this license.
+"Copyright Holder" means cmdr-chara and, for their respective contributions,
+other copyright holders who apply this license.
+
+These terms apply beginning with the repository revision introducing this
+license. They do not revoke, replace, or restrict permissions previously granted
+under MIT, including for the already published v0.6.0 release. Recipients may
+continue to use, modify, and redistribute that previously MIT-licensed material
+under MIT. New material not separately offered under MIT is governed by these
+terms. Third-party components retain their own licenses and notices; this
+license grants no rights to third-party trademarks or services.
+
+2. Permissions
+
+Subject to these conditions, You may use, study, copy, modify, and redistribute
+the Software and Modified Versions in source or executable form without a fee.
+Personal, educational, research, and internal business use are permitted.
+An organization may use the Software to support its own operations and earn
+income from unrelated products or services without buying a license.
+
+3. Commercial redistribution and hosted services
+
+Without a separate written license from the relevant Copyright Holder, You may
+not:
+(a) sell, rent, sublicense for a fee, or otherwise supply the Software or a
+    Modified Version to third parties for monetary consideration, including as
+    a bundled component of a paid product; or
+(b) provide third parties with paid remote access to functionality of the
+    Software or a Modified Version, including a paid diagnostic or measurement
+    service whose service to the customer is performed using the Software.
+Changing the name, interface, branding, or packaging does not remove these
+conditions. A mandatory subscription, membership, or purchase to access the
+Software or its functionality counts as payment.
+
+Voluntary donations that do not condition access or rights are permitted.
+Independent training and support may be sold if payment does not purchase a
+copy of, access to, or diagnostic/measurement service performed using the
+Software. Internal use for an organization's own networks remains permitted.
+
+4. Source availability
+
+When You distribute the Software or a Modified Version, You must provide every
+recipient, at no additional charge, the complete corresponding source under
+this license. You may accompany the distribution with the source or with a
+clearly identified, freely accessible download containing the source for that
+exact version. That download must remain available for at least three years
+after Your last distribution of that version.
+
+If You operate a Modified Version with which users interact remotely through a
+computer network, You must prominently offer every such user, including internal
+users, access at no additional charge to its complete corresponding source under
+this license for as long as that version is operated. Merely making outgoing
+network requests from a locally operated CLI does not trigger this condition.
+
+Corresponding source means the preferred form for making modifications,
+including changes, build and installation scripts, interface definitions, and
+configuration templates needed to build and run the covered work. It excludes
+private credentials, customer data, measurement records, general-purpose tools,
+system libraries, and independent programs that are not part of the covered
+work. Do not disclose secrets or personal data to satisfy this condition.
+
+Private modifications that are neither distributed nor operated for remote
+network interaction do not require source disclosure. Source need not be sent
+to the original author or published on GitHub.
+
+5. Notices and downstream terms
+
+Preserve applicable copyright, attribution, license, and third-party notices.
+Include this license with every distribution and identify how recipients can
+obtain the corresponding source. Mark Modified Versions with a prominent notice
+that changes were made, their date, and the identity or pseudonym of the modifier.
+Do not imply that the original author endorses a fork or commercial offering.
+
+You must license Your modifications to the covered work under these same terms
+and may not impose additional terms preventing recipients from exercising the
+rights granted here. No copyright assignment is required. Separate commercial
+permissions for material belonging to others require those holders' permission.
+
+6. Termination
+
+Rights under this license terminate upon a material breach. They are
+reinstated if You cure the breach within 30 days after first receiving written
+notice of it, provided this is the first notice of breach You have received
+from that Copyright Holder. Termination does not terminate licenses of compliant
+downstream recipients or independent permissions granted under another license.
+
+7. Disclaimer
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE SOFTWARE IS PROVIDED "AS IS",
+WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE COPYRIGHT HOLDERS SHALL NOT BE
+LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE SOFTWARE
+OR ITS USE. MANDATORY RIGHTS AND LIABILITIES UNDER APPLICABLE LAW ARE UNAFFECTED.
+
+Commercial permission requests: https://github.com/cmdr-chara/speedtest-cli/issues
+
+Historical MIT notice
+---------------------
+The following notice is retained for material previously released under MIT.
+It does not separately license new material under MIT.
+
 MIT License
 
 Copyright (c) 2026 cmdr-chara

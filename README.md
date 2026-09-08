@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/cmdr-chara/speedtest-cli/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/cmdr-chara/speedtest-cli?style=for-the-badge&amp;color=36c9b0"></a>
   <a href="https://github.com/cmdr-chara/speedtest-cli/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/cmdr-chara/speedtest-cli/ci.yml?style=for-the-badge&amp;label=CI"></a>
-  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-80a5dc?style=for-the-badge"></a>
+  <a href="./LICENSE"><img alt="License: Source Available" src="https://img.shields.io/badge/license-Source_Available-80a5dc?style=for-the-badge"></a>
 </p>
 
 <p align="center">
@@ -234,4 +234,19 @@ speedtest-cli is an independent project, not an official Cloudflare or LibreSpee
 
 ## License
 
-[MIT](./LICENSE)
+[speedtest-cli Source Available License 1.0](./LICENSE).
+
+Personal use and internal business use are permitted. Redistribution must include
+corresponding source under the same terms. Modified versions operated for remote
+users must offer those users their corresponding source. Selling copies, bundling
+into paid products, or providing paid services based on the tool requires separate
+written permission. See LICENSE for the definitions and full conditions.
+
+This is a custom source-available license, not AGPL or an OSI-approved open-source
+license. It applies from the revision introducing it; it does not revoke MIT rights
+for previously published material. The existing v0.6.0 release and its downloads
+remain under MIT. The package version is still 0.6.0; identify the source revision
+as well as the version when checking licensing.
+
+Request commercial permission through [GitHub](https://github.com/cmdr-chara/speedtest-cli/issues).
+Do not include confidential or personal information in a public request.

@@ -94,3 +94,11 @@ Run `cargo test --locked --all-features` for all catalog/CLI/render contracts an
 `python .github/scripts/localization_smoke.py` after building for real Unix-terminal
 checks. The latter uses loopback only and explicitly skips on Windows. See
 [localization scope and checks](docs/localization.md).
+
+## Contribution license
+
+New contributions are accepted under the repository's [Source Available License
+1.0](LICENSE), unless a different agreement is explicitly made. Contributors retain
+their copyright. This is not a copyright assignment or an automatic grant to offer
+a contributor's work under separate proprietary terms. Preserve third-party
+notices and identify imported code and its license in the pull request.
