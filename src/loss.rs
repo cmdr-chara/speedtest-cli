@@ -27,11 +27,10 @@ impl PacketLossResult {
 }
 
 pub async fn measure(target: &str, count: u16) -> Result<PacketLossResult> {
-    let validated_target = validate_target(target)?;
-    ensure_target_resolves(validated_target).await?;
-    let target = validated_target.to_string();
+    let target = validate_target(target).map_err(anyhow::Error::msg)?;
+    ensure_target_resolves(&target).await?;
     let packets_sent = usize::from(count.clamp(3, 200));
-    let output = run_ping(validated_target, packets_sent, suggested_timeout(count)).await?;
+    let output = run_ping(&target, packets_sent, suggested_timeout(count)).await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -73,26 +72,26 @@ pub async fn measure(target: &str, count: u16) -> Result<PacketLossResult> {
     })
 }
 
-fn validate_target(target: &str) -> Result<&str> {
+pub fn validate_target(target: &str) -> std::result::Result<String, String> {
     if target.is_empty() {
-        anyhow::bail!("ping target cannot be empty");
+        return Err("ping target cannot be empty".to_string());
     }
     if target != target.trim() || target.chars().any(char::is_whitespace) {
-        anyhow::bail!("ping target must not contain whitespace");
+        return Err("ping target must not contain whitespace".to_string());
     }
     if target.starts_with('-') {
-        anyhow::bail!("ping target must not start with an option prefix (`-`)");
+        return Err("ping target must not start with an option prefix (`-`)".to_string());
     }
     if target.parse::<IpAddr>().is_ok() {
-        return Ok(target);
+        return Ok(target.to_string());
     }
     if !target.is_ascii() {
-        anyhow::bail!("ping target must be an IP address or an ASCII hostname");
+        return Err("ping target must be an IP address or an ASCII hostname".to_string());
     }
 
     let hostname = target.strip_suffix('.').unwrap_or(target);
     if hostname.is_empty() || hostname.len() > 253 {
-        anyhow::bail!("ping target is not a valid hostname");
+        return Err("ping target is not a valid hostname".to_string());
     }
     for label in hostname.split('.') {
         let valid_length = !label.is_empty() && label.len() <= 63;
@@ -108,10 +107,12 @@ fn validate_target(target: &str) -> Result<&str> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
         if !(valid_length && valid_edges && valid_characters) {
-            anyhow::bail!("ping target `{target}` is not a valid hostname or IP address");
+            return Err(format!(
+                "ping target `{target}` is not a valid hostname or IP address"
+            ));
         }
     }
-    Ok(target)
+    Ok(target.to_string())
 }
 
 async fn ensure_target_resolves(target: &str) -> Result<()> {

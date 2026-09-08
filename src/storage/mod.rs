@@ -2,14 +2,14 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
-use fs2::FileExt;
+use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
+use tempfile::NamedTempFile;
 
 use crate::{model::TestResult, stability::StabilityResult};
 
@@ -18,27 +18,42 @@ pub fn data_root() -> Result<PathBuf> {
 }
 
 pub fn persist_default(result: &TestResult) -> Result<(PathBuf, PathBuf)> {
-    let root = data_root()?;
-    let results_dir = root.join("results");
-    fs::create_dir_all(&results_dir).context("failed to create results directory")?;
-
-    let result_path = write_unique_timestamped_json(&results_dir, &result.timestamp, result)?;
-
-    let history_path = root.join("history.jsonl");
-    append_jsonl(&history_path, result)?;
-
-    Ok((result_path, history_path))
+    persist_at(&data_root()?, result.timestamp, result)
 }
 
 pub fn persist_stability(result: &StabilityResult) -> Result<(PathBuf, PathBuf)> {
-    let root = data_root()?;
-    let stability_root = root.join("stability");
-    let results_dir = stability_root.join("results");
-    fs::create_dir_all(&results_dir).context("failed to create stability results directory")?;
+    persist_at(&data_root()?.join("stability"), result.timestamp, result)
+}
 
-    let result_path = write_unique_timestamped_json(&results_dir, &result.timestamp, result)?;
-
-    let history_path = stability_root.join("history.jsonl");
+fn persist_at<T: Serialize>(
+    root: &Path,
+    timestamp: DateTime<Utc>,
+    result: &T,
+) -> Result<(PathBuf, PathBuf)> {
+    let results_dir = root.join("results");
+    fs::create_dir_all(&results_dir).context("failed to create results directory")?;
+    let stamp = timestamp.format("%Y%m%dT%H%M%S%.9fZ");
+    let mut pending = prepared_file(&results_dir, &json_bytes(result)?)?;
+    let mut sequence = 0_u64;
+    let result_path = loop {
+        let filename = if sequence == 0 {
+            format!("{stamp}.json")
+        } else {
+            format!("{stamp}-{sequence}.json")
+        };
+        let path = results_dir.join(filename);
+        match pending.persist_noclobber(&path) {
+            Ok(_) => break path,
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                pending = error.file;
+                sequence = sequence
+                    .checked_add(1)
+                    .context("too many result filename collisions")?;
+            }
+            Err(error) => return Err(error.error).context("failed to publish saved result"),
+        }
+    };
+    let history_path = root.join("history.jsonl");
     append_jsonl_value(&history_path, result)?;
     Ok((result_path, history_path))
 }
@@ -49,22 +64,20 @@ pub fn load_history() -> Result<Vec<TestResult>> {
 }
 
 pub fn load_history_since(days: u64) -> Result<Vec<TestResult>> {
-    let now = Utc::now();
-    let cutoff = now - ChronoDuration::days(days.min(i64::MAX as u64) as i64);
-    let mut results: Vec<_> = load_history()?
-        .into_iter()
-        .filter(|result| {
-            result.timestamp >= cutoff && is_plausible_history_timestamp(&result.timestamp, &now)
-        })
-        .collect();
-    results.sort_by_key(|result| result.timestamp);
-    Ok(results)
+    load_history_path_since(&data_root()?.join("history.jsonl"), history_cutoff(days))
+}
+
+fn history_cutoff(days: u64) -> DateTime<Utc> {
+    i64::try_from(days)
+        .ok()
+        .and_then(ChronoDuration::try_days)
+        .and_then(|duration| Utc::now().checked_sub_signed(duration))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
 pub fn read_result(path: &Path) -> Result<TestResult> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&content)
+    let file = File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    crate::check::read_result(file)
         .with_context(|| format!("failed to parse speed-test result from {}", path.display()))
 }
 
@@ -77,59 +90,100 @@ pub fn write_stability_json(path: &Path, result: &StabilityResult) -> Result<()>
 }
 
 pub fn write_csv(path: &Path, result: &TestResult) -> Result<()> {
-    ensure_parent(path)?;
-    let mut writer = csv::Writer::from_path(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
+    let mut writer = csv::Writer::from_writer(Vec::new());
     writer
         .serialize(CsvRecord::from(result))
         .context("failed to serialize CSV result")?;
-    writer.flush().context("failed to flush CSV result")?;
-    Ok(())
+    let content = writer.into_inner().context("failed to finish CSV result")?;
+    atomic_write(path, &content)
 }
 
 fn write_json_value<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    ensure_parent(path)?;
-    let content = serde_json::to_string_pretty(value).context("failed to serialize JSON output")?;
-    fs::write(path, format!("{content}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
+    atomic_write(path, &json_bytes(value)?)
 }
 
-fn write_unique_timestamped_json<T: Serialize>(
-    directory: &Path,
-    timestamp: &chrono::DateTime<Utc>,
-    value: &T,
-) -> Result<PathBuf> {
-    fs::create_dir_all(directory)
-        .with_context(|| format!("failed to create {}", directory.display()))?;
+fn json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     let mut content =
         serde_json::to_vec_pretty(value).context("failed to serialize JSON output")?;
     content.push(b'\n');
-    let stem = timestamp.format("%Y%m%dT%H%M%SZ").to_string();
+    Ok(content)
+}
 
-    for collision in 0_u64.. {
-        let filename = if collision == 0 {
-            format!("{stem}.json")
-        } else {
-            format!("{stem}-{collision}.json")
-        };
-        let path = directory.join(filename);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(&content)
-                    .with_context(|| format!("failed to write {}", path.display()))?;
-                file.flush()
-                    .with_context(|| format!("failed to flush {}", path.display()))?;
-                return Ok(path);
+fn prepared_file(directory: &Path, content: &[u8]) -> Result<NamedTempFile> {
+    let mut pending = tempfile::Builder::new()
+        .prefix(".speedtest-")
+        .tempfile_in(directory)
+        .context("failed to create temporary output")?;
+    pending
+        .write_all(content)
+        .context("failed to write temporary output")?;
+    pending
+        .as_file()
+        .sync_all()
+        .context("failed to sync output")?;
+    Ok(pending)
+}
+
+fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    ensure_parent(path)?;
+    // Follow output symlinks as ordinary file writes do, including a link to a
+    // target that has not been created yet. Never replace a device or named pipe.
+    let destination = output_destination(path)?;
+    let metadata = match fs::metadata(&destination) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("failed to inspect output destination"),
+    };
+    if metadata
+        .as_ref()
+        .is_some_and(|metadata| !metadata.is_file())
+    {
+        return fs::write(&destination, content)
+            .with_context(|| format!("failed to write {}", path.display()));
+    }
+    if metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.permissions().readonly())
+    {
+        bail!("output destination is read-only: {}", path.display());
+    }
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let pending = prepared_file(parent, content)?;
+    if let Some(metadata) = metadata {
+        pending
+            .as_file()
+            .set_permissions(metadata.permissions())
+            .context("failed to preserve output permissions")?;
+    }
+    pending
+        .persist(&destination)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(())
+}
+
+fn output_destination(path: &Path) -> Result<PathBuf> {
+    let mut destination = path.to_path_buf();
+    for _ in 0..40 {
+        match fs::symlink_metadata(&destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target =
+                    fs::read_link(&destination).context("failed to resolve output symlink")?;
+                destination = if target.is_absolute() {
+                    target
+                } else {
+                    destination.parent().unwrap_or(Path::new(".")).join(target)
+                };
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("failed to create {}", path.display()));
-            }
+            Ok(_) => return Ok(destination),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(destination),
+            Err(error) => return Err(error).context("failed to resolve output destination"),
         }
     }
-
-    unreachable!("u64 filename collision counter is exhaustive")
+    bail!("too many symbolic links in output destination")
 }
 
 fn ensure_parent(path: &Path) -> Result<()> {
@@ -141,79 +195,72 @@ fn ensure_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn append_jsonl(path: &Path, result: &TestResult) -> Result<()> {
-    append_jsonl_value(path, result)
-}
-
 fn append_jsonl_value<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    // Serialize before touching history: serialization failures must leave it intact.
+    let mut content = serde_json::to_vec(value).context("failed to serialize history record")?;
+    content.push(b'\n');
     ensure_parent(path)?;
-    let mut record = serde_json::to_vec(value).context("failed to serialize history record")?;
-    record.push(b'\n');
     let mut file = OpenOptions::new()
         .create(true)
         .read(true)
         .append(true)
         .open(path)
         .with_context(|| format!("failed to open {}", path.display()))?;
-    FileExt::lock_exclusive(&file).with_context(|| format!("failed to lock {}", path.display()))?;
-    if let Err(error) = file.write_all(&record) {
-        let _ = FileExt::unlock(&file);
+    // The file handle owns the lock, including on error. Readers take a shared lock.
+    file.lock().context("failed to lock history for writing")?;
+    let original_len = file.metadata().context("failed to inspect history")?.len();
+    if let Err(error) = file.write_all(&content) {
+        file.set_len(original_len)
+            .context("failed to undo incomplete history append")?;
         return Err(error).context("failed to append history record");
     }
-    if let Err(error) = file.flush() {
-        let _ = FileExt::unlock(&file);
-        return Err(error).context("failed to flush history record");
-    }
-    FileExt::unlock(&file).with_context(|| format!("failed to unlock {}", path.display()))?;
+    file.sync_data().context("failed to sync history record")?;
     Ok(())
 }
 
 fn load_history_path(path: &Path) -> Result<Vec<TestResult>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
+    load_history_path_since(path, DateTime::<Utc>::MIN_UTC)
+}
 
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    FileExt::lock_shared(&file)
-        .with_context(|| format!("failed to lock {} for reading", path.display()))?;
+fn load_history_path_since(path: &Path, cutoff: DateTime<Utc>) -> Result<Vec<TestResult>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to open {}", path.display()))
+        }
+    };
+    file.lock_shared()
+        .context("failed to lock history for reading")?;
     let mut reader = BufReader::new(file);
     let mut results = Vec::new();
-    let now = Utc::now();
-    for (index, line) in (&mut reader).split(b'\n').enumerate() {
-        let line = line.with_context(|| format!("failed reading history line {}", index + 1))?;
+    let mut line = Vec::new();
+    let mut index = 0_u64;
+    loop {
+        line.clear();
+        index += 1;
+        let length = reader
+            .by_ref()
+            .take(crate::check::MAX_RESULT_BYTES + 1)
+            .read_until(b'\n', &mut line)
+            .with_context(|| format!("failed reading history line {index}"))?;
+        if length == 0 {
+            break;
+        }
+        if length as u64 > crate::check::MAX_RESULT_BYTES {
+            bail!("history record on line {index} exceeds the 4 MiB input limit");
+        }
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_slice::<TestResult>(&line) {
-            Ok(result) => {
-                if !is_plausible_history_timestamp(&result.timestamp, &now) {
-                    eprintln!(
-                        "warning: retaining history record on line {} in {} even though timestamp {} is implausibly far in the future; time-window views will ignore it",
-                        index + 1,
-                        path.display(),
-                        result.timestamp.to_rfc3339()
-                    );
-                }
-                results.push(result);
-            }
-            Err(error) => eprintln!(
-                "warning: skipping invalid history record on line {} in {}: {error}",
-                index + 1,
-                path.display()
-            ),
+        let result = serde_json::from_slice::<TestResult>(&line)
+            .with_context(|| format!("invalid history record on line {index}"))?;
+        if result.timestamp >= cutoff {
+            results.push(result);
         }
     }
-    FileExt::unlock(reader.get_ref())
-        .with_context(|| format!("failed to unlock {} after reading", path.display()))?;
     results.sort_by_key(|result| result.timestamp);
     Ok(results)
-}
-
-fn is_plausible_history_timestamp(
-    timestamp: &chrono::DateTime<Utc>,
-    now: &chrono::DateTime<Utc>,
-) -> bool {
-    *timestamp <= *now + ChronoDuration::minutes(5)
 }
 
 #[derive(Serialize)]
@@ -333,13 +380,6 @@ fn unix_data_dir(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Opt
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashSet,
-        sync::{mpsc, Arc, Barrier},
-        thread,
-        time::Duration,
-    };
-
     use chrono::Utc;
     use tempfile::tempdir;
 
@@ -411,8 +451,8 @@ mod tests {
         let path = dir.path().join("history.jsonl");
         let mut earlier = result();
         earlier.timestamp -= ChronoDuration::minutes(1);
-        append_jsonl(&path, &result()).unwrap();
-        append_jsonl(&path, &earlier).unwrap();
+        append_jsonl_value(&path, &result()).unwrap();
+        append_jsonl_value(&path, &earlier).unwrap();
 
         let loaded = load_history_path(&path).unwrap();
         assert_eq!(loaded.len(), 2);
@@ -420,116 +460,153 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_history_appends_preserve_every_record() {
-        const WRITERS: usize = 64;
-
+    fn repeated_timestamps_preserve_every_saved_result() {
         let dir = tempdir().unwrap();
-        let path = Arc::new(dir.path().join("history.jsonl"));
-        let barrier = Arc::new(Barrier::new(WRITERS));
-        let handles: Vec<_> = (0..WRITERS)
-            .map(|index| {
-                let path = Arc::clone(&path);
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    let mut record = result();
-                    record.backend = format!("writer-{index}");
+        let mut saved = result();
+        let (first, history) = persist_at(dir.path(), saved.timestamp, &saved).unwrap();
+        saved.download.mbps = 250.0;
+        let (second, _) = persist_at(dir.path(), saved.timestamp, &saved).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(read_result(&first).unwrap().download.mbps, 100.0);
+        assert_eq!(read_result(&second).unwrap().download.mbps, 250.0);
+        assert_eq!(load_history_path(&history).unwrap().len(), 2);
+        assert_eq!(fs::read_dir(dir.path().join("results")).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn concurrent_saves_keep_complete_unique_results_and_history_records() {
+        let dir = tempdir().unwrap();
+        let saved = result();
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let dir = dir.path();
+                let barrier = &barrier;
+                let mut saved = saved.clone();
+                saved.server.name = "large field ".repeat(1024);
+                scope.spawn(move || {
                     barrier.wait();
-                    append_jsonl(&path, &record).unwrap();
-                })
-            })
-            .collect();
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        let loaded = load_history_path(&path).unwrap();
-        assert_eq!(loaded.len(), WRITERS);
-        let backends: HashSet<_> = loaded
-            .iter()
-            .map(|record| record.backend.as_str())
-            .collect();
-        assert_eq!(backends.len(), WRITERS);
-    }
-
-    #[test]
-    fn history_reader_waits_for_an_in_progress_locked_record() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("history.jsonl");
-        let serialized = serde_json::to_vec(&result()).unwrap();
-        let split = serialized.len() / 2;
-        let writer_path = path.clone();
-        let (started_tx, started_rx) = mpsc::channel();
-        let writer = thread::spawn(move || {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .read(true)
-                .append(true)
-                .open(writer_path)
-                .unwrap();
-            FileExt::lock_exclusive(&file).unwrap();
-            file.write_all(&serialized[..split]).unwrap();
-            file.flush().unwrap();
-            started_tx.send(()).unwrap();
-            thread::sleep(Duration::from_millis(25));
-            file.write_all(&serialized[split..]).unwrap();
-            file.write_all(b"\n").unwrap();
-            file.flush().unwrap();
-            FileExt::unlock(&file).unwrap();
+                    for index in 0..8 {
+                        saved.download.bytes = worker * 8 + index;
+                        persist_at(dir, saved.timestamp, &saved).unwrap();
+                    }
+                });
+            }
         });
-
-        started_rx.recv().unwrap();
-        let loaded = load_history_path(&path).unwrap();
-        writer.join().unwrap();
-        assert_eq!(loaded.len(), 1);
+        let mut records = load_history_path(&dir.path().join("history.jsonl")).unwrap();
+        records.sort_by_key(|result| result.download.bytes);
+        assert_eq!(records.len(), 64);
+        assert_eq!(
+            records
+                .iter()
+                .map(|result| result.download.bytes)
+                .collect::<Vec<_>>(),
+            (0..64).collect::<Vec<_>>()
+        );
+        let files: Vec<_> = fs::read_dir(dir.path().join("results")).unwrap().collect();
+        assert_eq!(files.len(), 64);
+        for file in files {
+            read_result(&file.unwrap().path()).unwrap();
+        }
     }
 
     #[test]
-    fn identical_timestamps_create_distinct_result_files() {
+    fn serialization_failure_leaves_previous_export_and_history_intact() {
+        struct FailingRecord;
+        impl Serialize for FailingRecord {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                use serde::ser::{Error, SerializeSeq};
+                let mut sequence = serializer.serialize_seq(Some(2))?;
+                sequence.serialize_element("partial")?;
+                Err(S::Error::custom("intentional serialization failure"))
+            }
+        }
         let dir = tempdir().unwrap();
-        let first = result();
-        let mut second = first.clone();
-        second.download.mbps = 200.0;
-
-        let first_path =
-            write_unique_timestamped_json(dir.path(), &first.timestamp, &first).unwrap();
-        let second_path =
-            write_unique_timestamped_json(dir.path(), &second.timestamp, &second).unwrap();
-
-        assert_ne!(first_path, second_path);
-        assert_eq!(read_result(&first_path).unwrap().download.mbps, 100.0);
-        assert_eq!(read_result(&second_path).unwrap().download.mbps, 200.0);
+        let export = dir.path().join("result.json");
+        let history = dir.path().join("history.jsonl");
+        write_json(&export, &result()).unwrap();
+        append_jsonl_value(&history, &result()).unwrap();
+        let original_export = fs::read(&export).unwrap();
+        let original_history = fs::read(&history).unwrap();
+        assert!(write_json_value(&export, &FailingRecord).is_err());
+        assert!(append_jsonl_value(&history, &FailingRecord).is_err());
+        assert_eq!(fs::read(&export).unwrap(), original_export);
+        assert_eq!(fs::read(&history).unwrap(), original_history);
     }
 
     #[test]
-    fn corrupt_history_line_does_not_hide_valid_records() {
+    fn failed_atomic_replacement_cleans_up_and_keeps_destination() {
+        let dir = tempdir().unwrap();
+        let destination = dir.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("keep"), "existing content").unwrap();
+        assert!(write_json(&destination, &result()).is_err());
+        assert_eq!(
+            fs::read_to_string(destination.join("keep")).unwrap(),
+            "existing content"
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn history_ranges_are_bounded_without_losing_timestamp_order() {
+        assert_eq!(history_cutoff(u64::MAX), DateTime::<Utc>::MIN_UTC);
+        assert_eq!(history_cutoff(i64::MAX as u64), DateTime::<Utc>::MIN_UTC);
         let dir = tempdir().unwrap();
         let path = dir.path().join("history.jsonl");
-        let first = result();
-        let mut second = result();
-        second.backend = "second".to_string();
-        let content = format!(
-            "{}\nnot valid json\n{}\n",
-            serde_json::to_string(&first).unwrap(),
-            serde_json::to_string(&second).unwrap()
+        let recent = result();
+        let mut old = recent.clone();
+        old.timestamp -= ChronoDuration::days(40);
+        append_jsonl_value(&path, &recent).unwrap();
+        append_jsonl_value(&path, &old).unwrap();
+        let filtered = load_history_path_since(&path, history_cutoff(30)).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].timestamp, recent.timestamp);
+        assert_eq!(
+            load_history_path_since(&path, history_cutoff(u64::MAX))
+                .unwrap()
+                .len(),
+            2
         );
-        fs::write(&path, content).unwrap();
+    }
 
-        let loaded = load_history_path(&path).unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert!(loaded.iter().any(|record| record.backend == "test"));
-        assert!(loaded.iter().any(|record| record.backend == "second"));
+    #[test]
+    fn oversized_and_corrupt_history_records_fail_with_line_context() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        append_jsonl_value(&path, &result()).unwrap();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{broken\n").unwrap();
+        assert!(load_history_path(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("line 2"));
+        fs::write(
+            &path,
+            vec![b'x'; crate::check::MAX_RESULT_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(load_history_path(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("4 MiB"));
+        assert!(read_result(&path)
+            .unwrap_err()
+            .chain()
+            .any(|error| error.to_string().contains("4 MiB")));
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn invalid_xdg_data_home_falls_back_only_to_absolute_home() {
-        let fallback = unix_data_dir(
-            Some(OsString::from("relative/xdg")),
-            Some(OsString::from("/home/example")),
-        );
+    fn relative_data_directories_are_rejected() {
         assert_eq!(
-            fallback,
+            unix_data_dir(
+                Some(OsString::from("relative/xdg")),
+                Some(OsString::from("/home/example")),
+            ),
             Some(PathBuf::from("/home/example/.local/share/speedtest"))
         );
         assert_eq!(
@@ -538,30 +615,30 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn implausibly_future_history_timestamp_is_retained_in_base_history() {
-        let now = Utc::now();
-        assert!(is_plausible_history_timestamp(
-            &(now + ChronoDuration::minutes(5)),
-            &now
-        ));
-        assert!(!is_plausible_history_timestamp(
-            &(now + ChronoDuration::minutes(6)),
-            &now
-        ));
-
+    fn atomic_export_preserves_symlinks_permissions_and_device_destinations() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
         let dir = tempdir().unwrap();
-        let path = dir.path().join("history.jsonl");
-        let mut future = result();
-        future.timestamp = now + ChronoDuration::days(365);
-        fs::write(
-            &path,
-            format!("{}\n", serde_json::to_string(&future).unwrap()),
-        )
-        .unwrap();
-
-        let loaded = load_history_path(&path).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].timestamp, future.timestamp);
+        let target = dir.path().join("target.json");
+        let link = dir.path().join("link.json");
+        symlink("target.json", &link).unwrap();
+        write_json(&link, &result()).unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(read_result(&target).unwrap().download.mbps, 100.0);
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        write_json(&link, &result()).unwrap();
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        write_json(Path::new("/dev/null"), &result()).unwrap();
+        assert!(!fs::metadata("/dev/null").unwrap().is_file());
+        fs::remove_file(&link).unwrap();
+        symlink("link.json", &link).unwrap();
+        assert!(write_json(&link, &result()).is_err());
     }
 }

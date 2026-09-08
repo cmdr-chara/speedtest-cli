@@ -1,254 +1,61 @@
-# speedtest-cli
+<h1 align="center">speedtest-cli</h1>
+
+<p align="center">
+  <strong>Know your speed. Understand your connection.</strong><br>
+  A terminal network lab for throughput, latency, bufferbloat, DNS, and connection history.<br>
+  Built with Rust. Keyboard driven. Ready for scripts.
+</p>
+
+<p align="center">
+  <a href="https://github.com/cmdr-chara/speedtest-cli/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/cmdr-chara/speedtest-cli?style=for-the-badge&amp;color=36c9b0"></a>
+  <a href="https://github.com/cmdr-chara/speedtest-cli/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/cmdr-chara/speedtest-cli/ci.yml?style=for-the-badge&amp;label=CI"></a>
+  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-80a5dc?style=for-the-badge"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/cmdr-chara/speedtest-cli/releases/latest"><strong>Download</strong></a>
+  &nbsp;•&nbsp;
+  <a href="#get-started">Get started</a>
+  &nbsp;•&nbsp;
+  <a href="#see-it-in-action">Screenshots</a>
+  &nbsp;•&nbsp;
+  <a href="./docs/usage.md">User guide</a>
+  &nbsp;•&nbsp;
+  <a href="https://github.com/cmdr-chara/speedtest-cli/issues">Get help</a>
+</p>
+
+<p align="center">
+  <img src="./docs/images/readme/home.png" width="960" alt="speedtest-cli dashboard with download and upload readings, measurement settings, and keyboard navigation">
+</p>
+
+<p align="center"><sub>Current development UI, captured from the application's renderer with illustrative test data. These are not measured connection speeds; published releases may differ.</sub></p>
+
+## Why speedtest-cli?
+
+A fast connection can still struggle with calls or games. speedtest-cli puts throughput beside latency under load, explains the result, and lets you compare it with earlier runs.
+
+- **See more than Mbps.** Measure download, upload, idle and loaded latency, jitter, and bufferbloat, with an explained quality score and workload grades.
+- **Find where performance changes.** Cross-check Cloudflare and LibreSpeed, inspect Wi-Fi, or test between two machines on your LAN.
+- **Keep a useful history.** Browse saved runs, spot trends, pin a baseline, and compare six metrics before and after a change.
+- **Investigate DNS and stability.** Inspect resolvers, benchmark UDP or DoH, monitor HTTP availability, and measure ICMP echo response loss separately.
+- **Use it your way.** An offline home dashboard, eight languages, four palettes, and plain text, JSON, and CSV for automation.
+
+## Download
+
+Download a native archive from [GitHub Releases](https://github.com/cmdr-chara/speedtest-cli/releases/latest). **Rust is not required** to run a prebuilt binary.
+
+| Your computer | Package |
+| --- | --- |
+| Windows · Intel / AMD 64-bit | [speedtest-windows-x86_64.zip](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-windows-x86_64.zip) |
+| Linux · Intel / AMD 64-bit | [speedtest-linux-x86_64.tar.gz](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-linux-x86_64.tar.gz) |
+| macOS · Apple Silicon | [speedtest-macos-aarch64.tar.gz](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-macos-aarch64.tar.gz) |
+| macOS · Intel | [speedtest-macos-x86_64.tar.gz](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-macos-x86_64.tar.gz) |
+
+Each archive has a matching `.sha256` file on the release page. Extract the archive and launch `speedtest` (`speedtest.exe` on Windows).
+
+<details>
+<summary><strong>Installation commands for Windows, Linux, and macOS</strong></summary>
 
-A fast, polished terminal network quality analyzer written in Rust.
-
-`speedtest-cli` measures throughput and latency, then explains how the connection behaves under load. It includes network-quality scoring, bufferbloat analysis, stability monitoring, historical intelligence, DNS diagnostics/configuration, multiple Internet backends, real ICMP loss testing, Wi-Fi inspection, and a self-hosted LAN mode.
-
-## Highlights
-
-- Download/upload throughput with concurrent streams
-- Idle and loaded latency, jitter, p95/p99 tails
-- Explainable 0–100 quality score with A+–F grades
-- Rare `◆ S-TIER` distinction for exceptional high-confidence runs
-- Bufferbloat and workload analysis for gaming, calls, streaming, and cloud gaming
-- Long-running stability mode
-- History, trends, sparklines, and anomaly detection
-- DNS inspection, health testing, benchmarking, configuration, rollback, and optimization
-- 20 built-in DNS resolver profiles across multiple providers
-- DNS-over-UDP and real DNS-over-HTTPS benchmarking
-- Cloudflare and LibreSpeed Internet backends
-- Backend cross-checking with `speedtest verify`
-- Real ICMP echo response-loss measurement with `speedtest loss`
-- Native Wi-Fi diagnostics on Windows, macOS, and Linux
-- Built-in self-hosted LAN speed-test server/client
-- JSON output, CSV export, per-run JSON, and JSONL history
-- Native release binaries for Windows, Linux, Intel macOS, and Apple Silicon macOS
-
-## v0.5 Network Lab
-
-### Adaptive Cloudflare backend
-
-The Cloudflare backend no longer depends on one fixed request such as:
-
-```text
-https://speed.cloudflare.com/__down?bytes=250000000
-```
-
-Large requests to the public endpoint can be rejected depending on endpoint policy, edge behavior, network, or request size. v0.5 uses a time-based adaptive download strategy instead: it starts with a moderate payload, scales up when responses complete quickly, and automatically downshifts when Cloudflare returns size/rejection statuses such as HTTP 403, 413, or 400. HTTP 429 still uses bounded `Retry-After`/backoff handling.
-
-The objective is to measure sustained throughput without making a successful test depend on one 250 MB response.
-
-### Multiple Internet backends
-
-Cloudflare remains the default:
-
-```bash
-speedtest
-speedtest --backend cloudflare
-```
-
-LibreSpeed is also available:
-
-```bash
-speedtest --backend librespeed
-```
-
-A compatible custom LibreSpeed installation can be selected with:
-
-```bash
-speedtest --backend librespeed --librespeed-server https://speed.example.com
-```
-
-The custom URL is treated as the LibreSpeed base URL and standard `garbage.php` / `empty.php` endpoints are assumed. It must use HTTP or HTTPS, include a host, and must not contain credentials, a query, or a fragment. Nested base paths are supported.
-
-### Backend verification
-
-Use both Internet engines to check whether a result is strongly backend/path dependent:
-
-```bash
-speedtest verify
-speedtest verify --duration 8 --streams 2
-speedtest verify --json
-```
-
-`verify` compares Cloudflare and LibreSpeed results rather than assuming a single public endpoint is ground truth.
-
-### Real ICMP response loss
-
-```bash
-speedtest loss
-speedtest loss --target 1.1.1.1 --count 50
-speedtest loss --json
-```
-
-This is a real ICMP echo response-loss measurement. It is deliberately separate from HTTP probe availability: HTTP failures, DNS failures, and endpoint throttling are **not** labeled packet loss.
-
-ICMP still has an important limitation: some hosts, routers, and firewalls block or deprioritize echo traffic, so ICMP loss can look worse than application traffic.
-
-### Wi-Fi diagnostics
-
-```bash
-speedtest wifi
-speedtest wifi --json
-speedtest wifi --interface Wi-Fi
-```
-
-Depending on the OS and driver/tooling, the report can include:
-
-- active interface
-- SSID
-- signal strength / estimated dBm
-- band
-- channel
-- PHY/link rate
-- radio metadata
-
-PHY/link rate is not presented as Internet throughput.
-
-### Self-hosted LAN mode
-
-Run a server on another machine in the LAN:
-
-```bash
-speedtest serve
-```
-
-Default bind address:
-
-```text
-0.0.0.0:9876
-```
-
-Then from another machine:
-
-```bash
-speedtest lan 192.168.1.50:9876
-speedtest lan 192.168.1.50:9876 --duration 10 --streams 4
-speedtest lan 192.168.1.50:9876 --json
-speedtest lan 192.168.1.50:9876 --output lan-result.csv --format csv
-speedtest lan 192.168.1.50:9876 --no-save
-```
-
-This gives you a local throughput/latency baseline. If LAN performance is poor, the problem is likely local before the ISP/WAN path is even involved.
-
-## DNS suite
-
-Inspect the current resolver configuration:
-
-```bash
-speedtest dns show
-speedtest dns list
-```
-
-Test the active resolver or explicit DNS server IPs:
-
-```bash
-speedtest dns test
-speedtest dns test --resolver 1.1.1.1 --resolver 8.8.8.8
-```
-
-Benchmark comparable resolver leagues over classic UDP/53:
-
-```bash
-speedtest dns benchmark
-speedtest dns benchmark --profile privacy
-speedtest dns benchmark --profile security
-speedtest dns benchmark --profile adblock
-speedtest dns benchmark --profile family
-```
-
-Benchmark providers using real DNS-over-HTTPS wire-format requests:
-
-```bash
-speedtest dns benchmark --protocol doh
-speedtest dns benchmark --profile privacy --protocol doh
-```
-
-DoH benchmarking performs connection warm-up separately so the measured query distribution is not simply the first TCP/TLS handshake time.
-
-Configure a known resolver profile:
-
-```bash
-speedtest dns set cloudflare --dry-run
-speedtest dns set cloudflare
-speedtest dns set quad9
-```
-
-Automatically benchmark a league and select the best eligible resolver:
-
-```bash
-speedtest dns optimize --dry-run
-speedtest dns optimize
-speedtest dns optimize --profile privacy
-speedtest dns optimize --profile security
-```
-
-Resolver winners and DNS changes require at least an 80% query-success rate. `set` and `optimize` also preflight the selected addresses immediately before any configuration change.
-
-Recovery:
-
-```bash
-speedtest dns rollback
-speedtest dns reset
-```
-
-DNS writes snapshot the existing configuration before applying changes, verify resolution afterward, and attempt automatic rollback if post-change validation fails. Changes are limited to the active network interface so verification follows the configuration being changed. On Linux, persistent automatic configuration currently requires NetworkManager; unmanaged resolver setups remain read-only.
-
-## Network Doctor and comparison
-
-```bash
-speedtest doctor
-speedtest doctor --full
-speedtest doctor --json
-```
-
-The lightweight doctor checks route/interface state, gateway latency where available, IPv4/IPv6 reachability, DNS health, HTTPS, and Wi-Fi context where available. `--full` also runs throughput/bufferbloat analysis.
-
-Compare the two latest saved runs:
-
-```bash
-speedtest compare
-```
-
-Or compare explicit canonical JSON results:
-
-```bash
-speedtest compare before.json after.json
-speedtest compare before.json after.json --json
-```
-
-## Stability
-
-`speedtest stability` continuously sends conservative HTTP probes instead of repeatedly saturating the connection:
-
-```bash
-speedtest stability
-speedtest stability --duration 5m
-speedtest stability --duration 5m --interval 750ms
-speedtest stability --plain
-speedtest stability --json
-```
-
-**HTTP probe availability is not packet loss.** A failed stability probe can be caused by endpoint throttling, route/server behavior, or the local connection. Use `speedtest loss` when you specifically want ICMP echo response-loss measurement.
-Probes skipped because an earlier request overran its schedule are included in the availability denominator and reported separately.
-
-## History and statistics
-
-```bash
-speedtest history
-speedtest history --days 30 --limit 50
-speedtest history --json
-
-speedtest stats
-speedtest stats --days 90
-speedtest stats --json
-```
-
-History/statistics include median/best throughput, latency statistics, quality context, S-tier counts, trend detection, a Unicode throughput sparkline, and latest-run anomaly detection against prior saved results. Statistics use Internet runs when any exist, otherwise LAN runs; implicit comparisons always pair runs from the same scope.
-
-## Installation
-
-### Prebuilt binaries
 
 GitHub Releases are the recommended installation method; Rust is not required.
 
@@ -271,12 +78,6 @@ speedtest
 
 The Linux release uses musl for broad distribution compatibility.
 
-Linux route/DNS diagnostics require `ip`; real ICMP loss measurement requires
-`ping` (normally `iputils-ping`), and Wi-Fi inspection requires `iw`.
-Persistent DNS changes additionally require a NetworkManager-managed connection
-and `nmcli`. Commands that do not need these helpers continue to work without
-them and report a clear unavailable status where appropriate.
-
 #### macOS
 
 ```bash
@@ -293,148 +94,144 @@ sudo install -m 0755 "speedtest-macos-${ASSET}/speedtest" /usr/local/bin/speedte
 
 Each packaged release includes SHA-256 checksum files.
 
-### Install from source
+
+</details>
+
+<details>
+<summary><strong>Build the current checkout</strong></summary>
+
+Requires the current stable Rust toolchain. From the repository directory:
 
 ```bash
-cargo install --locked --git https://github.com/cmdr-chara/speedtest-cli --branch main --force
-speedtest --version
+cargo build --release --locked --bin speedtest
+cargo run --release --locked --bin speedtest
 ```
 
-## Normal speed-test usage
+The executable is written to `target/release/speedtest` (`speedtest.exe` on Windows).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and verification instructions.
+
+</details>
+
+## Get started
 
 ```bash
-speedtest
-speedtest --backend cloudflare
-speedtest --backend librespeed
-speedtest --fps 144
-speedtest --plain
-speedtest --json
-speedtest --streams 4 --duration 10
-speedtest --output result.json
-speedtest --output result.csv --format csv
-speedtest --no-save
+speedtest                         # Open the dashboard
+speedtest --run                   # Start a test immediately
+speedtest --backend librespeed    # Open with LibreSpeed selected
+speedtest --plain                 # Run with plain text output
+speedtest --json                  # Run with JSON output
 ```
 
-Main options:
+1. Open `speedtest` in a terminal of at least **80 × 24** characters.
+2. Choose **Run Speed Test** and review the backend, duration, and streams.
+3. Start the test, then review throughput, latency, and connection quality.
+4. Open **History** to revisit a run or compare it with an earlier baseline.
 
-```text
---backend <BACKEND>          cloudflare or librespeed
---librespeed-server <URL>    custom LibreSpeed base URL
---streams <N>                concurrent transfer streams (default: 2)
---duration <SEC>             seconds for each throughput phase (default: 8)
---fps <N>                    interactive render cap, 30–240 FPS
---plain                      disable interactive TUI
---json                       print canonical JSON
---output <PATH>              also write completed result
---format <FORMAT>            json or csv
---no-save                    disable automatic history/result persistence
+Opening the interactive dashboard reads local history only. Network operations begin when you start them. Completed tests are saved locally unless you use `--no-save`.
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` or `k` / `j` | Select or scroll |
+| `Enter` | Open or confirm |
+| `Tab` / `Shift+Tab` | Switch sections |
+| `Esc` | Go back |
+| `b` / `c` in History | Pin a baseline / compare |
+| `?` / `q` | Keyboard guide / quit |
+
+[Full keyboard guide and cockpit behavior →](./docs/usage.md#network-cockpit)
+
+## See it in action
+
+### Watch the connection under load
+
+The live dial shows throughput alongside latency readings as the test progresses.
+
+<p align="center">
+  <img src="./docs/images/readme/live-demo.gif" width="960" alt="Animated speedtest-cli walkthrough from the dashboard into a live download measurement and back">
+</p>
+
+### Explore results and history
+
+Browse saved tests, pin a baseline, compare it with another run, and open the full result.
+
+<p align="center">
+  <img src="./docs/images/readme/cockpit-tour.gif" width="960" alt="Animated speedtest-cli tour through History, baseline comparison, Results, and back to Home">
+</p>
+
+<details>
+<summary><strong>View static result and comparison screenshots</strong></summary>
+
+Review the exact numbers, quality grade, bufferbloat, and findings in one place.
+
+<p align="center">
+  <img src="./docs/images/readme/results.png" width="960" alt="Completed result showing download, upload, latency, jitter, quality, and diagnostic findings">
+</p>
+
+Select a saved run and press `b` to pin it. Select another run and press `c` to compare download, upload, latency, jitter, quality, and bufferbloat.
+
+<p align="center">
+  <img src="./docs/images/readme/history.png" width="960" alt="Saved run history with throughput and quality columns and a preview of the selected result">
+</p>
+
+<p align="center">
+  <img src="./docs/images/readme/compare.png" width="960" alt="Pinned baseline comparison with before and after values, metric changes, and a verdict">
+</p>
+
+</details>
+
+<details>
+<summary><strong>Choose your language and appearance</strong></summary>
+
+English, Italian, Spanish, French, German, Portuguese, Simplified Chinese, and Japanese are available in **Settings → Language**, or with `speedtest --language it`.
+
+Choose Terminal (adaptive), Graphite, Light, or Monochrome, and Comfortable or Compact layouts. Settings apply to the current session. Use your terminal's font-size controls to enlarge all text; the interface reflows with the window.
+
+[Language and readability guide →](./docs/usage.md#interface-language-and-text-size)
+
+</details>
+
+All gallery images use deterministic fixtures rendered by the current application. [Capture details →](./docs/images/readme/README.md)
+
+## A network lab in one command
+
+| What you want to learn | Command |
+| --- | --- |
+| Do two Internet backends agree? | `speedtest verify` |
+| Is the local network the bottleneck? | `speedtest serve --bind 192.168.1.50:9876` on one machine, then `speedtest lan 192.168.1.50:9876` on another |
+| What does the network diagnosis show? | `speedtest doctor` |
+| How is the Wi-Fi link configured? | `speedtest wifi` |
+| Are ICMP echo responses being lost? | `speedtest loss --target 1.1.1.1 --count 50` |
+| Does HTTP availability stay consistent? | `speedtest stability --duration 5m` |
+| Which DNS resolvers respond well? | `speedtest dns benchmark --protocol doh` |
+| How has the connection changed? | `speedtest history` / `speedtest stats` / `speedtest compare` |
+
+LAN mode is unauthenticated and unencrypted; bind only on a trusted network and do not expose it to the Internet. HTTP availability and ICMP loss describe different behavior. Quality grades are explained local heuristics, not certifications. [Measurement semantics and limitations →](./docs/usage.md#accuracy-notes)
+
+DNS inspection and benchmarks are read-only. Configuration commands such as `dns set` and `dns optimize` change system settings; preview with `--dry-run` and read the [DNS and recovery guide](./docs/usage.md#dns-suite) first.
+
+## Made for scripts, too
+
+Export a result, then check it offline against your own thresholds:
+
+```bash
+speedtest --json --no-save > result.json
+speedtest check result.json --min-download 100 --min-upload 20 --max-latency 30
 ```
 
-The speedometer physics run independently of the render cap, so lowering `--fps` reduces terminal work without changing network measurements.
+A passing check exits **0**; failed thresholds exit **3**. JSON uses stable field names and units across interface languages. CSV export is available with `--output result.csv --format csv`.
 
-## Result semantics
+Read the [automation contract](./docs/usage.md#terminal-and-automation-behavior), [offline checks](./docs/usage.md#offline-checks-for-scripts), and [storage guarantees](./docs/usage.md#data-storage) for errors, cancellation, output streams, and concurrent jobs.
 
-Normal Internet and LAN tests use the existing canonical result structure:
+## Documentation and contributing
 
-```json
-{
-  "timestamp": "2026-08-20T14:00:00Z",
-  "backend": "cloudflare",
-  "server": {
-    "host": "speed.cloudflare.com",
-    "name": "Cloudflare Edge"
-  },
-  "latency": {
-    "idle_ms": 8.2,
-    "jitter_ms": 1.1,
-    "download_loaded_ms": 19.4,
-    "upload_loaded_ms": 82.7,
-    "packet_loss_percent": null
-  },
-  "download": {
-    "mbps": 842.6,
-    "bytes": 842600000,
-    "seconds": 8.0
-  },
-  "upload": {
-    "mbps": 193.4,
-    "bytes": 193400000,
-    "seconds": 8.0
-  }
-}
-```
+- [User guide](./docs/usage.md) — commands, installation, keyboard controls, DNS, result semantics, and storage.
+- [Contributing](./CONTRIBUTING.md) — build, test, and verification workflow.
+- [Architecture](./docs/network-cockpit.md) — cockpit state, services, and rendering.
+- [Verification reports](./docs/verification.md) — recorded checks and remaining limitations.
+- [Report an issue](https://github.com/cmdr-chara/speedtest-cli/issues) — include the command, platform, and relevant output.
 
-Standalone `speedtest loss` does not silently inject ICMP loss into an unrelated saved throughput run. That separation keeps protocol semantics explicit.
-
-## Data storage
-
-Completed Internet and LAN tests are stored in the platform data directory unless `--no-save` is used. Concurrent runs use locked history appends and collision-safe per-run filenames.
-
-```text
-speedtest/
-├── history.jsonl
-├── results/
-├── dns/
-│   └── last-backup.json
-└── stability/
-    ├── history.jsonl
-    └── results/
-```
-
-## Architecture
-
-```text
-src/
-├── analysis/
-├── bin/
-│   └── speedtest.rs
-├── dns/
-│   ├── doh.rs
-│   ├── mod.rs
-│   └── system.rs
-├── engine/
-│   ├── cloudflare_adaptive.rs
-│   ├── internet.rs
-│   ├── librespeed.rs
-│   └── mod.rs
-├── compare.rs
-├── doctor.rs
-├── history.rs
-├── lan.rs
-├── loss.rs
-├── model/
-├── stability.rs
-├── storage/
-├── tui/
-├── verify.rs
-├── wifi.rs
-└── lib.rs
-```
-
-Measurement, analysis, UI, persistence, DNS, local-network diagnostics, and backend implementations are kept separate so they can evolve independently.
-
-## Accuracy notes
-
-This is an independent CLI, not an official Cloudflare or LibreSpeed client. Results vary with routing, congestion, Wi-Fi conditions, endpoint behavior, protocol overhead, server capacity, and test methodology.
-
-The quality score, workload grades, stability grades, history trend, anomaly flags, and DNS scores are local heuristics rather than standardized certifications.
-
-A public speed-test server is part of the path being measured. Use `speedtest verify` when you need cross-backend evidence and `speedtest lan` when you need to isolate the local network from the WAN.
-
-ICMP echo loss measures ICMP echo response behavior; it does not prove every transport/application experiences identical loss.
-
-## Roadmap
-
-- deeper IPv4 vs IPv6 A/B workflow
-- VPN on/off comparison workflow
-- MTU and fragmentation diagnostics
-- TCP/TLS handshake decomposition
-- HTTP/2 vs HTTP/3 / QUIC diagnostics
-- DoT and DoQ active benchmarks
-- additional Internet measurement backends and server discovery
-- configurable but restrained TUI themes
-- Homebrew and WinGet packages
+speedtest-cli is an independent project, not an official Cloudflare or LibreSpeed client.
 
 ## License
 
-MIT
+[MIT](./LICENSE)

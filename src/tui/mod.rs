@@ -1,4 +1,7 @@
+mod cockpit;
+pub use cockpit::run as run_cockpit;
 mod app;
+mod numerals;
 mod speedometer;
 mod stability;
 mod view;
@@ -29,6 +32,7 @@ use self::app::App;
 const PHYSICS_RATE: Duration = Duration::from_nanos(4_166_667);
 
 pub async fn run(mut rx: UnboundedReceiver<EngineEvent>, render_fps: u16) -> Result<TestResult> {
+    let _guard = TerminalGuard;
     let mut terminal = enter_terminal()?;
     let result = run_loop(&mut terminal, &mut rx, render_fps).await;
     let restoration = restore_terminal(&mut terminal);
@@ -112,7 +116,7 @@ fn handle_input(app: &App) -> Result<Option<TestResult>> {
         || key.code == KeyCode::Esc
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
     {
-        return Err(anyhow!("speed test cancelled"));
+        return Err(crate::runtime::Outcome::Cancelled.into());
     }
 
     Ok(None)
@@ -199,6 +203,14 @@ pub(super) fn finish_terminal_session<T>(session: Result<T>, restoration: Result
         (Err(session_error), Err(restoration_error)) => Err(anyhow!(
             "terminal session failed: {session_error:#}; restoration also failed: {restoration_error:#}"
         )),
+    }
+}
+
+pub(super) struct TerminalGuard;
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
     }
 }
 

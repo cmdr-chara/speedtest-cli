@@ -1,39 +1,165 @@
 use std::{
-    io::{self, Write},
-    path::Path,
+    io::{self, IsTerminal, Write},
     time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use speedtest_cli::{
+    check,
     cli::{
-        Cli, Command, CompareArgs, DnsArgs, DnsBenchmarkArgs, DnsBenchmarkProfileArg, DnsCommand,
-        DnsListArgs, DnsOptimizeArgs, DnsProtocolArg, DnsResetArgs, DnsRollbackArgs, DnsSetArgs,
-        DnsShowArgs, DnsTestArgs, DoctorArgs, HistoryArgs, InternetBackendArg, LanArgs, LossArgs,
-        OutputFormat, ServeArgs, StabilityArgs, StatsArgs, VerifyArgs, WifiArgs,
+        CheckArgs, Cli, ColorMode, Command, CompareArgs, DnsArgs, DnsBenchmarkArgs,
+        DnsBenchmarkProfileArg, DnsCommand, DnsListArgs, DnsOptimizeArgs, DnsProtocolArg,
+        DnsResetArgs, DnsRollbackArgs, DnsSetArgs, DnsShowArgs, DnsTestArgs, DoctorArgs,
+        HistoryArgs, InternetBackendArg, LanArgs, LossArgs, ServeArgs, StabilityArgs, StatsArgs,
+        VerifyArgs, WifiArgs,
     },
     compare::{self, CompareResult},
     dns::{self, BenchmarkProfile, DnsBenchmarkResult, DnsProviderBenchmark},
     dns_custom,
     doctor::{self, DoctorReport},
-    engine::{
-        cloudflare::CloudflareEngine, internet::InternetEngine, librespeed::LibreSpeedEngine,
-        EngineConfig, EngineEvent,
-    },
+    engine::{cloudflare::CloudflareEngine, internet::InternetEngine, EngineConfig, EngineEvent},
     history::{self, HistorySummary},
-    lan, loss,
+    i18n, lan, loss,
     model::TestResult,
+    output, runtime,
+    session::TestOptions,
     stability::{self, StabilityResult},
     storage, tui, verify, wifi,
 };
 use tokio::sync::mpsc;
 
+// Every line write returns its I/O error instead of panicking on a closed pipe.
+macro_rules! println {
+    () => { output::line(format_args!(""))? };
+    ($($arg:tt)*) => { output::line(format_args!($($arg)*))? };
+}
+
+fn tr(key: &str) -> String {
+    i18n::text(i18n::cli_language(), key)
+}
+fn msg(key: &str, values: &[String]) -> String {
+    i18n::message(i18n::cli_language(), key, values)
+}
+fn narr(source: &str) -> String {
+    i18n::narrative(i18n::cli_language(), source)
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+async fn main() -> std::process::ExitCode {
+    // Clap's own help/error coloring uses the same explicit preference as the UI.
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let language = i18n::from_arguments(&arguments);
+    i18n::initialize_cli(language);
+    let mut color = ColorMode::Auto;
+    for (index, argument) in arguments.iter().enumerate() {
+        let value = argument.to_str().unwrap_or("");
+        let choice = value.strip_prefix("--color=").or_else(|| {
+            (value == "--color")
+                .then(|| arguments.get(index + 1).and_then(|s| s.to_str()))
+                .flatten()
+        });
+        if let Some(choice) = choice {
+            color = match choice {
+                "never" => ColorMode::Never,
+                "always" => ColorMode::Always,
+                _ => ColorMode::Auto,
+            };
+        }
+    }
+    let clap_color = if color == ColorMode::Always {
+        clap::ColorChoice::Always
+    } else if !color.allows_tui() {
+        clap::ColorChoice::Never
+    } else {
+        clap::ColorChoice::Auto
+    };
+    let matches = i18n::command(Cli::command(), language)
+        .color(clap_color)
+        .get_matches_from(arguments);
+    if matches.subcommand().is_some() {
+        for name in [
+            "run",
+            "timeout",
+            "backend",
+            "librespeed_server",
+            "streams",
+            "duration",
+            "fps",
+            "plain",
+            "json",
+            "output",
+            "format",
+            "no_save",
+        ] {
+            if matches.value_source(name) == Some(clap::parser::ValueSource::CommandLine) {
+                Cli::command().error(clap::error::ErrorKind::ArgumentConflict,
+                    msg("--{0} is a default speed-test option; place subcommand options after the command", &[name.replace('_', "-").to_string()])).exit();
+            }
+        }
+    }
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    if cli.command.is_none()
+        && cli.librespeed_server.is_some()
+        && !matches!(cli.backend, InternetBackendArg::Librespeed)
+    {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--librespeed-server requires --backend librespeed; no measurement was started",
+            )
+            .exit();
+    }
+    let json = cli.json_requested();
+    // DNS writes retain their existing transaction/rollback lifecycle. Do not drop
+    // a configuration transaction halfway through because a generic select fired.
+    let interruptible = matches!(
+        cli.command,
+        None | Some(Command::Stability(_))
+            | Some(Command::Loss(_))
+            | Some(Command::Verify(_))
+            | Some(Command::Lan(_))
+            | Some(Command::Serve(_))
+    );
+    let result = if interruptible {
+        runtime::interruptible(dispatch(cli)).await
+    } else {
+        dispatch(cli).await
+    };
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            let code = runtime::exit_code(&error);
+            if code != 0 && code != 3 {
+                if json {
+                    let error =
+                        serde_json::json!({"error":{"code":code,"message":format!("{error:#}")}});
+                    let _ = output::diagnostic(format_args!("{error}"));
+                } else {
+                    let _ = output::diagnostic(format_args!("speedtest: {error:#}"));
+                }
+            }
+            std::process::ExitCode::from(code)
+        }
+    }
+}
+
+async fn dispatch(mut cli: Cli) -> Result<()> {
+    let can_interact = io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && cli.color.allows_tui()
+        && !matches!(cli.progress, speedtest_cli::cli::ProgressMode::Never);
+    if !can_interact && !cli.json {
+        cli.plain = true;
+    }
     match cli.command.clone() {
-        Some(Command::Stability(args)) => run_stability(args).await,
+        Some(Command::Check(args)) => run_check(args),
+        Some(Command::Stability(mut args)) => {
+            if !can_interact && !args.json {
+                args.plain = true;
+            }
+            run_stability(args).await
+        }
         Some(Command::History(args)) => run_history(args),
         Some(Command::Stats(args)) => run_stats(args),
         Some(Command::Dns(args)) => run_dns(args).await,
@@ -44,41 +170,36 @@ async fn main() -> Result<()> {
         Some(Command::Verify(args)) => run_verify(args).await,
         Some(Command::Serve(args)) => run_serve(args).await,
         Some(Command::Lan(args)) => run_lan(args).await,
+        None if can_interact && !cli.plain && !cli.json && !cli.run => {
+            tui::run_cockpit(TestOptions::from(&cli)).await
+        }
         None => run_speedtest(cli).await,
     }
 }
 
 async fn run_speedtest(cli: Cli) -> Result<()> {
-    if cli.librespeed_server.is_some() && !matches!(cli.backend, InternetBackendArg::Librespeed) {
-        bail!("--librespeed-server requires --backend librespeed");
-    }
-    let config = EngineConfig {
-        streams: usize::from(cli.streams),
-        phase_duration: Duration::from_secs(cli.duration),
-    };
-    let engine = match cli.backend {
-        InternetBackendArg::Cloudflare => {
-            InternetEngine::Cloudflare(CloudflareEngine::new(config)?)
-        }
-        InternetBackendArg::Librespeed => InternetEngine::LibreSpeed(LibreSpeedEngine::new(
-            config,
-            cli.librespeed_server.as_deref(),
-        )?),
-    };
+    let options = TestOptions::from(&cli);
+    let engine = options.engine()?;
 
     let result = if cli.plain || cli.json {
-        run_non_interactive(&engine).await?
+        run_non_interactive(
+            &engine,
+            Duration::from_secs(cli.timeout),
+            cli.progress.enabled_for(cli.json),
+        )
+        .await?
     } else {
-        run_interactive(engine, cli.fps).await?
+        run_interactive(engine, cli.fps, Duration::from_secs(cli.timeout)).await?
     };
 
+    options.finish(&result)?;
     if cli.json {
         println!("{}", result.pretty_json()?);
-    } else if cli.plain {
-        print_result(&result);
+    } else {
+        print_result(&result)?;
     }
 
-    write_and_persist_result(&result, cli.output.as_deref(), cli.format, cli.no_save)
+    Ok(())
 }
 
 async fn run_stability(args: StabilityArgs) -> Result<()> {
@@ -90,16 +211,16 @@ async fn run_stability(args: StabilityArgs) -> Result<()> {
         run_interactive_stability(duration, interval, args.fps).await?
     };
 
-    if args.json {
-        println!("{}", result.pretty_json()?);
-    } else if args.plain {
-        print_stability(&result);
-    }
     if let Some(path) = &args.output {
         storage::write_stability_json(path, &result)?;
     }
     if !args.no_save {
         storage::persist_stability(&result).context("failed to persist stability history")?;
+    }
+    if args.json {
+        println!("{}", result.pretty_json()?);
+    } else {
+        print_stability(&result)?;
     }
     Ok(())
 }
@@ -112,20 +233,28 @@ fn run_history(args: HistoryArgs) -> Result<()> {
     }
     if results.is_empty() {
         println!(
-            "No saved speed-test results in the last {} days.",
-            args.days
+            "{}",
+            msg(
+                "No saved speed-test results in the last {0} days.",
+                &[format!("{}", args.days)]
+            )
         );
         return Ok(());
     }
 
     let summary = history::summarize(&results, args.days).expect("non-empty history has summary");
     println!(
-        "SPEEDTEST HISTORY · {} DAYS · {} RUNS",
-        args.days,
-        results.len()
+        "{}",
+        msg(
+            "SPEEDTEST HISTORY · {0} DAYS · {1} RUNS",
+            &[format!("{}", args.days), format!("{}", results.len())]
+        )
     );
     println!();
-    println!("  DATE / UTC         BACKEND       DOWNLOAD     UPLOAD       PING      QUALITY");
+    println!(
+        "{}",
+        tr("  DATE / UTC         BACKEND       DOWNLOAD     UPLOAD       PING      QUALITY")
+    );
     println!(
         "  ─────────────────  ────────────  ───────────  ───────────  ────────  ─────────────"
     );
@@ -141,22 +270,35 @@ fn run_history(args: HistoryArgs) -> Result<()> {
             },
         );
         println!(
-            "  {:<17}  {:<12}  {:>8.1} M  {:>8.1} M  {:>6.1}ms  {}",
-            result.timestamp.format("%Y-%m-%d %H:%M"),
-            truncate(&result.backend, 12),
-            result.download.mbps,
-            result.upload.mbps,
-            result.latency.idle_ms,
-            quality
+            "{}",
+            msg(
+                "  {0}  {1}  {2} M  {3} M  {4}ms  {5}",
+                &[
+                    format!("{:<17}", result.timestamp.format("%Y-%m-%d %H:%M")),
+                    format!("{:<12}", truncate(&result.backend, 12)),
+                    format!("{:>8.1}", result.download.mbps),
+                    format!("{:>8.1}", result.upload.mbps),
+                    format!("{:>6.1}", result.latency.idle_ms),
+                    quality.to_string()
+                ]
+            )
         );
     }
     println!();
     println!(
-        "  Download trend ({})  {}",
-        summary.scope.label(),
-        summary.download_sparkline
+        "{}",
+        msg(
+            "  Download trend  {0}",
+            std::slice::from_ref(&summary.download_sparkline)
+        )
     );
-    println!("  Trend                 {}", summary.trend.label());
+    println!(
+        "{}",
+        msg(
+            "  Trend           {0}",
+            &[tr(summary.trend.label()).to_string()]
+        )
+    );
     Ok(())
 }
 
@@ -167,8 +309,11 @@ fn run_stats(args: StatsArgs) -> Result<()> {
             println!("null");
         } else {
             println!(
-                "No saved speed-test results in the last {} days.",
-                args.days
+                "{}",
+                msg(
+                    "No saved speed-test results in the last {0} days.",
+                    &[format!("{}", args.days)]
+                )
             );
         }
         return Ok(());
@@ -176,7 +321,7 @@ fn run_stats(args: StatsArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
-        print_stats(&summary);
+        print_stats(&summary)?;
     }
     Ok(())
 }
@@ -218,15 +363,24 @@ fn run_dns_list(args: DnsListArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("DNS PROVIDERS · {} PROFILES", dns::PROVIDERS.len());
+    println!(
+        "{}",
+        msg(
+            "DNS PROVIDERS · {0} PROFILES",
+            &[format!("{}", dns::PROVIDERS.len())]
+        )
+    );
     println!();
-    println!("  ID                       TYPE         DNS53  DoH  DoT  DoQ  DNSSEC");
+    println!(
+        "{}",
+        tr("  ID                       TYPE         DNS53  DoH  DoT  DoQ  DNSSEC")
+    );
     println!("  ───────────────────────  ───────────  ─────  ───  ───  ───  ──────");
     for provider in dns::PROVIDERS {
         println!(
             "  {:<23}  {:<11}    {}    {}    {}    {}      {}",
             provider.id,
-            provider.category.label(),
+            tr(provider.category.label()),
             yes(!provider.ipv4.is_empty()),
             yes(provider.doh.is_some()),
             yes(provider.dot.is_some()),
@@ -243,26 +397,62 @@ fn run_dns_show(args: DnsShowArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&state)?);
         return Ok(());
     }
-    println!("DNS CONFIGURATION");
+    println!("{}", tr("DNS CONFIGURATION"));
     println!();
     println!(
-        "  Interface:      {}",
-        escape_terminal_controls(&state.interface)
+        "{}",
+        msg(
+            "  Interface:      {0}",
+            std::slice::from_ref(&state.interface)
+        )
     );
     if let Some(device) = &state.device {
-        println!("  Device/profile: {}", escape_terminal_controls(device));
+        println!(
+            "{}",
+            msg("  Device/profile: {0}", std::slice::from_ref(device))
+        );
     }
     println!(
-        "  Backend:        {}",
-        escape_terminal_controls(&state.backend)
+        "{}",
+        msg(
+            "  Backend:        {0}",
+            std::slice::from_ref(&state.backend)
+        )
     );
-    println!("  Source:         {}", state.mode.label());
-    println!("  DNS servers:    {}", format_servers(&state.servers));
+    println!(
+        "{}",
+        msg(
+            "  Source:         {0}",
+            &[tr(state.mode.label()).to_string()]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  DNS servers:    {0}",
+            &[format_servers(&state.servers).to_string()]
+        )
+    );
     if let Some(gateway) = state.gateway {
-        println!("  Gateway:        {gateway}");
+        println!(
+            "{}",
+            msg("  Gateway:        {0}", &[format!("{}", gateway)])
+        );
     }
-    println!("  IPv6 default:   {}", yes(state.ipv6_default_route));
-    println!("  Writable:       {}", yes(state.can_configure()));
+    println!(
+        "{}",
+        msg(
+            "  IPv6 default:   {0}",
+            &[yes(state.ipv6_default_route).to_string()]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Writable:       {0}",
+            &[yes(state.can_configure()).to_string()]
+        )
+    );
     Ok(())
 }
 
@@ -275,7 +465,7 @@ async fn run_dns_test(args: DnsTestArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        print_dns_test(&result);
+        print_dns_test(&result)?;
     }
     Ok(())
 }
@@ -289,7 +479,7 @@ async fn run_dns_benchmark(args: DnsBenchmarkArgs) -> Result<()> {
     if args.json {
         println!("{}", result.pretty_json()?);
     } else {
-        print_dns_benchmark(&result);
+        print_dns_benchmark(&result)?;
     }
     Ok(())
 }
@@ -324,13 +514,13 @@ async fn run_dns_set(args: DnsSetArgs) -> Result<()> {
         );
     }
 
-    print_dns_change(&state, &provider.display_name(), &servers);
+    print_dns_change(&state, &provider.display_name(), &servers)?;
     if args.dry_run {
-        println!("DRY RUN · no DNS settings were changed.");
+        println!("{}", tr("DRY RUN · no DNS settings were changed."));
         return Ok(());
     }
     if !args.yes && !confirm("Apply this DNS configuration?")? {
-        println!("No changes made.");
+        println!("{}", tr("No changes made."));
         return Ok(());
     }
     apply_dns_change(&state, &servers, &provider.display_name()).await
@@ -338,13 +528,16 @@ async fn run_dns_set(args: DnsSetArgs) -> Result<()> {
 
 async fn run_dns_optimize(args: DnsOptimizeArgs) -> Result<()> {
     let benchmark = dns::benchmark(dns_profile(args.profile), usize::from(args.queries)).await?;
-    print_dns_benchmark(&benchmark);
+    print_dns_benchmark(&benchmark)?;
     let winner = benchmark
         .winner()
         .ok_or_else(|| anyhow!("no DNS resolver completed enough queries to select a winner"))?;
     if winner.is_current {
         println!();
-        println!("◆ Your current DNS already won this resolver league. No change recommended.");
+        println!(
+            "{}",
+            tr("◆ Your current DNS already won this resolver league. No change recommended.")
+        );
         return Ok(());
     }
     let provider = dns::provider(&winner.provider_id)
@@ -357,30 +550,37 @@ async fn run_dns_optimize(args: DnsOptimizeArgs) -> Result<()> {
         );
     }
     let servers = provider.addresses_for_routes(state.ipv4_default_route, state.ipv6_default_route);
-    let preflight = dns_custom::test_servers(servers.clone(), 6).await?;
-    if preflight.success_rate_percent < 80.0 {
-        bail!(
-            "refusing to configure {} because preflight DNS success was only {:.0}%",
-            provider.display_name(),
-            preflight.success_rate_percent
-        );
-    }
     println!();
-    println!("DNS OPTIMIZER RECOMMENDATION");
-    println!("  Winner:         {}", provider.display_name());
+    println!("{}", tr("DNS OPTIMIZER RECOMMENDATION"));
+    println!(
+        "{}",
+        msg(
+            "  Winner:         {0}",
+            &[provider.display_name().to_string()]
+        )
+    );
     if let Some(latency) = &winner.latency {
         println!(
-            "  Median / p95:   {:.1} / {:.1} ms",
-            latency.median_ms, latency.p95_ms
+            "{}",
+            msg(
+                "  Median / p95:   {0} / {1} ms",
+                &[
+                    format!("{:.1}", latency.median_ms),
+                    format!("{:.1}", latency.p95_ms)
+                ]
+            )
         );
     }
-    print_dns_change(&state, &provider.display_name(), &servers);
+    print_dns_change(&state, &provider.display_name(), &servers)?;
     if args.dry_run {
-        println!("DRY RUN · benchmark completed; no DNS settings were changed.");
+        println!(
+            "{}",
+            tr("DRY RUN · benchmark completed; no DNS settings were changed.")
+        );
         return Ok(());
     }
     if !args.yes && !confirm("Apply the recommended DNS configuration?")? {
-        println!("No changes made.");
+        println!("{}", tr("No changes made."));
         return Ok(());
     }
     apply_dns_change(&state, &servers, &provider.display_name()).await
@@ -388,15 +588,21 @@ async fn run_dns_optimize(args: DnsOptimizeArgs) -> Result<()> {
 
 async fn run_dns_reset(args: DnsResetArgs) -> Result<()> {
     let state = dns::system::inspect(args.interface.as_deref())?;
-    println!("DNS RESET");
+    println!("{}", tr("DNS RESET"));
     println!(
-        "  Interface: {}",
-        escape_terminal_controls(&state.interface)
+        "{}",
+        msg("  Interface: {0}", std::slice::from_ref(&state.interface))
     );
-    println!("  Current:   {}", format_servers(&state.servers));
-    println!("  Target:    automatic / DHCP-managed DNS");
+    println!(
+        "{}",
+        msg(
+            "  Current:   {0}",
+            &[format_servers(&state.servers).to_string()]
+        )
+    );
+    println!("{}", tr("  Target:    automatic / DHCP-managed DNS"));
     if args.dry_run {
-        println!("DRY RUN · no DNS settings were changed.");
+        println!("{}", tr("DRY RUN · no DNS settings were changed."));
         return Ok(());
     }
     if !state.can_configure() {
@@ -406,7 +612,7 @@ async fn run_dns_reset(args: DnsResetArgs) -> Result<()> {
         );
     }
     if !args.yes && !confirm("Reset this interface to automatic DNS?")? {
-        println!("No changes made.");
+        println!("{}", tr("No changes made."));
         return Ok(());
     }
 
@@ -418,9 +624,7 @@ async fn run_dns_reset(args: DnsResetArgs) -> Result<()> {
         match dns::system::restore(&state) {
             Ok(()) => {
                 dns::system::flush_cache();
-                bail!(
-                    "DNS reset failed ({error:#}); the previous configuration was restored"
-                );
+                bail!("DNS reset failed ({error:#}); the previous configuration was restored");
             }
             Err(rollback_error) => bail!(
                 "DNS reset failed ({error:#}) and rollback also failed ({rollback_error:#}); snapshot: {}",
@@ -440,26 +644,50 @@ async fn run_dns_reset(args: DnsResetArgs) -> Result<()> {
         }
         bail!("automatic DNS verification failed ({error:#}); previous DNS was restored");
     }
-    println!("✓ DNS returned to automatic configuration and passed post-change resolution.");
+    println!(
+        "{}",
+        tr("✓ DNS returned to automatic configuration and passed post-change resolution.")
+    );
     Ok(())
 }
 
 async fn run_dns_rollback(args: DnsRollbackArgs) -> Result<()> {
     let backup = dns::load_backup()?;
-    println!("DNS ROLLBACK");
-    println!("  Snapshot:   {}", backup.timestamp.to_rfc3339());
+    println!("{}", tr("DNS ROLLBACK"));
     println!(
-        "  Interface:  {}",
-        escape_terminal_controls(&backup.state.interface)
+        "{}",
+        msg(
+            "  Snapshot:   {0}",
+            &[backup.timestamp.to_rfc3339().to_string()]
+        )
     );
-    println!("  Mode:       {}", backup.state.mode.label());
-    println!("  Servers:    {}", format_servers(&backup.state.servers));
+    println!(
+        "{}",
+        msg(
+            "  Interface:  {0}",
+            std::slice::from_ref(&backup.state.interface)
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Mode:       {0}",
+            &[tr(backup.state.mode.label()).to_string()]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Servers:    {0}",
+            &[format_servers(&backup.state.servers).to_string()]
+        )
+    );
     if args.dry_run {
-        println!("DRY RUN · rollback snapshot was not applied.");
+        println!("{}", tr("DRY RUN · rollback snapshot was not applied."));
         return Ok(());
     }
     if !args.yes && !confirm("Restore this DNS snapshot?")? {
-        println!("No changes made.");
+        println!("{}", tr("No changes made."));
         return Ok(());
     }
     let _operation = dns::lock_operation()?;
@@ -489,7 +717,7 @@ async fn run_dns_rollback(args: DnsRollbackArgs) -> Result<()> {
             ),
         }
     }
-    println!("✓ Previous DNS snapshot restored and verified.");
+    println!("{}", tr("✓ Previous DNS snapshot restored and verified."));
     Ok(())
 }
 
@@ -506,9 +734,7 @@ async fn apply_dns_change(
         match dns::system::restore(&state) {
             Ok(()) => {
                 dns::system::flush_cache();
-                bail!(
-                    "DNS configuration failed ({error:#}); the previous configuration was restored"
-                );
+                bail!("DNS configuration failed ({error:#}); the previous configuration was restored");
             }
             Err(rollback_error) => bail!(
                 "DNS configuration failed ({error:#}) and rollback failed ({rollback_error:#}); recovery snapshot: {}",
@@ -530,9 +756,15 @@ async fn apply_dns_change(
             ),
         }
     }
-    println!("✓ {label} configured successfully.");
-    println!("✓ Resolver cache flushed and system DNS verification passed.");
-    println!("  Rollback: speedtest dns rollback");
+    println!(
+        "{}",
+        msg("✓ {0} configured successfully.", &[label.to_string()])
+    );
+    println!(
+        "{}",
+        tr("✓ Resolver cache flushed and system DNS verification passed.")
+    );
+    println!("{}", tr("  Rollback: speedtest dns rollback"));
     Ok(())
 }
 
@@ -541,9 +773,7 @@ fn revalidate_dns_mutation_state(
 ) -> Result<dns::system::DnsSystemState> {
     let current = dns::system::inspect(Some(&original.interface))?;
     if &current != original {
-        bail!(
-            "DNS or route state changed while awaiting confirmation; review the new state and rerun the command"
-        );
+        bail!("DNS or route state changed while awaiting confirmation; review the new state and rerun the command");
     }
     ensure_active_dns_mutation_target(&current)?;
     if !current.can_configure() {
@@ -580,11 +810,13 @@ fn run_compare(args: CompareArgs) -> Result<()> {
         }
         (None, None) => {
             let history = storage::load_history()?;
-            history::latest_comparable_pair(&history).ok_or_else(|| {
-                anyhow!(
-                    "compare requires two saved results from the same Internet/LAN scope or explicit BEFORE and AFTER JSON files"
-                )
-            })?
+            if history.len() < 2 {
+                bail!("compare requires two saved results or explicit BEFORE and AFTER JSON files");
+            }
+            (
+                history[history.len() - 2].clone(),
+                history[history.len() - 1].clone(),
+            )
         }
         _ => bail!("supply both BEFORE and AFTER JSON files, or omit both"),
     };
@@ -592,7 +824,7 @@ fn run_compare(args: CompareArgs) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&comparison)?);
     } else {
-        print_comparison(&comparison);
+        print_comparison(&comparison)?;
     }
     Ok(())
 }
@@ -600,35 +832,19 @@ fn run_compare(args: CompareArgs) -> Result<()> {
 async fn run_doctor(args: DoctorArgs) -> Result<()> {
     let mut report = doctor::run(args.interface.as_deref()).await?;
     if args.full {
-        let routing_blocked = report.checks.iter().any(|check| {
-            (check.name == "Default route" && check.status == doctor::DoctorStatus::Fail)
-                || (check.name == "Probe routing"
-                    && check.status == doctor::DoctorStatus::NotAvailable)
-        });
-        let full_result = if routing_blocked {
-            Err(anyhow!(
-                "full speed test skipped because active probes cannot be attributed safely to the selected interface"
-            ))
-        } else {
-            match CloudflareEngine::new(EngineConfig {
-                streams: 2,
-                phase_duration: Duration::from_secs(8),
-            }) {
-                Ok(engine) => run_non_interactive(&InternetEngine::Cloudflare(engine))
-                    .await
-                    .context("full doctor speed test failed"),
-                Err(error) => Err(error.context("failed to initialize full doctor speed test")),
-            }
-        };
-        match full_result {
-            Ok(result) => report.attach_speedtest(result),
-            Err(error) => report.attach_speedtest_failure(&error),
-        }
+        let engine = InternetEngine::Cloudflare(CloudflareEngine::new(EngineConfig {
+            streams: 2,
+            phase_duration: Duration::from_secs(8),
+        })?);
+        let result = run_non_interactive(&engine, Duration::from_secs(120), false)
+            .await
+            .context("full doctor speed test failed")?;
+        report.attach_speedtest(result);
     }
     if args.json {
         println!("{}", report.pretty_json()?);
     } else {
-        print_doctor(&report);
+        print_doctor(&report)?;
     }
     Ok(())
 }
@@ -638,7 +854,7 @@ async fn run_loss(args: LossArgs) -> Result<()> {
     if args.json {
         println!("{}", result.pretty_json()?);
     } else {
-        print_packet_loss(&result);
+        print_packet_loss(&result)?;
     }
     Ok(())
 }
@@ -648,7 +864,7 @@ fn run_wifi(args: WifiArgs) -> Result<()> {
     if args.json {
         println!("{}", result.pretty_json()?);
     } else {
-        print_wifi(&result);
+        print_wifi(&result)?;
     }
     Ok(())
 }
@@ -665,13 +881,31 @@ async fn run_verify(args: VerifyArgs) -> Result<()> {
     if args.json {
         println!("{}", report.pretty_json()?);
     } else {
-        print_verify(&report);
+        print_verify(&report)?;
     }
     Ok(())
 }
 
 async fn run_serve(args: ServeArgs) -> Result<()> {
-    lan::serve(args.bind).await
+    let listener = tokio::net::TcpListener::bind(args.bind)
+        .await
+        .context("failed to bind LAN server")?;
+    let bound = listener.local_addr()?;
+    println!("{}", tr("LAN SPEEDTEST SERVER"));
+    println!("{}", msg("  Listening: {0}", &[format!("{}", bound)]));
+    println!(
+        "{}",
+        msg(
+            "  Client:    speedtest lan <this-host>:{0}",
+            &[format!("{}", bound.port())]
+        )
+    );
+    println!("{}", tr("  Stop with Ctrl+C."));
+    if !bound.ip().is_loopback() {
+        output::diagnostic(format_args!("Warning: unauthenticated LAN service; use only on a trusted network with firewall rules."))?;
+    }
+    io::stdout().flush()?;
+    lan::serve_listener(listener).await
 }
 
 async fn run_lan(args: LanArgs) -> Result<()> {
@@ -686,65 +920,39 @@ async fn run_lan(args: LanArgs) -> Result<()> {
     if args.json {
         println!("{}", result.pretty_json()?);
     } else {
-        print_result(&result);
-    }
-    write_and_persist_result(&result, args.output.as_deref(), args.format, args.no_save)
-}
-
-fn write_and_persist_result(
-    result: &TestResult,
-    output: Option<&Path>,
-    format: OutputFormat,
-    no_save: bool,
-) -> Result<()> {
-    if let Some(path) = output {
-        match format {
-            OutputFormat::Json => storage::write_json(path, result)?,
-            OutputFormat::Csv => storage::write_csv(path, result)?,
-        }
-    }
-    if !no_save {
-        storage::persist_default(result).context("failed to persist speed-test history")?;
+        print_result(&result)?;
     }
     Ok(())
 }
 
-async fn run_non_interactive(engine: &InternetEngine) -> Result<TestResult> {
+async fn run_non_interactive(
+    engine: &InternetEngine,
+    limit: Duration,
+    progress: bool,
+) -> Result<TestResult> {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let engine = engine.clone();
-    let handle = tokio::spawn(async move { engine.run(tx).await });
-    while let Some(event) = rx.recv().await {
-        match event {
-            EngineEvent::Complete(result) => {
-                handle.await.context("measurement task panicked")??;
-                return Ok(result);
+    let measurement = runtime::deadline(limit, engine.run(tx));
+    tokio::pin!(measurement);
+    loop {
+        tokio::select! {
+            result = &mut measurement => return result,
+            Some(event) = rx.recv() => {
+                if progress {
+                    if let EngineEvent::PhaseChanged(phase) = event {
+                        output::diagnostic(format_args!("speedtest: {}", tr(&format!("{phase:?}"))))?;
+                    }
+                }
             }
-            EngineEvent::Error(error) => bail!(error),
-            _ => {}
         }
     }
-    handle.await.context("measurement task panicked")?
 }
 
-async fn run_interactive(engine: InternetEngine, fps: u16) -> Result<TestResult> {
+async fn run_interactive(engine: InternetEngine, fps: u16, limit: Duration) -> Result<TestResult> {
     let (tx, rx) = mpsc::unbounded_channel();
-    let handle = tokio::spawn(async move {
-        if let Err(error) = engine.run(tx.clone()).await {
-            let _ = tx.send(EngineEvent::Error(format!("{error:#}")));
-            return Err(error);
-        }
-        Ok(())
-    });
-    match tui::run(rx, fps).await {
-        Ok(result) => {
-            handle.await.context("measurement task panicked")??;
-            Ok(result)
-        }
-        Err(error) => {
-            handle.abort();
-            Err(error)
-        }
-    }
+    // Both futures are owned here. Cancellation drops the measurement, not a
+    // detached JoinHandle; JoinSets inside the engine abort their workers.
+    let measurement = runtime::deadline(limit, engine.run(tx));
+    tokio::try_join!(measurement, tui::run(rx, fps)).map(|(_, result)| result)
 }
 
 async fn run_interactive_stability(
@@ -753,183 +961,440 @@ async fn run_interactive_stability(
     fps: u16,
 ) -> Result<StabilityResult> {
     let (tx, rx) = mpsc::unbounded_channel();
-    let handle = tokio::spawn(async move { stability::run(duration, interval, Some(tx)).await });
-    match tui::run_stability(rx, duration, fps).await {
-        Ok(result) => {
-            handle.await.context("stability task panicked")??;
-            Ok(result)
-        }
-        Err(error) => {
-            handle.abort();
-            Err(error)
-        }
-    }
+    tokio::try_join!(
+        stability::run(duration, interval, Some(tx)),
+        tui::run_stability(rx, duration, fps)
+    )
+    .map(|(_, result)| result)
 }
 
-fn print_result(result: &TestResult) {
-    println!("Speedtest");
-    println!("  Backend:       {}", result.backend);
+fn run_check(args: CheckArgs) -> Result<()> {
+    let result = if args.result == "-" {
+        check::read_result(io::stdin().lock())?
+    } else {
+        let file = std::fs::File::open(&args.result).context("failed to open result file")?;
+        check::read_result(file)?
+    };
+    let limits = check::Thresholds {
+        min_download: args.min_download,
+        min_upload: args.min_upload,
+        max_latency: args.max_latency,
+        max_jitter: args.max_jitter,
+        max_loaded_latency: args.max_loaded_latency,
+        max_age: args.max_age,
+    };
+    let report = check::evaluate(&result, &limits, chrono::Utc::now())?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "{}",
+            msg(
+                "THRESHOLD CHECK: {0}",
+                &[(if report.passed { "PASS" } else { "FAIL" }).to_string()]
+            )
+        );
+        for check in &report.checks {
+            let actual = check
+                .actual
+                .map_or_else(|| "unavailable".to_string(), |n| format!("{n:.2}"));
+            println!(
+                "  {:4} {:<25} {} {} {} {:.2} {}",
+                if check.passed { "PASS" } else { "FAIL" },
+                check.metric,
+                actual,
+                check.unit,
+                check.operator,
+                check.limit,
+                check.unit
+            );
+        }
+    }
+    if !report.passed {
+        return Err(runtime::Outcome::ThresholdFailed.into());
+    }
+    Ok(())
+}
+
+fn print_result(result: &TestResult) -> Result<()> {
+    println!("{}", tr("Speedtest"));
     println!(
-        "  Server:        {} ({})",
-        result.server.name, result.server.host
+        "{}",
+        msg(
+            "  Backend:       {0}",
+            std::slice::from_ref(&result.backend)
+        )
     );
-    println!("  Download:      {:.1} Mbps", result.download.mbps);
-    println!("  Upload:        {:.1} Mbps", result.upload.mbps);
-    println!("  Ping:          {:.1} ms", result.latency.idle_ms);
-    println!("  Jitter:        {:.1} ms", result.latency.jitter_ms);
     println!(
-        "  Loaded down:   {}",
-        result
-            .latency
-            .download_loaded_ms
-            .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"))
+        "{}",
+        msg(
+            "  Server:        {0} ({1})",
+            &[
+                result.server.name.to_string(),
+                result.server.host.to_string()
+            ]
+        )
     );
     println!(
-        "  Loaded up:     {}",
-        result
-            .latency
-            .upload_loaded_ms
-            .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"))
+        "{}",
+        msg(
+            "  Download:      {0} Mbps",
+            &[format!("{:.1}", result.download.mbps)]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Upload:        {0} Mbps",
+            &[format!("{:.1}", result.upload.mbps)]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Ping:          {0} ms",
+            &[format!("{:.1}", result.latency.idle_ms)]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Jitter:        {0} ms",
+            &[format!("{:.1}", result.latency.jitter_ms)]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Loaded down:   {0}",
+            &[result
+                .latency
+                .download_loaded_ms
+                .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"))
+                .to_string()]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Loaded up:     {0}",
+            &[result
+                .latency
+                .upload_loaded_ms
+                .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1} ms"))
+                .to_string()]
+        )
     );
     if let Some(analysis) = &result.analysis {
         println!(
-            "  Idle p95/p99:  {:.1} / {:.1} ms",
-            analysis.latency.idle.p95_ms, analysis.latency.idle.p99_ms
+            "{}",
+            msg(
+                "  Idle p95/p99:  {0} / {1} ms",
+                &[
+                    format!("{:.1}", analysis.latency.idle.p95_ms),
+                    format!("{:.1}", analysis.latency.idle.p99_ms)
+                ]
+            )
         );
         let quality = &analysis.quality;
         println!(
-            "  Quality:       {}/100 {} ({} confidence)",
-            quality.score,
-            quality.grade.label(),
-            quality.confidence.label()
+            "{}",
+            msg(
+                "  Quality:       {0}/100 {1} ({2} confidence)",
+                &[
+                    format!("{}", quality.score),
+                    quality.grade.label().to_string(),
+                    tr(quality.confidence.label()).to_string()
+                ]
+            )
         );
         if let Some(tier) = quality.tier_label() {
-            println!("  Tier:          ◆ {tier}");
+            println!("{}", msg("  Tier:          ◆ {0}", &[tier.to_string()]));
         }
         if let Some(grade) = quality.bufferbloat.grade {
             println!(
-                "  Bufferbloat:   {} (down {} / up {})",
-                grade.label(),
-                format_delta(quality.bufferbloat.download_increase_ms),
-                format_delta(quality.bufferbloat.upload_increase_ms)
+                "{}",
+                msg(
+                    "  Bufferbloat:   {0} (down {1} / up {2})",
+                    &[
+                        grade.label().to_string(),
+                        format_delta(quality.bufferbloat.download_increase_ms).to_string(),
+                        format_delta(quality.bufferbloat.upload_increase_ms).to_string()
+                    ]
+                )
             );
         }
         if let Some(finding) = quality.findings.first() {
             println!(
-                "  Diagnosis:     {}: {}",
-                finding.severity.label(),
-                finding.title
+                "{}",
+                msg(
+                    "  Diagnosis:     {0}: {1}",
+                    &[
+                        tr(finding.severity.label()).to_string(),
+                        narr(&finding.title).to_string()
+                    ]
+                )
             );
-            println!("                 {}", finding.evidence);
+            println!("                 {}", narr(&finding.evidence));
             if let Some(recommendation) = &finding.recommendation {
-                println!("  Try:           {recommendation}");
+                println!(
+                    "{}",
+                    msg("  Try:           {0}", &[narr(recommendation).to_string()])
+                );
             }
         }
     }
+    Ok(())
 }
 
-fn print_stability(result: &StabilityResult) {
-    println!("Network Stability");
-    println!("  Duration:       {}s", result.duration_seconds);
-    println!("  Probe interval: {} ms", result.interval_ms);
+fn print_stability(result: &StabilityResult) -> Result<()> {
+    println!("{}", tr("Network Stability"));
     println!(
-        "  Probes:         {} successful / {} failed / {} skipped",
-        result.successful_probes, result.failed_probes, result.skipped_probes
+        "{}",
+        msg(
+            "  Duration:       {0}s",
+            &[format!("{}", result.duration_seconds)]
+        )
     );
     println!(
-        "  Availability:   {:.2}% (HTTP probe availability, not packet loss)",
-        result.probe_availability_percent
+        "{}",
+        msg(
+            "  Probe interval: {0} ms",
+            &[format!("{}", result.interval_ms)]
+        )
     );
-    println!("  Failure bursts: {}", result.failure_bursts);
+    println!(
+        "{}",
+        msg(
+            "  Probes:         {0} successful / {1} failed",
+            &[
+                format!("{}", result.successful_probes),
+                format!("{}", result.failed_probes)
+            ]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Availability:   {0}% (HTTP probe availability, not packet loss)",
+            &[format!("{:.2}", result.probe_availability_percent)]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Failure bursts: {0}",
+            &[format!("{}", result.failure_bursts)]
+        )
+    );
     if let Some(latency) = &result.latency {
-        println!("  Median:         {:.1} ms", latency.median_ms);
         println!(
-            "  p95 / p99:      {:.1} / {:.1} ms",
-            latency.p95_ms, latency.p99_ms
+            "{}",
+            msg(
+                "  Median:         {0} ms",
+                &[format!("{:.1}", latency.median_ms)]
+            )
         );
-        println!("  Max:            {:.1} ms", latency.max_ms);
+        println!(
+            "{}",
+            msg(
+                "  p95 / p99:      {0} / {1} ms",
+                &[
+                    format!("{:.1}", latency.p95_ms),
+                    format!("{:.1}", latency.p99_ms)
+                ]
+            )
+        );
+        println!(
+            "{}",
+            msg(
+                "  Max:            {0} ms",
+                &[format!("{:.1}", latency.max_ms)]
+            )
+        );
     }
     println!(
-        "  Stability:      {}/100 {}",
-        result.score,
-        result.grade.label()
+        "{}",
+        msg(
+            "  Stability:      {0}/100 {1}",
+            &[
+                format!("{}", result.score),
+                result.grade.label().to_string()
+            ]
+        )
     );
     if let Some(tier) = result.tier_label() {
-        println!("  Tier:           ◆ {tier}");
+        println!("{}", msg("  Tier:           ◆ {0}", &[tier.to_string()]));
     }
+    Ok(())
 }
 
-fn print_stats(summary: &HistorySummary) {
+fn print_stats(summary: &HistorySummary) -> Result<()> {
     println!(
-        "NETWORK STATS · {} · {} DAYS",
-        summary.scope.label().to_ascii_uppercase(),
-        summary.period_days
+        "{}",
+        msg(
+            "NETWORK STATS · {0} DAYS",
+            &[format!("{}", summary.period_days)]
+        )
     );
     println!();
-    println!("  Runs:              {}", summary.runs);
     println!(
-        "  Download:          {:.1} Mbps median · {:.1} Mbps best",
-        summary.median_download_mbps, summary.best_download_mbps
+        "{}",
+        msg("  Runs:              {0}", &[format!("{}", summary.runs)])
     );
     println!(
-        "  Upload:            {:.1} Mbps median · {:.1} Mbps best",
-        summary.median_upload_mbps, summary.best_upload_mbps
+        "{}",
+        msg(
+            "  Download:          {0} Mbps median · {1} Mbps best",
+            &[
+                format!("{:.1}", summary.median_download_mbps),
+                format!("{:.1}", summary.best_download_mbps)
+            ]
+        )
     );
     println!(
-        "  Ping:              {:.1} ms median · {:.1} ms p95",
-        summary.median_ping_ms, summary.p95_ping_ms
+        "{}",
+        msg(
+            "  Upload:            {0} Mbps median · {1} Mbps best",
+            &[
+                format!("{:.1}", summary.median_upload_mbps),
+                format!("{:.1}", summary.best_upload_mbps)
+            ]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Ping:              {0} ms median · {1} ms p95",
+            &[
+                format!("{:.1}", summary.median_ping_ms),
+                format!("{:.1}", summary.p95_ping_ms)
+            ]
+        )
     );
     if let Some(score) = summary.median_quality_score {
-        println!("  Quality median:    {score:.0}/100");
-    }
-    println!(
-        "  S-tier runs:       {} / {}",
-        summary.s_tier_runs, summary.runs
-    );
-    println!("  Trend:             {}", summary.trend.label());
-    println!("  Download history:  {}", summary.download_sparkline);
-    if !summary.anomalies.is_empty() {
-        println!();
-        println!("  ANOMALIES");
-        for anomaly in &summary.anomalies {
-            println!("  {}  {}", anomaly.severity.label(), anomaly.message);
-        }
-    }
-}
-
-fn print_dns_test(result: &DnsProviderBenchmark) {
-    println!("DNS HEALTH / SPEED TEST");
-    println!();
-    println!(
-        "  Resolver:       {} {}",
-        result.provider_name, result.profile_name
-    );
-    println!("  Servers:        {}", format_servers(&result.servers));
-    println!(
-        "  Queries:        {} / {} successful ({:.0}%)",
-        result.successes, result.queries, result.success_rate_percent
-    );
-    if let Some(latency) = &result.latency {
-        println!("  Median:         {:.1} ms", latency.median_ms);
         println!(
-            "  p95 / p99:      {:.1} / {:.1} ms",
-            latency.p95_ms, latency.p99_ms
+            "{}",
+            msg("  Quality median:    {0}/100", &[format!("{:.0}", score)])
         );
     }
     println!(
-        "  DNS score:      {}/100 {}",
-        result.score,
-        result.grade.label()
+        "{}",
+        msg(
+            "  S-tier runs:       {0} / {1}",
+            &[
+                format!("{}", summary.s_tier_runs),
+                format!("{}", summary.runs)
+            ]
+        )
     );
-    if let Some(tier) = result.tier_label() {
-        println!("  Tier:           ◆ {tier}");
+    println!(
+        "{}",
+        msg(
+            "  Trend:             {0}",
+            &[tr(summary.trend.label()).to_string()]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Download history:  {0}",
+            std::slice::from_ref(&summary.download_sparkline)
+        )
+    );
+    if !summary.anomalies.is_empty() {
+        println!();
+        println!("{}", tr("  ANOMALIES"));
+        for anomaly in &summary.anomalies {
+            println!(
+                "  {}  {}",
+                tr(anomaly.severity.label()),
+                narr(&anomaly.message)
+            );
+        }
     }
+    Ok(())
 }
 
-fn print_dns_benchmark(result: &DnsBenchmarkResult) {
-    println!("DNS BENCHMARK · {}", result.profile.to_ascii_uppercase());
+fn print_dns_test(result: &DnsProviderBenchmark) -> Result<()> {
+    println!("{}", tr("DNS HEALTH / SPEED TEST"));
     println!();
-    println!("  #  RESOLVER                         MEDIAN     P95   SUCCESS   SCORE");
+    println!(
+        "{}",
+        msg(
+            "  Resolver:       {0} {1}",
+            &[
+                result.provider_name.to_string(),
+                result.profile_name.to_string()
+            ]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Servers:        {0}",
+            &[format_servers(&result.servers).to_string()]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Queries:        {0} / {1} successful ({2}%)",
+            &[
+                format!("{}", result.successes),
+                format!("{}", result.queries),
+                format!("{:.0}", result.success_rate_percent)
+            ]
+        )
+    );
+    if let Some(latency) = &result.latency {
+        println!(
+            "{}",
+            msg(
+                "  Median:         {0} ms",
+                &[format!("{:.1}", latency.median_ms)]
+            )
+        );
+        println!(
+            "{}",
+            msg(
+                "  p95 / p99:      {0} / {1} ms",
+                &[
+                    format!("{:.1}", latency.p95_ms),
+                    format!("{:.1}", latency.p99_ms)
+                ]
+            )
+        );
+    }
+    println!(
+        "{}",
+        msg(
+            "  DNS score:      {0}/100 {1}",
+            &[
+                format!("{}", result.score),
+                result.grade.label().to_string()
+            ]
+        )
+    );
+    if let Some(tier) = result.tier_label() {
+        println!("{}", msg("  Tier:           ◆ {0}", &[tier.to_string()]));
+    }
+    Ok(())
+}
+
+fn print_dns_benchmark(result: &DnsBenchmarkResult) -> Result<()> {
+    println!(
+        "{}",
+        msg(
+            "DNS BENCHMARK · {0}",
+            &[result.profile.to_ascii_uppercase().to_string()]
+        )
+    );
+    println!();
+    println!(
+        "{}",
+        tr("  #  RESOLVER                         MEDIAN     P95   SUCCESS   SCORE")
+    );
     println!("  ─  ───────────────────────────────  ───────  ───────  ───────  ─────────────");
     for (index, entry) in result.entries.iter().enumerate() {
         let median = entry.latency.as_ref().map_or_else(
@@ -963,199 +1428,366 @@ fn print_dns_benchmark(result: &DnsBenchmarkResult) {
     if let Some(winner) = result.winner() {
         println!();
         println!(
-            "  ◆ WINNER: {} · {}/100 {}",
-            winner.provider_name,
-            winner.score,
-            winner.grade.label()
+            "{}",
+            msg(
+                "  ◆ WINNER: {0} · {1}/100 {2}",
+                &[
+                    winner.provider_name.to_string(),
+                    format!("{}", winner.score),
+                    winner.grade.label().to_string()
+                ]
+            )
         );
     }
+    Ok(())
 }
 
 fn print_dns_change(
     state: &dns::system::DnsSystemState,
     label: &str,
     servers: &[std::net::IpAddr],
-) {
-    println!("DNS CONFIGURATION CHANGE");
+) -> Result<()> {
+    println!("{}", tr("DNS CONFIGURATION CHANGE"));
     println!();
     println!(
-        "  Interface:      {}",
-        escape_terminal_controls(&state.interface)
+        "{}",
+        msg(
+            "  Interface:      {0}",
+            std::slice::from_ref(&state.interface)
+        )
     );
-    println!("  Current:        {}", format_servers(&state.servers));
-    println!("  New provider:   {label}");
-    println!("  New servers:    {}", format_servers(servers));
+    println!(
+        "{}",
+        msg(
+            "  Current:        {0}",
+            &[format_servers(&state.servers).to_string()]
+        )
+    );
+    println!("{}", msg("  New provider:   {0}", &[label.to_string()]));
+    println!(
+        "{}",
+        msg(
+            "  New servers:    {0}",
+            &[format_servers(servers).to_string()]
+        )
+    );
+    Ok(())
 }
 
-fn print_comparison(result: &CompareResult) {
-    println!("NETWORK COMPARISON");
+fn print_comparison(result: &CompareResult) -> Result<()> {
+    println!("{}", tr("NETWORK COMPARISON"));
     println!();
-    println!("                    BEFORE         AFTER        CHANGE");
-    print_metric("Download", &result.download_mbps, "Mbps");
-    print_metric("Upload", &result.upload_mbps, "Mbps");
-    print_metric("Ping", &result.ping_ms, "ms");
-    print_metric("Jitter", &result.jitter_ms, "ms");
+    println!(
+        "{}",
+        tr("                    BEFORE         AFTER        CHANGE")
+    );
+    print_metric("Download", &result.download_mbps, "Mbps")?;
+    print_metric("Upload", &result.upload_mbps, "Mbps")?;
+    print_metric("Ping", &result.ping_ms, "ms")?;
+    print_metric("Jitter", &result.jitter_ms, "ms")?;
     if let (Some(before), Some(after), Some(change)) = (
         result.quality_score.before,
         result.quality_score.after,
         result.quality_score.absolute_change,
     ) {
         println!(
-            "  {:<16} {:>10.0}/100 {:>10.0}/100 {change:+.0} pts",
-            "Quality", before, after
+            "{}",
+            msg(
+                "  {0} {1}/100 {2}/100 {3} pts",
+                &[
+                    format!("{:<16}", tr("Quality")),
+                    format!("{:>10.0}", before),
+                    format!("{:>10.0}", after),
+                    format!("{:+.0}", change)
+                ]
+            )
         );
     }
     println!();
-    println!("  VERDICT    {}", result.verdict.to_ascii_uppercase());
-    println!("  HIGHLIGHT  {}", result.highlight);
-}
-
-fn print_metric(label: &str, metric: &compare::MetricDelta, unit: &str) {
-    let change = metric
-        .percent_change
-        .map_or_else(|| "n/a".to_string(), |change| format!("{change:+.1}%"));
     println!(
-        "  {:<16} {:>10.1} {:<4} {:>10.1} {:<4} {:>8}",
-        label, metric.before, unit, metric.after, unit, change
+        "{}",
+        msg(
+            "  VERDICT    {0}",
+            &[narr(&result.verdict).to_uppercase().to_string()]
+        )
     );
+    println!(
+        "{}",
+        msg("  HIGHLIGHT  {0}", &[narr(&result.highlight).to_string()])
+    );
+    Ok(())
 }
 
-fn print_doctor(report: &DoctorReport) {
-    println!("NETWORK DOCTOR");
+fn print_metric(label: &str, metric: &compare::MetricDelta, unit: &str) -> Result<()> {
+    println!(
+        "  {:<16} {:>10.1} {:<4} {:>10.1} {:<4} {:+.1}%",
+        tr(label),
+        metric.before,
+        unit,
+        metric.after,
+        unit,
+        metric.percent_change.unwrap_or_default()
+    );
+    Ok(())
+}
+
+fn print_doctor(report: &DoctorReport) -> Result<()> {
+    println!("{}", tr("NETWORK DOCTOR"));
     if let Some(interface) = &report.interface {
-        println!("  Interface: {}", escape_terminal_controls(interface));
+        println!(
+            "{}",
+            msg("  Interface: {0}", std::slice::from_ref(interface))
+        );
     }
     println!();
     for check in &report.checks {
         println!(
             "  {} {:<20} {}",
             check.status.symbol(),
-            escape_terminal_controls(&check.name),
-            escape_terminal_controls(&check.detail)
+            check.name,
+            check.detail
         );
     }
     if let Some(speedtest) = &report.speedtest {
         println!();
-        println!("  FULL TEST");
-        println!("  Download  {:.1} Mbps", speedtest.download.mbps);
-        println!("  Upload    {:.1} Mbps", speedtest.upload.mbps);
-        println!("  Ping      {:.1} ms", speedtest.latency.idle_ms);
+        println!("{}", tr("  FULL TEST"));
+        println!(
+            "{}",
+            msg(
+                "  Download  {0} Mbps",
+                &[format!("{:.1}", speedtest.download.mbps)]
+            )
+        );
+        println!(
+            "{}",
+            msg(
+                "  Upload    {0} Mbps",
+                &[format!("{:.1}", speedtest.upload.mbps)]
+            )
+        );
+        println!(
+            "{}",
+            msg(
+                "  Ping      {0} ms",
+                &[format!("{:.1}", speedtest.latency.idle_ms)]
+            )
+        );
         if let Some(analysis) = &speedtest.analysis {
             println!(
-                "  Quality   {}/100 {}",
-                analysis.quality.score,
-                analysis.quality.grade.label()
+                "{}",
+                msg(
+                    "  Quality   {0}/100 {1}",
+                    &[
+                        format!("{}", analysis.quality.score),
+                        analysis.quality.grade.label().to_string()
+                    ]
+                )
             );
         }
     }
     println!();
-    println!("  DIAGNOSIS");
-    println!("  {}", escape_terminal_controls(&report.diagnosis));
+    println!("{}", tr("  DIAGNOSIS"));
+    println!("  {}", narr(&report.diagnosis));
     if let Some(recommendation) = &report.recommendation {
         println!(
-            "  Recommendation: {}",
-            escape_terminal_controls(recommendation)
+            "{}",
+            msg("  Recommendation: {0}", &[narr(recommendation).to_string()])
         );
     }
+    Ok(())
 }
 
-fn print_packet_loss(result: &loss::PacketLossResult) {
-    println!("ICMP PACKET LOSS");
+fn print_packet_loss(result: &loss::PacketLossResult) -> Result<()> {
+    println!("{}", tr("ICMP PACKET LOSS"));
     println!();
-    println!("  Target:          {}", result.target);
     println!(
-        "  Sent/received:   {} / {}",
-        result.packets_sent, result.packets_received
+        "{}",
+        msg(
+            "  Target:          {0}",
+            std::slice::from_ref(&result.target)
+        )
     );
     println!(
-        "  Lost:            {} ({:.2}%)",
-        result.packets_lost, result.loss_percent
+        "{}",
+        msg(
+            "  Sent/received:   {0} / {1}",
+            &[
+                format!("{}", result.packets_sent),
+                format!("{}", result.packets_received)
+            ]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Lost:            {0} ({1}%)",
+            &[
+                format!("{}", result.packets_lost),
+                format!("{:.2}", result.loss_percent)
+            ]
+        )
     );
     if let Some(rtt) = &result.rtt {
-        println!("  RTT median:      {:.1} ms", rtt.median_ms);
         println!(
-            "  RTT p95 / p99:   {:.1} / {:.1} ms",
-            rtt.p95_ms, rtt.p99_ms
+            "{}",
+            msg(
+                "  RTT median:      {0} ms",
+                &[format!("{:.1}", rtt.median_ms)]
+            )
         );
-        println!("  RTT max:         {:.1} ms", rtt.max_ms);
+        println!(
+            "{}",
+            msg(
+                "  RTT p95 / p99:   {0} / {1} ms",
+                &[format!("{:.1}", rtt.p95_ms), format!("{:.1}", rtt.p99_ms)]
+            )
+        );
+        println!(
+            "{}",
+            msg("  RTT max:         {0} ms", &[format!("{:.1}", rtt.max_ms)])
+        );
     }
     println!();
-    println!("  Note: {}", result.caveat);
+    println!(
+        "{}",
+        msg("  Note: {0}", &[narr(&result.caveat).to_string()])
+    );
+    Ok(())
 }
 
-fn print_wifi(result: &wifi::WifiSnapshot) {
-    println!("WI-FI DIAGNOSTICS");
+fn print_wifi(result: &wifi::WifiSnapshot) -> Result<()> {
+    println!("{}", tr("WI-FI DIAGNOSTICS"));
     println!();
     if !result.available {
-        println!("  No active Wi-Fi link detected.");
-        println!("  {}", escape_terminal_controls(&result.detail));
-        return;
+        println!("{}", tr("  No active Wi-Fi link detected."));
+        println!("  {}", narr(&result.detail));
+        return Ok(());
     }
     println!(
-        "  Interface:       {}",
-        escape_terminal_controls(result.interface.as_deref().unwrap_or("unknown"))
+        "{}",
+        msg(
+            "  Interface:       {0}",
+            &[result.interface.as_deref().unwrap_or("unknown").to_string()]
+        )
     );
     println!(
-        "  SSID:            {}",
-        escape_terminal_controls(result.ssid.as_deref().unwrap_or("unknown"))
+        "{}",
+        msg(
+            "  SSID:            {0}",
+            &[result.ssid.as_deref().unwrap_or("unknown").to_string()]
+        )
     );
     if let Some(dbm) = result.signal_dbm {
-        println!("  Signal:          {:.0} dBm", dbm);
+        println!(
+            "{}",
+            msg("  Signal:          {0} dBm", &[format!("{:.0}", dbm)])
+        );
     }
     if let Some(percent) = result.signal_percent {
-        println!("  Signal quality:  {:.0}%", percent);
+        println!(
+            "{}",
+            msg("  Signal quality:  {0}%", &[format!("{:.0}", percent)])
+        );
     }
     if let Some(band) = &result.band {
-        println!("  Band:            {}", escape_terminal_controls(band));
+        println!(
+            "{}",
+            msg("  Band:            {0}", std::slice::from_ref(band))
+        );
     }
     if let Some(channel) = result.channel {
-        println!("  Channel:         {channel}");
+        println!(
+            "{}",
+            msg("  Channel:         {0}", &[format!("{}", channel)])
+        );
     }
     if let Some(rate) = result.link_mbps {
-        println!("  Link rate:       {:.0} Mbps", rate);
+        println!(
+            "{}",
+            msg("  Link rate:       {0} Mbps", &[format!("{:.0}", rate)])
+        );
     }
     if let Some(radio) = &result.radio {
-        println!("  Radio:           {}", escape_terminal_controls(radio));
+        println!(
+            "{}",
+            msg("  Radio:           {0}", std::slice::from_ref(radio))
+        );
     }
     println!(
-        "  Detail:          {}",
-        escape_terminal_controls(&result.detail)
+        "{}",
+        msg(
+            "  Detail:          {0}",
+            &[narr(&result.detail).to_string()]
+        )
     );
+    Ok(())
 }
 
-fn print_verify(report: &verify::VerifyReport) {
-    println!("MULTI-BACKEND VERIFICATION");
+fn print_verify(report: &verify::VerifyReport) -> Result<()> {
+    println!("{}", tr("MULTI-BACKEND VERIFICATION"));
     println!();
-    println!("                    CLOUDFLARE     LIBRESPEED");
+    println!("{}", tr("                    CLOUDFLARE     LIBRESPEED"));
     println!(
-        "  Download        {:>9.1} M     {:>9.1} M",
-        report.cloudflare.download.mbps, report.librespeed.download.mbps
+        "{}",
+        msg(
+            "  Download        {0} M     {1} M",
+            &[
+                format!("{:>9.1}", report.cloudflare.download.mbps),
+                format!("{:>9.1}", report.librespeed.download.mbps)
+            ]
+        )
     );
     println!(
-        "  Upload          {:>9.1} M     {:>9.1} M",
-        report.cloudflare.upload.mbps, report.librespeed.upload.mbps
+        "{}",
+        msg(
+            "  Upload          {0} M     {1} M",
+            &[
+                format!("{:>9.1}", report.cloudflare.upload.mbps),
+                format!("{:>9.1}", report.librespeed.upload.mbps)
+            ]
+        )
     );
     println!(
-        "  Ping            {:>9.1} ms    {:>9.1} ms",
-        report.cloudflare.latency.idle_ms, report.librespeed.latency.idle_ms
+        "{}",
+        msg(
+            "  Ping            {0} ms    {1} ms",
+            &[
+                format!("{:>9.1}", report.cloudflare.latency.idle_ms),
+                format!("{:>9.1}", report.librespeed.latency.idle_ms)
+            ]
+        )
     );
     if let Some(loss) = &report.icmp_loss {
         println!(
-            "  ICMP loss       {:>9.2}%     independent reference",
-            loss.loss_percent
+            "{}",
+            msg(
+                "  ICMP loss       {0}%     independent reference",
+                &[format!("{:>9.2}", loss.loss_percent)]
+            )
         );
     }
     println!();
     println!(
-        "  Agreement:      {}",
-        if report.consistent {
-            "CONSISTENT"
-        } else {
-            "DIVERGENT"
-        }
+        "{}",
+        msg(
+            "  Agreement:      {0}",
+            &[(if report.consistent {
+                "CONSISTENT"
+            } else {
+                "DIVERGENT"
+            })
+            .to_string()]
+        )
     );
-    println!("  {}", report.verdict);
-    println!("  Highlight:      {}", report.comparison.highlight);
+    println!("  {}", narr(&report.verdict));
+    println!(
+        "{}",
+        msg(
+            "  Highlight:      {0}",
+            &[narr(&report.comparison.highlight).to_string()]
+        )
+    );
+    Ok(())
 }
 
 fn dns_profile(profile: DnsBenchmarkProfileArg) -> BenchmarkProfile {
@@ -1170,8 +1802,15 @@ fn dns_profile(profile: DnsBenchmarkProfileArg) -> BenchmarkProfile {
 }
 
 fn confirm(prompt: &str) -> Result<bool> {
-    print!("{prompt} [y/N] ");
-    io::stdout()
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        bail!("DNS changes require an interactive terminal; inspect --dry-run, then use --yes explicitly");
+    }
+    write!(
+        io::stderr().lock(),
+        "{} [y/N] ",
+        output::safe_text(&tr(prompt))
+    )?;
+    io::stderr()
         .flush()
         .context("failed to flush confirmation prompt")?;
     let mut answer = String::new();
@@ -1217,33 +1856,5 @@ fn truncate(value: &str, width: usize) -> String {
             .take(width.saturating_sub(1))
             .collect::<String>()
             + "…"
-    }
-}
-
-fn escape_terminal_controls(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        if character.is_control() {
-            escaped.extend(character.escape_default());
-        } else {
-            escaped.push(character);
-        }
-    }
-    escaped
-}
-
-#[cfg(test)]
-mod tests {
-    use super::escape_terminal_controls;
-
-    #[test]
-    fn terminal_output_escapes_controls_without_changing_unicode() {
-        let escaped = escape_terminal_controls("Café 中文\u{1b}[31m\nnext\tline");
-        assert!(escaped.starts_with("Café 中文"));
-        assert!(!escaped.contains('\u{1b}'));
-        assert!(!escaped.contains('\n'));
-        assert!(!escaped.contains('\t'));
-        assert!(escaped.contains("\\u{1b}[31m"));
-        assert!(escaped.contains("\\nnext\\tline"));
     }
 }

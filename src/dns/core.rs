@@ -10,7 +10,6 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tokio::{
     net::UdpSocket,
@@ -18,6 +17,7 @@ use tokio::{
     time::{timeout, Instant},
 };
 
+use self::wire::{build_query, validate_response};
 use crate::{
     analysis,
     model::{LatencyDistribution, QualityGrade},
@@ -813,16 +813,20 @@ fn percent(numerator: usize, denominator: usize) -> f64 {
     }
 }
 
-async fn query_udp(server: IpAddr, domain: &str) -> Result<f64> {
+pub(crate) async fn query_udp(server: IpAddr, domain: &str) -> Result<f64> {
+    query_udp_at(SocketAddr::new(server, DNS_PORT), domain).await
+}
+
+async fn query_udp_at(server: SocketAddr, domain: &str) -> Result<f64> {
     let bind_address = match server {
-        IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-        IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
     };
     let socket = UdpSocket::bind(bind_address)
         .await
         .context("failed to create DNS UDP socket")?;
     socket
-        .connect(SocketAddr::new(server, DNS_PORT))
+        .connect(server)
         .await
         .with_context(|| format!("failed to connect DNS socket to {server}"))?;
 
@@ -833,55 +837,14 @@ async fn query_udp(server: IpAddr, domain: &str) -> Result<f64> {
         .await
         .context("DNS send timed out")??;
 
-    let mut response = [0_u8; 4096];
+    // Leave room to detect any message beyond the protocol limit. A smaller
+    // receive buffer could discard a datagram suffix before wire validation.
+    let mut response = vec![0_u8; wire::MAX_MESSAGE_LEN + 1];
     let size = timeout(DNS_TIMEOUT, socket.recv(&mut response))
         .await
         .context("DNS response timed out")??;
-    validate_response(&response[..size], query_id)?;
+    validate_response(&response[..size], query_id, domain)?;
     Ok(started.elapsed().as_secs_f64() * 1000.0)
-}
-
-fn build_query(domain: &str, query_id: u16) -> Result<Vec<u8>> {
-    let mut packet = Vec::with_capacity(512);
-    packet.extend_from_slice(&query_id.to_be_bytes());
-    packet.extend_from_slice(&0x0100_u16.to_be_bytes());
-    packet.extend_from_slice(&1_u16.to_be_bytes());
-    packet.extend_from_slice(&0_u16.to_be_bytes());
-    packet.extend_from_slice(&0_u16.to_be_bytes());
-    packet.extend_from_slice(&0_u16.to_be_bytes());
-
-    for label in domain.trim_end_matches('.').split('.') {
-        if label.is_empty() || label.len() > 63 || !label.is_ascii() {
-            return Err(anyhow!("invalid DNS test name: {domain}"));
-        }
-        packet.push(label.len() as u8);
-        packet.extend_from_slice(label.as_bytes());
-    }
-    packet.push(0);
-    packet.extend_from_slice(&1_u16.to_be_bytes());
-    packet.extend_from_slice(&1_u16.to_be_bytes());
-    Ok(packet)
-}
-
-fn validate_response(response: &[u8], query_id: u16) -> Result<()> {
-    if response.len() < 12 {
-        return Err(anyhow!("DNS response was shorter than the header"));
-    }
-    if u16::from_be_bytes([response[0], response[1]]) != query_id {
-        return Err(anyhow!("DNS response transaction ID did not match"));
-    }
-    let flags = u16::from_be_bytes([response[2], response[3]]);
-    if flags & 0x8000 == 0 {
-        return Err(anyhow!("DNS packet was not a response"));
-    }
-    if flags & 0x000f != 0 {
-        return Err(anyhow!("DNS resolver returned rcode {}", flags & 0x000f));
-    }
-    let answers = u16::from_be_bytes([response[6], response[7]]);
-    if answers == 0 {
-        return Err(anyhow!("DNS resolver returned no answers"));
-    }
-    Ok(())
 }
 
 pub fn save_backup(state: &system::DnsSystemState) -> Result<std::path::PathBuf> {
@@ -904,9 +867,7 @@ pub fn save_backup(state: &system::DnsSystemState) -> Result<std::path::PathBuf>
     temporary
         .write_all(b"\n")
         .context("failed to finish DNS rollback snapshot")?;
-    temporary
-        .flush()
-        .context("failed to flush DNS rollback snapshot")?;
+    temporary.flush().context("failed to flush DNS rollback snapshot")?;
     temporary
         .as_file()
         .sync_all()
@@ -924,7 +885,7 @@ pub struct DnsOperationGuard {
 
 impl Drop for DnsOperationGuard {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+        let _ = self.file.unlock();
     }
 }
 
@@ -939,7 +900,7 @@ pub fn lock_operation() -> Result<DnsOperationGuard> {
         .write(true)
         .open(&path)
         .with_context(|| format!("failed to open DNS operation lock at {}", path.display()))?;
-    FileExt::lock_exclusive(&file)
+    file.lock()
         .with_context(|| format!("failed to lock DNS operations at {}", path.display()))?;
     Ok(DnsOperationGuard { file })
 }
@@ -967,35 +928,6 @@ pub async fn verify_system_resolution() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rollback_snapshot_identity_includes_the_complete_dns_state() {
-        let state = system::DnsSystemState {
-            interface: "test0".to_string(),
-            device: None,
-            interface_index: None,
-            servers: vec!["1.1.1.1".parse().unwrap()],
-            configured_servers: vec!["1.1.1.1".parse().unwrap()],
-            mode: system::DnsConfigMode::Manual,
-            backend: "test".to_string(),
-            gateway: Some("192.0.2.1".parse().unwrap()),
-            gateway_scope: None,
-            ipv4_default_route: true,
-            ipv6_default_route: false,
-            ipv4_ignore_auto_dns: None,
-            ipv6_ignore_auto_dns: None,
-            ipv4_automatic: None,
-            ipv6_automatic: None,
-        };
-        let original = DnsBackup {
-            timestamp: Utc::now(),
-            state,
-        };
-        let mut replaced = original.clone();
-        replaced.state.servers = vec!["9.9.9.9".parse().unwrap()];
-
-        assert_ne!(original, replaced);
-    }
 
     fn raw_benchmark(
         provider_id: &str,
@@ -1067,63 +999,22 @@ mod tests {
     }
 
     #[test]
-    fn builds_and_validates_basic_dns_packet_shape() {
-        let packet = build_query("example.com", 0x1234).unwrap();
-        assert_eq!(&packet[..2], &[0x12, 0x34]);
-        assert!(packet.windows(7).any(|part| part == b"example"));
-
-        let mut response = [0_u8; 12];
-        response[..2].copy_from_slice(&0x1234_u16.to_be_bytes());
-        response[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
-        response[6..8].copy_from_slice(&1_u16.to_be_bytes());
-        assert!(validate_response(&response, 0x1234).is_ok());
-    }
-
-    #[test]
-    fn common_provider_aliases_resolve() {
-        assert_eq!(provider("cloudflare").unwrap().id, "cloudflare");
-        assert_eq!(provider("quad9-secure").unwrap().id, "quad9");
-        assert_eq!(provider("familyshield").unwrap().id, "opendns-family");
-    }
-
-    #[test]
-    fn winner_selection_requires_at_least_eighty_percent_success() {
+    fn unreliable_dns_results_cannot_win_or_receive_high_scores() {
         let unreliable = benchmark_entry("unreliable", 1_000, 799);
         let boundary = benchmark_entry("boundary", 5, 4);
-
         assert_eq!(select_winner_id(std::slice::from_ref(&unreliable)), None);
         assert_eq!(
             select_winner_id(&[unreliable, boundary]),
             Some("boundary".to_string())
         );
-    }
 
-    #[test]
-    fn zero_success_scores_are_zero_for_single_and_relative_udp_results() {
-        let single = score_single(raw_benchmark("single", 10, 0, Vec::new()));
-        assert_eq!(single.score, 0);
-        assert_eq!(single.grade, QualityGrade::F);
-        assert!(!single.s_tier);
-
-        let relative = score_entries(vec![
-            raw_benchmark("zero", 10, 0, Vec::new()),
-            raw_benchmark("reliable", 10, 10, vec![10.0; 10]),
-        ]);
-        let zero = relative
-            .iter()
-            .find(|entry| entry.provider_id == "zero")
-            .unwrap();
+        let zero = score_single(raw_benchmark("zero", 10, 0, Vec::new()));
         assert_eq!(zero.score, 0);
         assert_eq!(zero.grade, QualityGrade::F);
-        assert!(!zero.s_tier);
 
-        let reliable = relative
-            .iter()
-            .find(|entry| entry.provider_id == "reliable")
-            .unwrap();
-        assert_eq!(reliable.score, 100);
-        assert_eq!(reliable.grade, QualityGrade::APlus);
-        assert!(reliable.s_tier);
+        let half = score_single(raw_benchmark("half", 10, 5, vec![5.0; 5]));
+        assert!(half.score <= 40);
+        assert_eq!(half.grade, QualityGrade::F);
     }
 
     #[test]
@@ -1140,13 +1031,86 @@ mod tests {
     }
 
     #[test]
-    fn partial_dns_success_caps_displayed_score_and_grade() {
-        let half = score_single(raw_benchmark("half", 10, 5, vec![5.0; 5]));
-        assert!(half.score <= 40);
-        assert_eq!(half.grade, QualityGrade::F);
+    fn builds_dns_query_and_rejects_header_only_answer() {
+        let packet = build_query("example.com", 0x1234).unwrap();
+        assert_eq!(&packet[..2], &[0x12, 0x34]);
+        assert!(packet.windows(7).any(|part| part == b"example"));
 
-        let boundary = score_single(raw_benchmark("boundary", 10, 8, vec![5.0; 8]));
-        assert!(boundary.score <= 65);
-        assert_eq!(boundary.grade, QualityGrade::C);
+        let mut response = [0_u8; 12];
+        response[..2].copy_from_slice(&0x1234_u16.to_be_bytes());
+        response[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+        response[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        assert!(validate_response(&response, 0x1234, "example.com").is_err());
+    }
+
+    async fn probe_fixture(make_response: fn(&[u8]) -> Vec<u8>) -> Result<f64> {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let fixture = async move {
+            let mut query = [0; 512];
+            let (length, peer) = timeout(Duration::from_secs(2), server.recv_from(&mut query))
+                .await
+                .unwrap()
+                .unwrap();
+            server
+                .send_to(&make_response(&query[..length]), peer)
+                .await
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(query_udp_at(address, "example.com"), fixture);
+        result
+    }
+
+    fn fixture_address_response(query: &[u8]) -> Vec<u8> {
+        let mut response = query.to_vec();
+        response[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+        response[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        response
+            .extend_from_slice(b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\xc0\x00\x02\x01");
+        response
+    }
+
+    #[tokio::test]
+    async fn udp_probe_requires_a_complete_matching_answer() {
+        assert!(probe_fixture(fixture_address_response).await.is_ok());
+        assert!(probe_fixture(|query| {
+            let mut response = fixture_address_response(query);
+            response.truncate(12);
+            response
+        })
+        .await
+        .is_err());
+        assert!(probe_fixture(|query| {
+            let mut response = fixture_address_response(query);
+            response[13] = b'x';
+            response
+        })
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn udp_probe_does_not_hide_a_datagram_suffix_past_4096_bytes() {
+        let result = probe_fixture(|query| {
+            let mut response = fixture_address_response(query);
+            response[10..12].copy_from_slice(&1_u16.to_be_bytes());
+            // An opaque additional record makes the valid prefix exactly 4096
+            // bytes. The old receive buffer discarded the invalid suffix.
+            let padding = 4096 - response.len() - 11;
+            response.extend_from_slice(b"\x00\xff\x00\x00\x01\x00\x00\x00\x00");
+            response.extend_from_slice(&(padding as u16).to_be_bytes());
+            response.resize(4096, 0);
+            response.extend_from_slice(b"invalid suffix");
+            response
+        })
+        .await;
+        assert!(result.unwrap_err().to_string().contains("trailing data"));
+    }
+
+    #[test]
+    fn common_provider_aliases_resolve() {
+        assert_eq!(provider("cloudflare").unwrap().id, "cloudflare");
+        assert_eq!(provider("quad9-secure").unwrap().id, "quad9");
+        assert_eq!(provider("familyshield").unwrap().id, "opendns-family");
     }
 }

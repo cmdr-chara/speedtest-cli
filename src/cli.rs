@@ -4,6 +4,7 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::io::IsTerminal;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputFormat {
@@ -19,17 +20,35 @@ pub enum InternetBackendArg {
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "speedtest")]
-#[command(version, about = "A fast, polished terminal network quality analyzer")]
-#[command(args_conflicts_with_subcommands = true)]
+#[command(version, about = "Measure network throughput, latency, and quality")]
+#[command(
+    after_help = "Examples:\n  speedtest                         # open the network cockpit\n  speedtest --run                   # start immediately\n  speedtest --plain --no-save\n  speedtest --json > result.json\n  speedtest check result.json --min-download 100 --max-latency 30\n  speedtest lan 192.168.1.50:9876 --json\n\nThroughput uses decimal Mbps; latency uses milliseconds.\nRun `speedtest <COMMAND> --help` for command-specific options."
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// Interface language: auto, en, it, es, fr, de, pt, zh-CN, ja. Machine data stays unchanged.
+    #[arg(long, global = true, value_name = "CODE", default_value = "auto", value_parser = crate::i18n::Language::parse)]
+    pub language: crate::i18n::Language,
+
+    /// Color policy. Never also selects the accessible, non-animated interface.
+    #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
+    pub color: ColorMode,
+
+    /// Phase progress on stderr. Auto enables it only on a terminal.
+    #[arg(long, global = true, value_enum, default_value_t = ProgressMode::Auto)]
+    pub progress: ProgressMode,
+
+    /// Overall Internet measurement deadline in seconds, including server selection.
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..=600))]
+    pub timeout: u64,
 
     /// Internet measurement backend.
     #[arg(long, value_enum, default_value_t = InternetBackendArg::Cloudflare)]
     pub backend: InternetBackendArg,
 
-    /// Custom LibreSpeed base URL. Standard garbage.php/empty.php paths are assumed.
+    /// Custom LibreSpeed base URL; requires --backend librespeed. Standard PHP paths are assumed.
     #[arg(long, value_name = "URL")]
     pub librespeed_server: Option<String>,
 
@@ -44,6 +63,10 @@ pub struct Cli {
     /// Maximum interactive TUI render rate. The speedometer physics always run at 240 Hz.
     #[arg(long, default_value_t = 240, value_parser = clap::value_parser!(u16).range(30..=240))]
     pub fps: u16,
+
+    /// Start a speed test immediately, bypassing the home menu.
+    #[arg(long)]
+    pub run: bool,
 
     /// Disable the interactive terminal UI.
     #[arg(long)]
@@ -68,6 +91,8 @@ pub struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    /// Check a saved JSON result against explicit thresholds, without network traffic.
+    Check(CheckArgs),
     /// Continuously probe latency to expose spikes and short disruptions.
     Stability(StabilityArgs),
     /// Show recent saved speed-test runs.
@@ -314,9 +339,11 @@ pub struct DnsRollbackArgs {
 #[derive(Debug, Clone, Args)]
 pub struct CompareArgs {
     /// Baseline JSON result. If omitted with AFTER, the two newest saved runs are compared.
+    #[arg(requires = "after")]
     pub before: Option<PathBuf>,
 
     /// New JSON result. Supply together with BEFORE.
+    #[arg(requires = "before")]
     pub after: Option<PathBuf>,
 
     /// Print the comparison as JSON.
@@ -342,7 +369,7 @@ pub struct DoctorArgs {
 #[derive(Debug, Clone, Args)]
 pub struct LossArgs {
     /// ICMP echo target. Defaults to Cloudflare's public resolver address.
-    #[arg(long, default_value = "1.1.1.1")]
+    #[arg(long, default_value = "1.1.1.1", value_parser = crate::loss::validate_target)]
     pub target: String,
 
     /// Number of ICMP echo requests.
@@ -387,7 +414,7 @@ pub struct VerifyArgs {
 #[derive(Debug, Clone, Args)]
 pub struct ServeArgs {
     /// Address for the self-hosted LAN endpoint.
-    #[arg(long, default_value = "0.0.0.0:9876")]
+    #[arg(long, default_value = "127.0.0.1:9876")]
     pub bind: SocketAddr,
 }
 
@@ -407,18 +434,108 @@ pub struct LanArgs {
     /// Print the canonical result as JSON.
     #[arg(long)]
     pub json: bool,
+}
 
-    /// Also write the completed LAN result to this path.
-    #[arg(long, value_name = "PATH")]
-    pub output: Option<PathBuf>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
 
-    /// Format used by --output.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Json, requires = "output")]
-    pub format: OutputFormat,
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ProgressMode {
+    Auto,
+    Always,
+    Never,
+}
 
-    /// Do not persist automatic history/results.
+impl ColorMode {
+    pub fn allows_tui(self) -> bool {
+        if self == Self::Never || std::env::var("TERM").is_ok_and(|value| value == "dumb") {
+            return false;
+        }
+        if self == Self::Always {
+            return true;
+        }
+        !std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+            && !std::env::var("CLICOLOR").is_ok_and(|value| value == "0")
+    }
+}
+
+impl ProgressMode {
+    pub fn enabled_for(self, json: bool) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => !json && std::io::stderr().is_terminal(),
+        }
+    }
+}
+
+impl Cli {
+    pub fn json_requested(&self) -> bool {
+        match &self.command {
+            None => self.json,
+            Some(Command::Check(a)) => a.json,
+            Some(Command::Stability(a)) => a.json,
+            Some(Command::History(a)) => a.json,
+            Some(Command::Stats(a)) => a.json,
+            Some(Command::Compare(a)) => a.json,
+            Some(Command::Doctor(a)) => a.json,
+            Some(Command::Loss(a)) => a.json,
+            Some(Command::Wifi(a)) => a.json,
+            Some(Command::Verify(a)) => a.json,
+            Some(Command::Lan(a)) => a.json,
+            Some(Command::Serve(_)) => false,
+            Some(Command::Dns(a)) => match &a.command {
+                DnsCommand::List(a) => a.json,
+                DnsCommand::Show(a) => a.json,
+                DnsCommand::Test(a) => a.json,
+                DnsCommand::Benchmark(a) => a.json,
+                _ => false,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(group(clap::ArgGroup::new("thresholds").required(true).multiple(true)
+    .args(["min_download", "min_upload", "max_latency", "max_jitter", "max_loaded_latency", "max_age"])))]
+pub struct CheckArgs {
+    /// Canonical JSON file, or - to read one result from stdin (maximum 4 MiB).
+    pub result: String,
+    /// Minimum download throughput in decimal Mbps.
+    #[arg(long, value_parser = parse_threshold)]
+    pub min_download: Option<f64>,
+    /// Minimum upload throughput in decimal Mbps.
+    #[arg(long, value_parser = parse_threshold)]
+    pub min_upload: Option<f64>,
+    /// Maximum idle HTTP latency in ms.
+    #[arg(long, value_parser = parse_threshold)]
+    pub max_latency: Option<f64>,
+    /// Maximum idle jitter in ms.
+    #[arg(long, value_parser = parse_threshold)]
+    pub max_jitter: Option<f64>,
+    /// Maximum latency in BOTH loaded phases; missing samples fail the check.
+    #[arg(long, value_parser = parse_threshold)]
+    pub max_loaded_latency: Option<f64>,
+    /// Maximum result age in seconds; future timestamps fail the check.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub max_age: Option<u64>,
+    /// Emit a versioned JSON report. Exit 0 passes, 3 fails, 1 means invalid input.
     #[arg(long)]
-    pub no_save: bool,
+    pub json: bool,
+}
+
+fn parse_threshold(value: &str) -> Result<f64, String> {
+    let number: f64 = value
+        .parse()
+        .map_err(|_| "expected a finite, non-negative number")?;
+    if !number.is_finite() || number < 0.0 {
+        return Err("expected a finite, non-negative number".to_string());
+    }
+    Ok(number)
 }
 
 fn parse_stability_duration(value: &str) -> Result<u64, String> {
@@ -472,27 +589,5 @@ mod tests {
     fn parses_probe_interval() {
         assert_eq!(parse_probe_interval("750ms").unwrap(), 750);
         assert_eq!(parse_probe_interval("2s").unwrap(), 2_000);
-    }
-
-    #[test]
-    fn rejects_default_test_options_before_subcommands() {
-        let error = Cli::try_parse_from(["speedtest", "--json", "history"])
-            .expect_err("root measurement options must not be silently ignored");
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
-
-        let parsed = Cli::try_parse_from(["speedtest", "history", "--json"])
-            .expect("subcommand-local options remain valid");
-        assert!(matches!(
-            parsed.command,
-            Some(Command::History(HistoryArgs { json: true, .. }))
-        ));
-    }
-
-    #[test]
-    fn output_format_requires_an_output_path() {
-        assert!(Cli::try_parse_from(["speedtest", "--format", "csv"]).is_err());
-        assert!(
-            Cli::try_parse_from(["speedtest", "lan", "127.0.0.1:9876", "--format", "csv"]).is_err()
-        );
     }
 }

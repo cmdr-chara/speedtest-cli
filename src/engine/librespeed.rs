@@ -7,7 +7,6 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use bytes::Bytes;
 use chrono::Utc;
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, Url};
@@ -19,13 +18,13 @@ use tokio::{
 
 use crate::{
     analysis,
-    engine::{EngineConfig, EngineEvent},
+    engine::{finish_phase, http, EngineConfig, EngineEvent},
     model::{ServerInfo, TestPhase, TestResult, ThroughputResult},
 };
 
 const IDLE_SAMPLES: usize = 20;
 const DOWNLOAD_CHUNK_MB: u32 = 32;
-const UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 const LOADED_LATENCY_INTERVAL: Duration = Duration::from_millis(400);
 
@@ -94,14 +93,13 @@ pub const PUBLIC_SERVERS: &[LibreSpeedServer] = &[
 pub struct LibreSpeedEngine {
     client: Client,
     config: EngineConfig,
-    server: Option<Box<ResolvedServer>>,
+    server: Option<ResolvedServer>,
 }
 
 #[derive(Debug, Clone)]
 struct ResolvedServer {
     name: String,
     base: Url,
-    host: String,
     download_path: String,
     upload_path: String,
     ping_path: String,
@@ -109,17 +107,16 @@ struct ResolvedServer {
 
 impl LibreSpeedEngine {
     pub fn new(config: EngineConfig, custom_server: Option<&str>) -> Result<Self> {
+        config.validate()?;
         let client = Client::builder()
             .user_agent(concat!("speedtest-cli/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(25))
             .pool_max_idle_per_host(config.streams.saturating_add(4))
             .build()
             .context("failed to build LibreSpeed HTTP client")?;
-        let server = custom_server
-            .map(resolve_custom_server)
-            .transpose()?
-            .map(Box::new);
+        let server = custom_server.map(resolve_custom_server).transpose()?;
         Ok(Self {
             client,
             config,
@@ -129,7 +126,7 @@ impl LibreSpeedEngine {
 
     pub async fn run(&self, tx: UnboundedSender<EngineEvent>) -> Result<TestResult> {
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Preparing));
-        let server = match self.server.as_deref() {
+        let server = match &self.server {
             Some(server) => server.clone(),
             None => select_public_server(&self.client).await?,
         };
@@ -166,7 +163,7 @@ impl LibreSpeedEngine {
             timestamp: Utc::now(),
             backend: "librespeed".to_string(),
             server: ServerInfo {
-                host: server.host,
+                host: server.base.as_str().to_string(),
                 name: server.name,
             },
             latency,
@@ -195,23 +192,17 @@ impl LibreSpeedEngine {
                 deadline,
             ));
         }
-        let loaded = tokio::spawn(measure_loaded_latency(
-            self.client.clone(),
-            server.clone(),
-            deadline,
-        ));
-        self.sample_transfer(TestPhase::Download, Arc::clone(&total), deadline, tx)
-            .await;
-        while let Some(result) = workers.join_next().await {
-            result.context("LibreSpeed download worker panicked")??;
-        }
-        let loaded_samples = loaded
-            .await
-            .context("LibreSpeed loaded-latency task panicked")?;
+        let loaded_samples = finish_phase(
+            workers,
+            self.sample_transfer(TestPhase::Download, Arc::clone(&total), deadline, tx),
+            measure_loaded_latency(self.client.clone(), server.clone(), deadline),
+        )
+        .await?;
         let bytes = total.load(Ordering::Relaxed);
         if bytes == 0 {
             return Err(anyhow!("LibreSpeed server delivered no download data"));
         }
+        emit_loaded(&loaded_samples, TestPhase::Download, tx);
         Ok((
             ThroughputResult {
                 mbps: mbps(bytes, self.config.phase_duration.as_secs_f64()),
@@ -229,34 +220,27 @@ impl LibreSpeedEngine {
     ) -> Result<(ThroughputResult, Vec<f64>)> {
         let total = Arc::new(AtomicU64::new(0));
         let deadline = Instant::now() + self.config.phase_duration;
-        let payload = Bytes::from(vec![0x6d_u8; UPLOAD_CHUNK_BYTES]);
         let mut workers = JoinSet::new();
         for _ in 0..self.config.streams.max(1) {
             workers.spawn(upload_worker(
                 self.client.clone(),
                 server.clone(),
                 Arc::clone(&total),
-                payload.clone(),
+                UPLOAD_CHUNK_BYTES,
                 deadline,
             ));
         }
-        let loaded = tokio::spawn(measure_loaded_latency(
-            self.client.clone(),
-            server.clone(),
-            deadline,
-        ));
-        self.sample_transfer(TestPhase::Upload, Arc::clone(&total), deadline, tx)
-            .await;
-        while let Some(result) = workers.join_next().await {
-            result.context("LibreSpeed upload worker panicked")??;
-        }
-        let loaded_samples = loaded
-            .await
-            .context("LibreSpeed loaded-latency task panicked")?;
+        let loaded_samples = finish_phase(
+            workers,
+            self.sample_transfer(TestPhase::Upload, Arc::clone(&total), deadline, tx),
+            measure_loaded_latency(self.client.clone(), server.clone(), deadline),
+        )
+        .await?;
         let bytes = total.load(Ordering::Relaxed);
         if bytes == 0 {
             return Err(anyhow!("LibreSpeed server accepted no upload data"));
         }
+        emit_loaded(&loaded_samples, TestPhase::Upload, tx);
         Ok((
             ThroughputResult {
                 mbps: mbps(bytes, self.config.phase_duration.as_secs_f64()),
@@ -306,40 +290,10 @@ impl LibreSpeedEngine {
 }
 
 fn resolve_custom_server(base: &str) -> Result<ResolvedServer> {
-    let mut base = Url::parse(base).context("invalid LibreSpeed server URL")?;
-    if !matches!(base.scheme(), "http" | "https") {
-        return Err(anyhow!(
-            "LibreSpeed server URL must use the http or https scheme"
-        ));
-    }
-    if base.host_str().is_none() {
-        return Err(anyhow!("LibreSpeed server URL must include a host"));
-    }
-    if !base.username().is_empty() || base.password().is_some() {
-        return Err(anyhow!(
-            "LibreSpeed server URL must not include user credentials"
-        ));
-    }
-    if base.query().is_some() {
-        return Err(anyhow!(
-            "LibreSpeed server URL must not include a query string"
-        ));
-    }
-    if base.fragment().is_some() {
-        return Err(anyhow!("LibreSpeed server URL must not include a fragment"));
-    }
-
-    if !base.path().ends_with('/') {
-        base.path_segments_mut()
-            .map_err(|_| anyhow!("LibreSpeed server URL cannot be used as a base URL"))?
-            .push("");
-    }
-    let host = server_host(&base)?;
-
+    let base = http::base_url(base)?;
     Ok(ResolvedServer {
         name: "Custom LibreSpeed server".to_string(),
         base,
-        host,
         download_path: "garbage.php".to_string(),
         upload_path: "empty.php".to_string(),
         ping_path: "empty.php".to_string(),
@@ -347,26 +301,13 @@ fn resolve_custom_server(base: &str) -> Result<ResolvedServer> {
 }
 
 fn resolve_builtin(server: LibreSpeedServer) -> Result<ResolvedServer> {
-    let base = Url::parse(server.base).context("invalid built-in LibreSpeed URL")?;
-    let host = server_host(&base).context("invalid built-in LibreSpeed URL")?;
     Ok(ResolvedServer {
         name: server.name.to_string(),
-        base,
-        host,
+        base: Url::parse(server.base).context("invalid built-in LibreSpeed URL")?,
         download_path: server.download_path.to_string(),
         upload_path: server.upload_path.to_string(),
         ping_path: server.ping_path.to_string(),
     })
-}
-
-fn server_host(url: &Url) -> Result<String> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow!("LibreSpeed server URL must include a host"))?;
-    let host = host.to_string();
-    Ok(url
-        .port()
-        .map_or(host.clone(), |port| format!("{host}:{port}")))
 }
 
 async fn select_public_server(client: &Client) -> Result<ResolvedServer> {
@@ -416,7 +357,7 @@ async fn measure_latency(
             .context("LibreSpeed latency request failed")?
             .error_for_status()
             .context("LibreSpeed latency endpoint returned an error")?;
-        let _ = response.bytes().await?;
+        http::drain(response, 64 * 1024).await?;
         samples.push(started.elapsed().as_secs_f64() * 1000.0);
         sleep(Duration::from_millis(75)).await;
     }
@@ -453,10 +394,10 @@ async fn download_worker(
             chunk_mb = (chunk_mb / 2).max(4);
             continue;
         }
-        let response = response
-            .error_for_status()
-            .context("LibreSpeed download endpoint returned an error")?;
+        let response =
+            http::success(response).context("LibreSpeed download endpoint returned an error")?;
         let mut body = response.bytes_stream();
+        let mut request_bytes = 0u64;
         loop {
             let next = tokio::select! {
                 value = body.next() => value,
@@ -464,6 +405,7 @@ async fn download_worker(
             };
             match next {
                 Some(Ok(chunk)) => {
+                    request_bytes += chunk.len() as u64;
                     total.fetch_add(chunk.len() as u64, Ordering::Relaxed);
                 }
                 Some(Err(error)) => return Err(error).context("LibreSpeed download stream failed"),
@@ -473,6 +415,10 @@ async fn download_worker(
                 break;
             }
         }
+        anyhow::ensure!(
+            request_bytes > 0 || Instant::now() >= deadline,
+            "LibreSpeed returned an empty download body"
+        );
     }
     Ok(())
 }
@@ -481,29 +427,51 @@ async fn upload_worker(
     client: Client,
     server: ResolvedServer,
     total: Arc<AtomicU64>,
-    initial_payload: Bytes,
+    initial_payload: usize,
     deadline: Instant,
 ) -> Result<()> {
-    let mut payload = initial_payload;
+    let mut payload_len = initial_payload;
     while Instant::now() < deadline {
+        let submitted = Arc::new(AtomicU64::new(0));
+        let started = Instant::now();
         let url = server.base.join(&server.upload_path)?;
         let response = tokio::select! {
+            biased;
+            _ = sleep_until(deadline) => break,
             value = client
                 .post(url)
                 .query(&[("cors", "true"), ("r", &Utc::now().timestamp_micros().to_string())])
                 .header("content-type", "application/octet-stream")
-                .body(payload.clone())
-                .send() => value.context("LibreSpeed upload request failed")?,
-            _ = sleep_until(deadline) => break,
+                .header(reqwest::header::CONTENT_LENGTH, payload_len)
+                .body(http::upload_body(Arc::clone(&submitted), payload_len))
+                .send() => value,
         };
-        if response.status() == StatusCode::PAYLOAD_TOO_LARGE && payload.len() > 1024 * 1024 {
-            payload = payload.slice(..payload.len() / 2);
+        if Instant::now() >= deadline {
+            break;
+        }
+        let response = response.context("LibreSpeed upload request failed")?;
+        if response.status() == StatusCode::PAYLOAD_TOO_LARGE && payload_len > 16 * 1024 {
+            payload_len = (payload_len / 2).max(16 * 1024);
             continue;
         }
-        response
-            .error_for_status()
-            .context("LibreSpeed upload endpoint returned an error")?;
-        total.fetch_add(payload.len() as u64, Ordering::Relaxed);
+        let response =
+            http::success(response).context("LibreSpeed upload endpoint returned an error")?;
+        if !http::complete_upload(
+            http::drain(response, 1024 * 1024),
+            &submitted,
+            payload_len,
+            &total,
+            deadline,
+        )
+        .await?
+        {
+            break;
+        }
+        if started.elapsed() < Duration::from_millis(250) {
+            payload_len = (payload_len * 2).min(8 * 1024 * 1024);
+        } else if started.elapsed() > Duration::from_secs(1) {
+            payload_len = (payload_len / 2).max(16 * 1024);
+        }
     }
     Ok(())
 }
@@ -529,8 +497,13 @@ async fn measure_loaded_latency(
                 .send() => value.ok(),
             _ = sleep_until(deadline) => None,
         };
-        if response.is_some_and(|response| response.status().is_success()) {
-            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        if let Some(response) = response {
+            if matches!(
+                tokio::time::timeout_at(deadline, http::drain(response, 64 * 1024)).await,
+                Ok(Ok(()))
+            ) {
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
         }
         index += 1;
         let now = Instant::now();
@@ -549,6 +522,12 @@ fn mbps(bytes: u64, seconds: f64) -> f64 {
     bytes as f64 * 8.0 / seconds / 1_000_000.0
 }
 
+fn emit_loaded(samples: &[f64], phase: TestPhase, tx: &UnboundedSender<EngineEvent>) {
+    if let Some(ms) = analysis::distribution(samples).map(|stats| stats.median_ms) {
+        let _ = tx.send(EngineEvent::LoadedLatency { phase, ms });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,73 +544,104 @@ mod tests {
     fn resolves_custom_server_with_standard_paths() {
         let server = resolve_custom_server("https://speed.example.test/backend").unwrap();
         assert_eq!(server.base.as_str(), "https://speed.example.test/backend/");
-        assert_eq!(server.host, "speed.example.test");
         assert_eq!(server.download_path, "garbage.php");
-        assert_eq!(
-            server.base.join(&server.download_path).unwrap().as_str(),
-            "https://speed.example.test/backend/garbage.php"
-        );
     }
 
-    #[test]
-    fn preserves_nested_custom_server_paths_when_joining_endpoints() {
-        let server = resolve_custom_server("https://speed.example.test/nested/backend/").unwrap();
-        assert_eq!(
-            server.base.join(&server.download_path).unwrap().as_str(),
-            "https://speed.example.test/nested/backend/garbage.php"
-        );
-        assert_eq!(
-            server.base.join(&server.upload_path).unwrap().as_str(),
-            "https://speed.example.test/nested/backend/empty.php"
-        );
-    }
-
-    #[test]
-    fn custom_server_requires_http_or_https() {
-        for url in ["ftp://speed.example.test/backend", "file:///tmp/librespeed"] {
-            let error = resolve_custom_server(url).unwrap_err().to_string();
-            assert!(error.contains("http or https"), "unexpected error: {error}");
+    #[tokio::test]
+    async fn completed_phases_emit_their_loaded_latency_before_returning() {
+        let (url, peer) = crate::engine::test_support::measurement_peer().await;
+        let engine = LibreSpeedEngine {
+            client: Client::builder().no_proxy().build().unwrap(),
+            config: EngineConfig {
+                streams: 1,
+                phase_duration: Duration::from_millis(150),
+            },
+            server: None,
+        };
+        let server = resolve_custom_server(&url).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for phase in [TestPhase::Download, TestPhase::Upload] {
+            let (result, samples) = match phase {
+                TestPhase::Download => engine.measure_download(&server, &tx).await.unwrap(),
+                TestPhase::Upload => engine.measure_upload(&server, &tx).await.unwrap(),
+                _ => unreachable!(),
+            };
+            assert!(result.bytes > 0);
+            let expected = analysis::distribution(&samples).unwrap().median_ms;
+            let mut loaded_events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                if let EngineEvent::LoadedLatency { phase, ms } = event {
+                    loaded_events.push((phase, ms));
+                }
+            }
+            assert_eq!(loaded_events, vec![(phase, expected)]);
         }
+        peer.abort();
+        let _ = peer.await;
     }
 
     #[test]
-    fn custom_server_rejects_credentials() {
-        for url in [
-            "https://operator@speed.example.test/backend",
-            "https://operator:secret@speed.example.test/backend",
-        ] {
-            let error = resolve_custom_server(url).unwrap_err().to_string();
-            assert!(error.contains("credentials"), "unexpected error: {error}");
-        }
+    fn failed_loaded_probes_do_not_invent_a_latency_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        emit_loaded(&[], TestPhase::Download, &tx);
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    use crate::engine::test_support::upload_peer;
+
+    #[tokio::test]
+    async fn rejected_uploads_never_count_as_goodput() {
+        let (url, peer) = upload_peer(vec![(413, Duration::ZERO), (500, Duration::ZERO)]).await;
+        let total = Arc::new(AtomicU64::new(0));
+        let result = upload_worker(
+            Client::builder().no_proxy().build().unwrap(),
+            resolve_custom_server(&url).unwrap(),
+            Arc::clone(&total),
+            64 * 1024,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+        assert_eq!(peer.await.unwrap(), vec![64 * 1024, 32 * 1024]);
     }
 
-    #[test]
-    fn custom_server_rejects_query_and_fragment() {
-        let query = resolve_custom_server("https://speed.example.test/backend?token=secret")
-            .unwrap_err()
-            .to_string();
-        assert!(query.contains("query string"), "unexpected error: {query}");
-
-        let fragment = resolve_custom_server("https://speed.example.test/backend#secret")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            fragment.contains("fragment"),
-            "unexpected error: {fragment}"
-        );
+    #[tokio::test]
+    async fn deadline_cancelled_upload_is_not_counted() {
+        let (url, peer) = upload_peer(vec![(200, Duration::from_millis(250))]).await;
+        let total = Arc::new(AtomicU64::new(0));
+        upload_worker(
+            Client::builder().no_proxy().build().unwrap(),
+            resolve_custom_server(&url).unwrap(),
+            Arc::clone(&total),
+            64 * 1024,
+            Instant::now() + Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+        peer.abort();
+        let _ = peer.await;
     }
 
-    #[test]
-    fn custom_server_host_metadata_excludes_path_and_default_port() {
-        let server =
-            resolve_custom_server("https://speed.example.test:443/private/backend").unwrap();
-        assert_eq!(server.host, "speed.example.test");
-        assert!(!server.host.contains("private"));
-    }
-
-    #[test]
-    fn custom_server_host_metadata_formats_ipv6_and_non_default_ports() {
-        let server = resolve_custom_server("http://[::1]:8080/backend").unwrap();
-        assert_eq!(server.host, "[::1]:8080");
+    #[tokio::test]
+    async fn only_successful_complete_requests_commit_bytes() {
+        let (url, peer) = upload_peer(vec![(200, Duration::ZERO), (500, Duration::ZERO)]).await;
+        let total = Arc::new(AtomicU64::new(0));
+        assert!(upload_worker(
+            Client::builder().no_proxy().build().unwrap(),
+            resolve_custom_server(&url).unwrap(),
+            Arc::clone(&total),
+            64 * 1024,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .is_err());
+        assert_eq!(total.load(Ordering::Relaxed), 64 * 1024);
+        peer.await.unwrap();
     }
 }

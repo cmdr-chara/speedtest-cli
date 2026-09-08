@@ -1,3 +1,4 @@
+use crate::i18n::ui;
 use std::{collections::VecDeque, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
@@ -18,7 +19,7 @@ use crate::{
     stability::{StabilityEvent, StabilityResult, StabilitySample},
 };
 
-use super::{enter_terminal, finish_terminal_session, frame_interval, restore_terminal};
+use super::{enter_terminal, frame_interval, restore_terminal};
 
 const TRACE_POINTS: usize = 120;
 
@@ -84,10 +85,11 @@ pub(super) async fn run(
     target_duration: Duration,
     render_fps: u16,
 ) -> Result<StabilityResult> {
+    let _guard = super::TerminalGuard;
     let mut terminal = enter_terminal()?;
     let result = run_loop(&mut terminal, &mut rx, target_duration, render_fps).await;
-    let restoration = restore_terminal(&mut terminal);
-    finish_terminal_session(result, restoration)
+    restore_terminal(&mut terminal)?;
+    result
 }
 
 async fn run_loop(
@@ -147,7 +149,7 @@ fn handle_input(app: &StabilityApp) -> Result<Option<StabilityResult>> {
         || key.code == KeyCode::Esc
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
     {
-        return Err(anyhow!("stability test cancelled"));
+        return Err(anyhow!(crate::runtime::Outcome::Cancelled));
     }
     Ok(None)
 }
@@ -156,7 +158,7 @@ fn draw(frame: &mut Frame, app: &StabilityApp) {
     let area = frame.area();
     let outer = Block::default()
         .title(
-            Line::from(" NETWORK STABILITY ").style(
+            Line::from(ui(" NETWORK STABILITY ")).style(
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
@@ -216,7 +218,7 @@ fn render_trace(frame: &mut Frame, app: &StabilityApp, area: Rect) {
     let sparkline = Sparkline::default()
         .block(
             Block::default()
-                .title(" LATENCY TRACE ")
+                .title(ui(" LATENCY TRACE "))
                 .borders(Borders::TOP | Borders::BOTTOM)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
@@ -270,15 +272,10 @@ fn render_metrics(frame: &mut Frame, app: &StabilityApp, area: Rect) {
         ),
         metric_line(
             "PROBES",
-            app.result.as_ref().map_or_else(
-                || format_probe_counts(app.probes.saturating_sub(app.failed), app.failed, 0),
-                |result| {
-                    format_probe_counts(
-                        result.successful_probes,
-                        result.failed_probes,
-                        result.skipped_probes,
-                    )
-                },
+            format!(
+                "{} ok / {} failed",
+                app.probes.saturating_sub(app.failed),
+                app.failed
             ),
         ),
     ]);
@@ -298,19 +295,17 @@ fn render_status(frame: &mut Frame, app: &StabilityApp, area: Rect) {
             .map_or(String::new(), |tier| format!("  ◆ {tier}"));
         Paragraph::new(vec![
             Line::from(Span::styled(
-                format!(
+                ui(format!(
                     "STABILITY {}/100 {}{tier}",
                     result.score,
                     result.grade.label()
-                ),
+                )),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )),
-            Line::from(format!(
-                "probe availability {:.2}%  •  {}  •  {} failure bursts",
-                result.probe_availability_percent,
-                format_probe_outcomes(result.failed_probes, result.skipped_probes),
-                result.failure_bursts
-            )),
+            Line::from(ui(format!(
+                "probe availability {:.2}%  •  {} failed  •  {} failure bursts",
+                result.probe_availability_percent, result.failed_probes, result.failure_bursts
+            ))),
         ])
         .alignment(Alignment::Center)
     } else {
@@ -321,12 +316,12 @@ fn render_status(frame: &mut Frame, app: &StabilityApp, area: Rect) {
         };
         Paragraph::new(vec![
             Line::from(Span::styled(
-                "LIVE STABILITY PROBE",
+                ui("LIVE STABILITY PROBE"),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from(format!("probe availability {availability:.2}%")),
+            Line::from(ui(format!("probe availability {availability:.2}%"))),
         ])
         .alignment(Alignment::Center)
     };
@@ -341,8 +336,8 @@ fn render_footer(frame: &mut Frame, app: &StabilityApp, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Network stability test", Style::default().fg(Color::Gray)),
-            Span::raw("  •  "),
+            Span::styled(ui("Cloudflare Edge"), Style::default().fg(Color::Gray)),
+            Span::raw(ui("  •  ")),
             Span::styled(instruction, Style::default().fg(Color::DarkGray)),
         ]))
         .alignment(Alignment::Center),
@@ -352,7 +347,10 @@ fn render_footer(frame: &mut Frame, app: &StabilityApp, area: Rect) {
 
 fn metric_line(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!(" {label:<9}"), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            ui(format!(" {label:<9}")),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled(value, Style::default().fg(Color::White)),
     ])
 }
@@ -374,22 +372,6 @@ fn format_ms_value(value: f64) -> String {
     format!("{value:.1} ms")
 }
 
-fn format_probe_counts(successful: usize, failed: usize, skipped: usize) -> String {
-    let mut counts = format!("{successful} ok / {failed} failed");
-    if skipped > 0 {
-        counts.push_str(&format!(" / {skipped} skipped"));
-    }
-    counts
-}
-
-fn format_probe_outcomes(failed: usize, skipped: usize) -> String {
-    let mut outcomes = format!("{failed} failed");
-    if skipped > 0 {
-        outcomes.push_str(&format!("  •  {skipped} skipped"));
-    }
-    outcomes
-}
-
 fn format_clock(milliseconds: u64) -> String {
     let seconds = milliseconds / 1000;
     let hours = seconds / 3600;
@@ -399,21 +381,5 @@ fn format_clock(milliseconds: u64) -> String {
         format!("{hours:02}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes:02}:{seconds:02}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn probe_labels_include_skipped_work_only_when_present() {
-        assert_eq!(format_probe_counts(10, 1, 0), "10 ok / 1 failed");
-        assert_eq!(
-            format_probe_counts(10, 1, 2),
-            "10 ok / 1 failed / 2 skipped"
-        );
-        assert_eq!(format_probe_outcomes(1, 0), "1 failed");
-        assert_eq!(format_probe_outcomes(1, 2), "1 failed  •  2 skipped");
     }
 }

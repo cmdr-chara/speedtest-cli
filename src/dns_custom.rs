@@ -1,21 +1,12 @@
-use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::atomic::{AtomicU16, Ordering},
-    time::Duration,
-};
+use std::net::IpAddr;
 
-use anyhow::{anyhow, Context, Result};
-use tokio::{
-    net::UdpSocket,
-    time::{timeout, Instant},
-};
+use anyhow::{anyhow, Result};
 
 use crate::{
     analysis,
     dns::{finalize_score, grade_for_score, DnsCategory, DnsProviderBenchmark},
 };
 
-const TIMEOUT: Duration = Duration::from_millis(1_500);
 const DOMAINS: [&str; 8] = [
     "cloudflare.com",
     "google.com",
@@ -26,7 +17,6 @@ const DOMAINS: [&str; 8] = [
     "rust-lang.org",
     "ietf.org",
 ];
-static NEXT_ID: AtomicU16 = AtomicU16::new(0x7221);
 
 pub async fn test_servers(servers: Vec<IpAddr>, queries: usize) -> Result<DnsProviderBenchmark> {
     if servers.is_empty() {
@@ -37,7 +27,7 @@ pub async fn test_servers(servers: Vec<IpAddr>, queries: usize) -> Result<DnsPro
     for index in 0..queries {
         let server = servers[index % servers.len()];
         let domain = DOMAINS[index % DOMAINS.len()];
-        if let Ok(ms) = query(server, domain).await {
+        if let Ok(ms) = crate::dns::query_udp(server, domain).await {
             samples.push(ms);
         }
     }
@@ -77,63 +67,6 @@ fn score_samples(servers: Vec<IpAddr>, queries: usize, samples: &[f64]) -> DnsPr
         s_tier: score >= 98 && success_rate_percent >= 100.0 && median <= 15.0,
         is_current: false,
     }
-}
-
-async fn query(server: IpAddr, domain: &str) -> Result<f64> {
-    let bind = match server {
-        IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-        IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-    };
-    let socket = UdpSocket::bind(bind)
-        .await
-        .context("failed to bind DNS socket")?;
-    socket
-        .connect(SocketAddr::new(server, 53))
-        .await
-        .context("failed to connect DNS socket")?;
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let packet = build_query(domain, id)?;
-    let started = Instant::now();
-    timeout(TIMEOUT, socket.send(&packet))
-        .await
-        .context("DNS send timed out")??;
-    let mut response = [0_u8; 4096];
-    let size = timeout(TIMEOUT, socket.recv(&mut response))
-        .await
-        .context("DNS response timed out")??;
-    validate(&response[..size], id)?;
-    Ok(started.elapsed().as_secs_f64() * 1000.0)
-}
-
-fn build_query(domain: &str, id: u16) -> Result<Vec<u8>> {
-    let mut packet = Vec::with_capacity(128);
-    packet.extend_from_slice(&id.to_be_bytes());
-    packet.extend_from_slice(&0x0100_u16.to_be_bytes());
-    packet.extend_from_slice(&1_u16.to_be_bytes());
-    packet.extend_from_slice(&[0_u8; 6]);
-    for label in domain.split('.') {
-        if label.is_empty() || label.len() > 63 || !label.is_ascii() {
-            return Err(anyhow!("invalid DNS name: {domain}"));
-        }
-        packet.push(label.len() as u8);
-        packet.extend_from_slice(label.as_bytes());
-    }
-    packet.push(0);
-    packet.extend_from_slice(&1_u16.to_be_bytes());
-    packet.extend_from_slice(&1_u16.to_be_bytes());
-    Ok(packet)
-}
-
-fn validate(response: &[u8], id: u16) -> Result<()> {
-    if response.len() < 12 || u16::from_be_bytes([response[0], response[1]]) != id {
-        return Err(anyhow!("invalid DNS response header"));
-    }
-    let flags = u16::from_be_bytes([response[2], response[3]]);
-    let answers = u16::from_be_bytes([response[6], response[7]]);
-    if flags & 0x8000 == 0 || flags & 0x000f != 0 || answers == 0 {
-        return Err(anyhow!("DNS resolver returned an unusable response"));
-    }
-    Ok(())
 }
 
 fn absolute_latency_score(value: f64) -> f64 {

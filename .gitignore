@@ -4,3 +4,7 @@
 .DS_Store
 .idea/
 .vscode/
+
+/dist/
+/verification/
+__pycache__/

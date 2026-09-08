@@ -1,0 +1,58 @@
+name: Dependency audit
+
+on:
+  push:
+    paths: [Cargo.toml, Cargo.lock, .github/workflows/security.yml]
+  pull_request:
+    paths: [Cargo.toml, Cargo.lock, .github/workflows/security.yml]
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned auditor
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit committed dependency resolution
+        run: |
+          test -f Cargo.lock
+          mkdir -p verification
+          cargo audit --json > verification/audit.json
+      - name: Surface advisories including informational warnings
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = Path('verification/audit.json')
+          if report.exists() and report.stat().st_size:
+              data = json.loads(report.read_text())
+              lines = ['## Dependency audit', f"Vulnerability entries: {data['vulnerabilities']['count']}"]
+              for category, entries in data.get('warnings', {}).items():
+                  for entry in entries:
+                      advisory = entry.get('advisory') or {}
+                      package = entry['package']
+                      lines.append(f"- {category}: {package['name']} {package['version']} — {advisory.get('id', 'notice')}: {advisory.get('title', '')}")
+              lines.append('Informational warnings are not a clean security bill; see docs/verification.md for the reviewed dependency paths.')
+              text = '\n'.join(lines) + '\n'
+              print(text)
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as handle:
+                  handle.write(text)
+          PY
+      - name: Preserve audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit
+          path: verification/audit.json
+          retention-days: 7

@@ -12,7 +12,6 @@ use chrono::Utc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::Semaphore,
     task::JoinSet,
     time::{sleep, sleep_until, timeout, Instant},
 };
@@ -26,13 +25,12 @@ const MAGIC: &[u8; 4] = b"NSL1";
 const OP_PING: u8 = 0;
 const OP_DOWNLOAD: u8 = 1;
 const OP_UPLOAD: u8 = 2;
-const IO_CHUNK: usize = 64 * 1024;
-const MAX_CONCURRENT_CONNECTIONS: usize = 64;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
-const SERVER_TRANSFER_TIMEOUT: Duration = Duration::from_secs(45);
+const IO_CHUNK: usize = 1024 * 1024;
 const PING_TIMEOUT: Duration = Duration::from_secs(2);
 const LOADED_PING_INTERVAL: Duration = Duration::from_millis(250);
 const IDLE_SAMPLES: usize = 20;
+const MAX_CONNECTIONS: usize = 64;
+const SESSION_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, Copy)]
 pub struct LanConfig {
@@ -44,36 +42,41 @@ pub async fn serve(bind: SocketAddr) -> Result<()> {
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind LAN speed-test server to {bind}"))?;
-    let listening = listener.local_addr().unwrap_or(bind);
-    println!("LAN SPEEDTEST SERVER");
-    println!("  Listening: {listening}");
-    println!(
-        "  Client:    speedtest lan <this-host>:{}",
-        listening.port()
-    );
-    println!("  Stop with Ctrl+C.");
     serve_listener(listener).await
 }
 
-async fn serve_listener(listener: TcpListener) -> Result<()> {
-    let connection_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+/// Run on an already-bound listener, allowing accurate readiness and ephemeral-port tests.
+pub async fn serve_listener(listener: TcpListener) -> Result<()> {
+    let mut connections = JoinSet::new();
     loop {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .context("LAN server accept failed")?;
-        let Ok(permit) = Arc::clone(&connection_slots).try_acquire_owned() else {
-            drop(stream);
-            continue;
-        };
-        tokio::spawn(async move {
-            let _permit = permit;
-            let _ = handle_connection(stream).await;
-        });
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.context("LAN server accept failed")?;
+                admit_connection(&mut connections, stream);
+            }
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+        }
     }
 }
 
+fn admit_connection(connections: &mut JoinSet<()>, stream: TcpStream) {
+    // Finished tasks still occupy JoinSet entries until they are joined. Reap
+    // them before admission and bound the set itself, not only running sessions.
+    while connections.try_join_next().is_some() {}
+    if connections.len() >= MAX_CONNECTIONS {
+        return;
+    }
+    connections.spawn(async move {
+        let _ = timeout(SESSION_TIMEOUT, handle_connection(stream)).await;
+    });
+}
+
 pub async fn run(server: SocketAddr, config: LanConfig) -> Result<TestResult> {
+    crate::engine::EngineConfig {
+        streams: config.streams,
+        phase_duration: config.phase_duration,
+    }
+    .validate()?;
     let mut idle_samples = Vec::with_capacity(IDLE_SAMPLES);
     for _ in 0..IDLE_SAMPLES {
         idle_samples.push(ping_once(server).await?);
@@ -110,19 +113,11 @@ pub async fn run(server: SocketAddr, config: LanConfig) -> Result<TestResult> {
 }
 
 async fn handle_connection(mut stream: TcpStream) -> Result<()> {
-    handle_connection_with_timeouts(&mut stream, HANDSHAKE_TIMEOUT, SERVER_TRANSFER_TIMEOUT).await
-}
-
-async fn handle_connection_with_timeouts(
-    stream: &mut TcpStream,
-    handshake_timeout: Duration,
-    transfer_timeout: Duration,
-) -> Result<()> {
     stream
         .set_nodelay(true)
         .context("failed to enable TCP_NODELAY")?;
     let mut header = [0_u8; 5];
-    timeout(handshake_timeout, stream.read_exact(&mut header))
+    timeout(PING_TIMEOUT, stream.read_exact(&mut header))
         .await
         .context("LAN protocol header timed out")?
         .context("LAN client closed before protocol header")?;
@@ -130,14 +125,7 @@ async fn handle_connection_with_timeouts(
         return Err(anyhow!("invalid LAN speed-test protocol magic"));
     }
 
-    timeout(transfer_timeout, handle_request(stream, header[4]))
-        .await
-        .context("LAN connection exceeded transfer time limit")??;
-    Ok(())
-}
-
-async fn handle_request(stream: &mut TcpStream, opcode: u8) -> Result<()> {
-    match opcode {
+    match header[4] {
         OP_PING => {
             stream.write_all(MAGIC).await?;
             stream.write_u8(OP_PING).await?;
@@ -146,7 +134,10 @@ async fn handle_request(stream: &mut TcpStream, opcode: u8) -> Result<()> {
         OP_DOWNLOAD => {
             let chunk = vec![0x5a_u8; IO_CHUNK];
             loop {
-                if stream.write_all(&chunk).await.is_err() {
+                if !matches!(
+                    timeout(Duration::from_secs(5), stream.write_all(&chunk)).await,
+                    Ok(Ok(()))
+                ) {
                     break;
                 }
             }
@@ -155,10 +146,13 @@ async fn handle_request(stream: &mut TcpStream, opcode: u8) -> Result<()> {
             let mut total = 0_u64;
             let mut buffer = vec![0_u8; IO_CHUNK];
             loop {
-                match stream.read(&mut buffer).await {
+                match timeout(Duration::from_secs(5), stream.read(&mut buffer))
+                    .await
+                    .context("LAN upload idle timeout")?
+                {
                     Ok(0) => break,
                     Ok(count) => total = total.saturating_add(count as u64),
-                    Err(_) => break,
+                    Err(error) => return Err(error.into()),
                 }
             }
             let _ = stream.write_u64(total).await;
@@ -173,24 +167,25 @@ async fn ping_once(server: SocketAddr) -> Result<f64> {
     let started = Instant::now();
     let mut stream = timeout(PING_TIMEOUT, TcpStream::connect(server))
         .await
-        .context("LAN ping connection timed out")??;
+        .context("LAN ping connection timed out")?
+        .context("failed to connect to LAN server; start `speedtest serve --bind <LAN-IP>:9876` on the peer and check its firewall")?;
     stream.set_nodelay(true)?;
-    let mut response = [0_u8; 5];
     timeout(PING_TIMEOUT, async {
         stream.write_all(MAGIC).await?;
         stream.write_u8(OP_PING).await?;
         stream.flush().await?;
+        let mut response = [0_u8; 5];
         stream.read_exact(&mut response).await?;
+        if &response[..4] != MAGIC || response[4] != OP_PING {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid LAN echo response",
+            ));
+        }
         Result::<(), std::io::Error>::Ok(())
     })
     .await
     .context("LAN echo timed out")??;
-    if &response[..4] != MAGIC {
-        return Err(anyhow!("invalid LAN ping response magic"));
-    }
-    if response[4] != OP_PING {
-        return Err(anyhow!("invalid LAN ping response opcode {}", response[4]));
-    }
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
@@ -207,12 +202,9 @@ async fn measure_download(
         let total = Arc::clone(&total);
         workers.spawn(download_worker(server, total, deadline));
     }
-    let loaded = tokio::spawn(measure_loaded_latency(server, deadline));
-
-    while let Some(result) = workers.join_next().await {
-        result.context("LAN download worker panicked")??;
-    }
-    let loaded_samples = loaded.await.context("LAN loaded-latency task panicked")?;
+    let loaded_samples =
+        crate::engine::finish_phase(workers, async {}, measure_loaded_latency(server, deadline))
+            .await?;
     let bytes = total.load(Ordering::Relaxed);
     if bytes == 0 {
         return Err(anyhow!("LAN server delivered no download data"));
@@ -228,28 +220,36 @@ async fn measure_download(
     ))
 }
 
+async fn open_transfer(server: SocketAddr, opcode: u8, deadline: Instant) -> Result<TcpStream> {
+    tokio::time::timeout_at(deadline, async {
+        let mut stream = TcpStream::connect(server).await?;
+        stream.set_nodelay(true)?;
+        stream.write_all(MAGIC).await?;
+        stream.write_u8(opcode).await?;
+        stream.flush().await?;
+        Result::<_, std::io::Error>::Ok(stream)
+    })
+    .await
+    .context("LAN connection/header timed out")?
+    .context("failed to open LAN transfer")
+}
+
 async fn download_worker(
     server: SocketAddr,
     total: Arc<AtomicU64>,
     deadline: Instant,
 ) -> Result<()> {
-    let mut stream = TcpStream::connect(server)
-        .await
-        .with_context(|| format!("failed to connect to LAN server {server}"))?;
-    stream.set_nodelay(true)?;
-    stream.write_all(MAGIC).await?;
-    stream.write_u8(OP_DOWNLOAD).await?;
-    stream.flush().await?;
-    let mut buffer = vec![0_u8; IO_CHUNK];
-
+    let mut stream = open_transfer(server, OP_DOWNLOAD, deadline).await?;
+    let mut buffer = vec![0_u8; 64 * 1024];
     while Instant::now() < deadline {
         let read = tokio::select! {
             value = stream.read(&mut buffer) => value?,
             _ = sleep_until(deadline) => break,
         };
-        if read == 0 {
-            break;
-        }
+        anyhow::ensure!(
+            read != 0,
+            "LAN download ended before its measurement deadline"
+        );
         total.fetch_add(read as u64, Ordering::Relaxed);
     }
     Ok(())
@@ -263,65 +263,48 @@ async fn measure_upload(
     let started = Instant::now();
     let deadline = started + config.phase_duration;
     let mut workers = JoinSet::new();
-
-    for _ in 0..config.streams.max(1) {
-        let total = Arc::clone(&total);
-        workers.spawn(upload_worker(server, total, deadline));
+    for _ in 0..config.streams {
+        workers.spawn(upload_worker(server, Arc::clone(&total), deadline));
     }
-    let loaded = tokio::spawn(measure_loaded_latency(server, deadline));
-
-    while let Some(result) = workers.join_next().await {
-        result.context("LAN upload worker panicked")??;
-    }
-    let loaded_samples = loaded.await.context("LAN loaded-latency task panicked")?;
+    let loaded_samples =
+        crate::engine::finish_phase(workers, async {}, measure_loaded_latency(server, deadline))
+            .await?;
     let bytes = total.load(Ordering::Relaxed);
-    if bytes == 0 {
-        return Err(anyhow!("LAN server accepted no upload data"));
-    }
-
+    anyhow::ensure!(bytes > 0, "LAN server accepted no upload data");
+    // Include acknowledgement drain time: buffered data is not instantaneous goodput.
+    let seconds = started.elapsed().as_secs_f64();
     Ok((
         ThroughputResult {
-            mbps: mbps(bytes, config.phase_duration.as_secs_f64()),
+            mbps: mbps(bytes, seconds),
             bytes,
-            seconds: config.phase_duration.as_secs_f64(),
+            seconds,
         },
         loaded_samples,
     ))
 }
 
 async fn upload_worker(server: SocketAddr, total: Arc<AtomicU64>, deadline: Instant) -> Result<()> {
-    let mut stream = TcpStream::connect(server)
-        .await
-        .with_context(|| format!("failed to connect to LAN server {server}"))?;
-    stream.set_nodelay(true)?;
-    stream.write_all(MAGIC).await?;
-    stream.write_u8(OP_UPLOAD).await?;
-    stream.flush().await?;
+    let mut stream = open_transfer(server, OP_UPLOAD, deadline).await?;
     let buffer = vec![0xa5_u8; IO_CHUNK];
-    let mut written = 0_u64;
-
+    let mut sent = 0u64;
     while Instant::now() < deadline {
         let write = tokio::select! {
             value = stream.write(&buffer) => value?,
             _ = sleep_until(deadline) => break,
         };
-        if write == 0 {
-            break;
-        }
-        written = written
-            .checked_add(write as u64)
-            .ok_or_else(|| anyhow!("LAN upload byte counter overflowed"))?;
+        anyhow::ensure!(write != 0, "LAN upload made no write progress");
+        sent += write as u64;
     }
-
-    stream.shutdown().await?;
-    let acknowledged = timeout(Duration::from_secs(3), stream.read_u64())
-        .await
-        .context("LAN upload acknowledgement timed out")??;
-    if acknowledged > written {
-        return Err(anyhow!(
-            "LAN server acknowledged {acknowledged} upload bytes, but this worker sent only {written}"
-        ));
-    }
+    let acknowledged = timeout(Duration::from_secs(3), async {
+        stream.shutdown().await?;
+        stream.read_u64().await
+    })
+    .await
+    .context("LAN upload acknowledgement timed out")??;
+    anyhow::ensure!(
+        acknowledged == sent,
+        "LAN upload acknowledgement does not match bytes sent"
+    );
     total.fetch_add(acknowledged, Ordering::Relaxed);
     Ok(())
 }
@@ -329,7 +312,7 @@ async fn upload_worker(server: SocketAddr, total: Arc<AtomicU64>, deadline: Inst
 async fn measure_loaded_latency(server: SocketAddr, deadline: Instant) -> Vec<f64> {
     let mut samples = Vec::new();
     while Instant::now() < deadline {
-        if let Ok(ms) = ping_once(server).await {
+        if let Ok(Ok(ms)) = tokio::time::timeout_at(deadline, ping_once(server)).await {
             samples.push(ms);
         }
         let now = Instant::now();
@@ -356,57 +339,40 @@ mod tests {
     fn lan_throughput_conversion_is_decimal_mbps() {
         assert!((mbps(125_000_000, 1.0) - 1000.0).abs() < 0.001);
     }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
 
     #[tokio::test]
-    async fn lan_ping_round_trip_uses_valid_protocol_response() {
+    async fn rejects_a_false_echo() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            handle_connection(stream).await
-        });
-
-        let latency = ping_once(address).await.unwrap();
-        assert!(latency.is_finite());
-        server.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn lan_ping_rejects_invalid_magic_and_opcode() {
-        for (response, expected_error) in [
-            (*b"BAD!\0", "invalid LAN ping response magic"),
-            (*b"NSL1\x01", "invalid LAN ping response opcode 1"),
-        ] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = [0_u8; 5];
-                stream.read_exact(&mut request).await.unwrap();
-                assert_eq!(&request[..4], MAGIC);
-                assert_eq!(request[4], OP_PING);
-                stream.write_all(&response).await.unwrap();
-            });
-
-            let error = ping_once(address).await.unwrap_err();
-            assert_eq!(error.to_string(), expected_error);
-            server.await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn lan_upload_rejects_acknowledgement_larger_than_worker_sent() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
+        let peer = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 5];
-            stream.read_exact(&mut request).await.unwrap();
-            assert_eq!(&request[..4], MAGIC);
-            assert_eq!(request[4], OP_UPLOAD);
+            let mut header = [0; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            stream.write_all(b"WRONG").await.unwrap();
+        });
+        assert!(ping_once(address)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("invalid LAN echo"));
+        peer.await.unwrap();
+    }
 
-            let mut received = 0_u64;
-            let mut buffer = vec![0_u8; IO_CHUNK];
+    #[tokio::test]
+    async fn rejects_inflated_upload_acknowledgements() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = [0; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            let mut buffer = [0; 64 * 1024];
+            let mut received = 0u64;
             loop {
                 let count = stream.read(&mut buffer).await.unwrap();
                 if count == 0 {
@@ -415,61 +381,100 @@ mod tests {
                 received += count as u64;
             }
             stream.write_u64(received + 1).await.unwrap();
-            received
         });
-
         let total = Arc::new(AtomicU64::new(0));
-        let error = upload_worker(
+        let result = upload_worker(
             address,
             Arc::clone(&total),
-            Instant::now() + Duration::from_millis(25),
+            Instant::now() + Duration::from_millis(50),
         )
-        .await
-        .unwrap_err();
-
-        assert!(error.to_string().contains("but this worker sent only"));
+        .await;
+        assert!(result.unwrap_err().to_string().contains("does not match"));
         assert_eq!(total.load(Ordering::Relaxed), 0);
-        assert!(server.await.unwrap() > 0);
+        peer.await.unwrap();
     }
 
     #[tokio::test]
-    async fn lan_stalled_header_is_timed_out() {
+    async fn server_expires_silent_handshakes() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let client = TcpStream::connect(address).await.unwrap();
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let server = tokio::spawn(serve_listener(listener));
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let mut byte = [0];
+        let count = timeout(Duration::from_secs(4), stream.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 0);
+        server.abort();
+        let _ = server.await;
+    }
 
-        let error = handle_connection_with_timeouts(
-            &mut stream,
-            Duration::from_millis(25),
+    #[tokio::test]
+    async fn loaded_probe_never_escapes_phase_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let result = timeout(
             Duration::from_secs(1),
+            measure_loaded_latency(address, Instant::now() + Duration::from_millis(30)),
         )
         .await
-        .unwrap_err();
-
-        assert!(error.to_string().contains("LAN protocol header timed out"));
-        drop(client);
+        .unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
-    async fn lan_stalled_transfer_is_timed_out() {
+    async fn admission_reaps_completed_tasks_before_starting_another_session() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let mut connections = JoinSet::new();
+        // Emulate completed sessions whose outputs have not yet been joined.
+        let (finished, mut completed) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..MAX_CONNECTIONS {
+            let finished = finished.clone();
+            connections.spawn(async move {
+                finished.send(()).unwrap();
+            });
+        }
+        for _ in 0..MAX_CONNECTIONS {
+            completed.recv().await.unwrap();
+        }
+        assert_eq!(connections.len(), MAX_CONNECTIONS);
+
         let mut client = TcpStream::connect(address).await.unwrap();
-        let (mut stream, _) = listener.accept().await.unwrap();
-        client.write_all(MAGIC).await.unwrap();
-        client.write_u8(OP_UPLOAD).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        admit_connection(&mut connections, stream);
+        assert_eq!(connections.len(), 1);
+        client.write_all(b"NSL1\0").await.unwrap();
+        let mut reply = [0; 5];
+        timeout(Duration::from_secs(1), client.read_exact(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&reply, b"NSL1\0");
+    }
 
-        let error = handle_connection_with_timeouts(
-            &mut stream,
-            Duration::from_secs(1),
-            Duration::from_millis(25),
-        )
-        .await
-        .unwrap_err();
+    #[tokio::test]
+    async fn admission_never_retains_more_than_the_connection_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut connections = JoinSet::new();
+        for _ in 0..MAX_CONNECTIONS {
+            connections.spawn(std::future::pending::<()>());
+        }
+        assert_eq!(connections.len(), MAX_CONNECTIONS);
 
-        assert!(error
-            .to_string()
-            .contains("LAN connection exceeded transfer time limit"));
+        let mut excess = TcpStream::connect(address).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        admit_connection(&mut connections, stream);
+        assert_eq!(connections.len(), MAX_CONNECTIONS);
+        let mut byte = [0];
+        assert_eq!(
+            timeout(Duration::from_secs(1), excess.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
     }
 }
