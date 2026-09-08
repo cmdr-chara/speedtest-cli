@@ -26,9 +26,11 @@ pub(super) fn translate(language: Language, source: &str) -> String {
             // domain enums, rather than feeding captures back through templates.
             let values = values
                 .into_iter()
-                .map(|v| {
+                .enumerate()
+                .map(|(index, v)| {
                     if ["download", "upload", "high", "medium", "low", "on", "off"]
                         .contains(&v.as_str())
+                        || comparison_token(template, index, &v)
                     {
                         text(language, &v)
                     } else {
@@ -45,6 +47,26 @@ pub(super) fn translate(language: Language, source: &str) -> String {
     }
     source.to_owned()
 }
+
+// These slots come from compare.rs's closed vocabulary. Do not translate the
+// same words when they are captured as a server name, path, or diagnostic data.
+fn comparison_token(template: &str, index: usize, value: &str) -> bool {
+    let vocabulary: &[&str] = match (template, index) {
+        ("{0} {1} by {2}% ({3})", 0) => &["download", "upload", "ping", "jitter"],
+        ("{0} {1} by {2}% ({3})", 1) | ("bufferbloat {0} by {1} ms", 0) => {
+            &["increased", "decreased"]
+        }
+        ("{0} {1} by {2}% ({3})", 3)
+        | ("ping increased by {0}% ({1})", 1)
+        | ("ping decreased by {0}% ({1})", 1) => &["better", "worse"],
+        ("quality score {0} by {1} points", 0) => &["improved", "fell"],
+        _ => &[],
+    };
+    vocabulary
+        .iter()
+        .any(|word| value.eq_ignore_ascii_case(word))
+}
+
 fn is_uppercase_template(source: &str, template: &str) -> bool {
     super::is_heading(source) && !super::is_heading(template)
 }

@@ -9,6 +9,7 @@ use std::sync::{
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use reqwest::{Response, Url};
+use tokio::time::{sleep_until, Instant};
 
 pub fn success(response: Response) -> Result<Response> {
     if !response.status().is_success() {
@@ -35,6 +36,36 @@ pub async fn drain(response: Response, limit: usize) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Commit only uploads whose complete successful response was observed before the
+/// cutoff. An async response body can finish a long poll after its deadline, even
+/// when it is raced against a timer, so check the clock after it returns as well.
+pub(crate) async fn complete_upload(
+    response_body: impl std::future::Future<Output = Result<()>>,
+    submitted: &AtomicU64,
+    payload_len: usize,
+    total: &AtomicU64,
+    deadline: Instant,
+) -> Result<bool> {
+    if Instant::now() >= deadline {
+        return Ok(false);
+    }
+    let result = tokio::select! {
+        biased;
+        _ = sleep_until(deadline) => return Ok(false),
+        result = response_body => result,
+    };
+    if Instant::now() >= deadline {
+        return Ok(false);
+    }
+    result?;
+    anyhow::ensure!(
+        submitted.load(Ordering::Relaxed) == payload_len as u64,
+        "upload endpoint responded before the complete request body was submitted"
+    );
+    total.fetch_add(payload_len as u64, Ordering::Relaxed);
+    Ok(true)
 }
 
 pub fn base_url(value: &str) -> Result<Url> {
@@ -104,6 +135,7 @@ mod tests {
 #[cfg(test)]
 mod response_tests {
     use super::*;
+    use std::time::Duration;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -140,5 +172,80 @@ mod response_tests {
             assert!(drain(response, 3).await.is_err());
             peer.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn upload_finishing_in_one_poll_after_cutoff_is_not_counted() {
+        let submitted = AtomicU64::new(64 * 1024);
+        let total = AtomicU64::new(0);
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut polled = false;
+        let response_body = async {
+            polled = true;
+            // Model response processing that does not yield back to the timer.
+            // The completion guard used by both HTTP engines must still exclude it.
+            std::thread::sleep(
+                (deadline + Duration::from_millis(10)).saturating_duration_since(Instant::now()),
+            );
+            Ok(())
+        };
+        assert!(
+            !complete_upload(response_body, &submitted, 64 * 1024, &total, deadline)
+                .await
+                .unwrap()
+        );
+        assert!(
+            polled,
+            "the response must cross the cutoff while being polled"
+        );
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn expired_upload_does_not_poll_an_already_ready_response() {
+        let total = AtomicU64::new(0);
+        let submitted = AtomicU64::new(64 * 1024);
+        let mut polled = false;
+        let response_body = async {
+            polled = true;
+            Ok(())
+        };
+        assert!(
+            !complete_upload(response_body, &submitted, 64 * 1024, &total, Instant::now(),)
+                .await
+                .unwrap()
+        );
+        assert!(!polled);
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn only_complete_successful_upload_responses_commit_payload_bytes() {
+        let total = AtomicU64::new(0);
+        let submitted = AtomicU64::new(64 * 1024);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(
+            complete_upload(async { Ok(()) }, &submitted, 64 * 1024, &total, deadline)
+                .await
+                .unwrap()
+        );
+        assert_eq!(total.load(Ordering::Relaxed), 64 * 1024);
+
+        assert!(complete_upload(
+            async { anyhow::bail!("truncated response") },
+            &submitted,
+            64 * 1024,
+            &total,
+            deadline,
+        )
+        .await
+        .is_err());
+        submitted.store(32 * 1024, Ordering::Relaxed);
+        assert!(
+            complete_upload(async { Ok(()) }, &submitted, 64 * 1024, &total, deadline)
+                .await
+                .is_err()
+        );
+        assert_eq!(total.load(Ordering::Relaxed), 64 * 1024);
     }
 }

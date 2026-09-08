@@ -24,6 +24,44 @@ fn key(app: &mut Cockpit, code: KeyCode) -> Effect {
 fn result() -> TestResult {
     serde_json::from_str(include_str!("../../../tests/fixtures/result.json")).unwrap()
 }
+
+fn comparison_results() -> Vec<TestResult> {
+    [
+        ("fixture-before", 100.0, 20.0, 30.0, 8.0, 50.0, 60),
+        ("fixture-after", 400.0, 50.0, 12.0, 2.0, 8.0, 90),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(
+        |(index, (backend, down, up, idle, jitter, loaded, score))| {
+            let mut result = result();
+            result.timestamp += chrono::Duration::hours(index as i64);
+            result.backend = backend.into();
+            result.download.mbps = down;
+            result.upload.mbps = up;
+            result.latency.idle_ms = idle;
+            result.latency.jitter_ms = jitter;
+            result.analysis = Some(crate::analysis::build_network_analysis(
+                &[idle; 12],
+                &[idle + loaded; 12],
+                &[idle + loaded; 12],
+                &result.latency,
+                &result.download,
+                &result.upload,
+            ));
+            let quality = &mut result.analysis.as_mut().unwrap().quality;
+            quality.score = score;
+            quality.grade = if index == 0 {
+                crate::model::QualityGrade::D
+            } else {
+                crate::model::QualityGrade::A
+            };
+            quality.bufferbloat.worst_increase_ms = Some(loaded);
+            result
+        },
+    )
+    .collect()
+}
 fn start(app: &mut Cockpit) {
     assert_eq!(key(app, KeyCode::Enter), Effect::None);
     assert_eq!(app.screen(), Screen::Configure);
@@ -363,13 +401,16 @@ fn report_scroll_clamps_after_resize_and_external_controls_are_removed() {
     assert!(app.page().scroll < 40);
     let small_scroll = app.page().scroll;
     let text = render(&mut app, 100, 50).0;
-    // The new workspace has a deliberate height cap. A larger terminal exposes
-    // more lines but must not pretend the remaining overflow no longer exists.
+    // Growing the terminal makes the whole report available instead of leaving
+    // it scrolled inside a fixed-height workspace.
     assert!(app.page().scroll < small_scroll);
-    assert!(text.contains("PgUp/PgDn"));
-    let capped_scroll = app.page().scroll;
+    assert_eq!(app.page().scroll, 0);
+    assert_eq!(text.matches("sentinel").count(), 30);
     render(&mut app, 100, 100);
-    assert_eq!(app.page().scroll, capped_scroll);
+    assert_eq!(app.page().scroll, 0);
+    app.page_mut().scroll = u16::MAX;
+    render(&mut app, 80, 24);
+    assert!(app.page().scroll > 0);
 }
 
 #[test]
@@ -396,6 +437,273 @@ fn selected_history_row_stays_visible_and_opens_without_saving() {
 }
 
 #[test]
+fn history_pages_and_endpoints_follow_the_visible_viewport_after_resize() {
+    let mut app = app();
+    let records = (0..40)
+        .map(|i| {
+            let mut result = result();
+            result.backend = format!("row-{i:02}");
+            result
+        })
+        .collect();
+    app.set_history(Ok(Archive::from_results(records)));
+    app.push(Screen::History);
+    render(&mut app, 80, 24);
+    let small_page = app.history_page_size;
+    assert!(small_page > 1);
+    assert_eq!(key(&mut app, KeyCode::PageDown), Effect::None);
+    let first_page = app.page().selected;
+    assert_eq!(first_page, small_page);
+    key(&mut app, KeyCode::PageDown);
+    assert!(app.page().selected > first_page);
+    key(&mut app, KeyCode::PageUp);
+    assert_eq!(app.page().selected, first_page);
+    key(&mut app, KeyCode::End);
+    assert_eq!(app.page().selected, 39);
+    let text = render(&mut app, 80, 24).0;
+    assert!(text.contains("row-00"));
+    assert!(text.contains("Run 40 of 40"));
+    key(&mut app, KeyCode::PageDown);
+    assert_eq!(app.page().selected, 39);
+    key(&mut app, KeyCode::Home);
+    assert_eq!(app.page().selected, 0);
+    assert!(render(&mut app, 120, 38).0.contains("row-39"));
+    assert!(app.history_page_size > small_page);
+    key(&mut app, KeyCode::PageDown);
+    let selected = app.page().selected;
+    let expected = format!("row-{:02}", 39 - selected);
+    assert!(render(&mut app, 120, 38).0.contains(&expected));
+    assert_eq!(key(&mut app, KeyCode::Enter), Effect::None);
+    assert_eq!(app.result.as_ref().unwrap().backend, expected);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.page().selected, selected);
+    assert_eq!(app.activity, None);
+}
+
+#[test]
+fn reload_restores_complete_record_identity_and_duplicate_occurrence() {
+    let mut app = app();
+    // Same timestamp, backend and server; metrics distinguish these records.
+    let records: Vec<_> = [10.0, 20.0, 20.0, 30.0]
+        .into_iter()
+        .map(|value| {
+            let mut result = result();
+            result.download.mbps = value;
+            result
+        })
+        .collect();
+    app.set_history(Ok(Archive::from_results(records.clone())));
+    app.push(Screen::History);
+    app.page_mut().selected = 2; // The older occurrence of the duplicate 20 Mbps run.
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    let mut appended = records;
+    let mut new = result();
+    new.download.mbps = 40.0;
+    appended.push(new);
+    app.set_history(Ok(Archive::from_results(appended.clone())));
+    assert_eq!(app.page().selected, 3);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.result.as_ref().unwrap().download.mbps, 20.0);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Err("fixture temporary read failure".into()));
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Ok(Archive::from_results(appended)));
+    assert_eq!(app.page().selected, 3);
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Ok(Archive::from_results(vec![result()])));
+    assert_eq!(app.page().selected, 0);
+    assert!(render(&mut app, 80, 24).0.contains("Run 1 of 1"));
+}
+
+#[test]
+fn baseline_comparison_uses_explicit_snapshots_and_preserves_history_navigation() {
+    let mut app = app();
+    let records = comparison_results();
+    let mut newest = records[1].clone();
+    newest.backend = "fixture-newest".into();
+    newest.download.mbps = 700.0;
+    app.set_history(Ok(Archive::from_results(vec![
+        records[0].clone(),
+        records[1].clone(),
+        newest.clone(),
+    ])));
+    app.push(Screen::History);
+    app.page_mut().selected = 1;
+    assert_eq!(key(&mut app, KeyCode::Char('c')), Effect::None);
+    let compared = app.comparison.as_ref().unwrap();
+    assert_eq!(compared.before.backend, "fixture-before");
+    assert_eq!(compared.after.backend, "fixture-after");
+    assert_eq!(compared.metrics.download_mbps.absolute_change, 300.0);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.page().selected, 1);
+    key(&mut app, KeyCode::End);
+    assert_eq!(key(&mut app, KeyCode::Char('c')), Effect::None);
+    assert_eq!(app.screen(), Screen::History);
+    assert!(app.notice.starts_with("No older run"));
+    assert_eq!(key(&mut app, KeyCode::Char('b')), Effect::None);
+    assert!(app.baseline.is_some());
+    key(&mut app, KeyCode::Char('c'));
+    assert_eq!(app.screen(), Screen::History);
+    assert!(app.notice.starts_with("Select another run"));
+    key(&mut app, KeyCode::Home);
+    assert_eq!(key(&mut app, KeyCode::Char('c')), Effect::None);
+    assert_eq!(
+        app.comparison.as_ref().unwrap().before.backend,
+        "fixture-before"
+    );
+    assert_eq!(
+        app.comparison.as_ref().unwrap().after.backend,
+        "fixture-newest"
+    );
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.page().selected, 0);
+    // Pin survives removal from history, and Compare remains the chosen snapshot.
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Ok(Archive::from_results(vec![newest])));
+    key(&mut app, KeyCode::Char('c'));
+    assert_eq!(
+        app.comparison.as_ref().unwrap().before.backend,
+        "fixture-before"
+    );
+    app.set_history(Err("fixture reload failure".into()));
+    let text = render(&mut app, 80, 24).0;
+    assert!(text.contains("fixture-before") && text.contains("fixture-newest"));
+    assert!(!text.contains("HISTORY UNAVAILABLE"));
+    assert_eq!(app.activity, None);
+}
+
+#[test]
+fn baseline_toggle_is_offline_and_hidden_or_repeated_keys_cannot_change_it() {
+    let mut app = app();
+    app.set_history(Ok(Archive::from_results(comparison_results())));
+    app.push(Screen::History);
+    let options = format!("{:?}", app.options);
+    for code in [
+        KeyCode::Char('b'),
+        KeyCode::Char('c'),
+        KeyCode::Home,
+        KeyCode::End,
+    ] {
+        assert_eq!(
+            app.key_at_size(KeyEvent::new(code, KeyModifiers::NONE), 79, 23),
+            Effect::None
+        );
+    }
+    assert!(app.baseline.is_none());
+    let mut repeated = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE);
+    repeated.kind = KeyEventKind::Repeat;
+    app.key(repeated);
+    assert!(app.baseline.is_none());
+    key(&mut app, KeyCode::Char('?'));
+    key(&mut app, KeyCode::Char('b'));
+    assert!(app.baseline.is_none());
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('b'));
+    assert!(render(&mut app, 80, 24).0.contains("BASELINE"));
+    key(&mut app, KeyCode::Char('b'));
+    assert!(app.baseline.is_none());
+    assert_eq!(format!("{:?}", app.options), options);
+    assert_eq!(app.activity, None);
+}
+
+#[test]
+fn comparison_shows_every_metric_source_and_localized_aligned_values() {
+    use crate::i18n::{text, Language};
+    for language in Language::ALL {
+        let mut app = app();
+        app.language = language;
+        app.set_history(Ok(Archive::from_results(comparison_results())));
+        app.push(Screen::History);
+        key(&mut app, KeyCode::Char('c'));
+        for (width, height) in [(80, 24), (120, 38)] {
+            key(&mut app, KeyCode::Home);
+            let rendered = render(&mut app, width, height).0;
+            assert!(
+                rendered.contains("fixture-before"),
+                "{}: {rendered}",
+                language.code()
+            );
+            assert!(rendered.contains("fixture-after"));
+            for label in [
+                "Download",
+                "Upload",
+                "Idle latency",
+                "Jitter",
+                "Quality",
+                "Loaded increase",
+            ] {
+                assert!(
+                    rendered.contains(&text(language, label)),
+                    "{} missing {label}: {rendered}",
+                    language.code()
+                );
+            }
+            for value in [
+                "100.0 Mbps",
+                "400.0 Mbps",
+                "60/100",
+                "90/100",
+                "50.0 ms",
+                "8.0 ms",
+            ] {
+                assert!(
+                    rendered.contains(value),
+                    "{} missing {value}: {rendered}",
+                    language.code()
+                );
+            }
+            let before_header = text(language, "BEFORE");
+            let header = rendered
+                .lines()
+                .find(|line| line.contains(&text(language, "METRIC")))
+                .unwrap();
+            let row = rendered
+                .lines()
+                .find(|line| line.contains("100.0 Mbps"))
+                .unwrap();
+            let end = |line: &str, value: &str| {
+                let prefix = &line[..line.find(value).unwrap() + value.len()];
+                ratatui::text::Line::from(prefix).width()
+            };
+            assert_eq!(end(header, &before_header), end(row, "100.0 Mbps"));
+            assert_eq!(
+                end(header, &text(language, "AFTER")),
+                end(row, "400.0 Mbps")
+            );
+        }
+        key(&mut app, KeyCode::End);
+        let rendered = render(&mut app, 80, 24).0;
+        assert!(rendered.contains("localhost"));
+        assert!(app.page().scroll > 0);
+        key(&mut app, KeyCode::Home);
+        assert_eq!(app.page().scroll, 0);
+    }
+}
+
+#[test]
+fn comparison_keeps_missing_and_oversized_values_readable() {
+    let mut app = app();
+    let mut records = comparison_results();
+    records[0].analysis = None;
+    records[0].download.mbps = 1_000_000_000_000_000_000.0;
+    records[1].download.mbps = 2_000_000_000_000_000_000.0;
+    app.set_history(Ok(Archive::from_results(records)));
+    app.push(Screen::History);
+    key(&mut app, KeyCode::Char('c'));
+    let mut content = String::new();
+    for _ in 0..8 {
+        content.push_str(&render(&mut app, 80, 24).0);
+        key(&mut app, KeyCode::PageDown);
+    }
+    assert!(content.contains("1000000000000000000.0 Mbps"));
+    assert!(content.contains("2000000000000000000.0 Mbps"));
+    assert!(content.contains("n/a"));
+    assert!(content.contains("90/100"));
+    assert!(content.contains("Loaded increase"));
+}
+
+#[test]
 fn capture_review_frames_when_explicitly_requested() {
     let Ok(root) = std::env::var("COCKPIT_SNAPSHOT_DIR") else {
         return;
@@ -417,7 +725,7 @@ fn capture_review_frames_when_explicitly_requested() {
             app.pages.pop();
         }
     }
-    app.set_history(Ok(Archive::from_results(vec![result(), result()])));
+    app.set_history(Ok(Archive::from_results(comparison_results())));
     app.result = Some(result());
     for (name, screen) in [
         ("home-recent", Screen::Home),
@@ -441,6 +749,31 @@ fn capture_review_frames_when_explicitly_requested() {
             app.pages.pop();
         }
     }
+    app.push(Screen::History);
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Char('b'));
+    key(&mut app, KeyCode::Home);
+    for (width, height) in [(80, 24), (120, 38)] {
+        let (text, buffer) = render(&mut app, width, height);
+        save_frame(
+            &root,
+            &format!("history-pinned-{width}x{height}"),
+            &text,
+            &buffer,
+        );
+    }
+    key(&mut app, KeyCode::Char('c'));
+    for (width, height) in [(80, 24), (120, 38)] {
+        let (text, buffer) = render(&mut app, width, height);
+        save_frame(
+            &root,
+            &format!("compare-pinned-{width}x{height}"),
+            &text,
+            &buffer,
+        );
+    }
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Esc);
     app.push(Screen::Configure);
     app.push(Screen::Live);
     app.activity = Some(Activity::Test);
@@ -645,17 +978,55 @@ fn home_highlight_is_one_label_not_a_three_row_painted_rectangle() {
 }
 
 #[test]
-fn workspace_caps_width_and_height_without_changing_terminal_dimensions() {
-    use ratatui::layout::Rect;
-    assert_eq!(
-        view::workspace(Rect::new(0, 0, 80, 24)),
-        Rect::new(0, 0, 80, 24)
-    );
-    assert_eq!(
-        view::workspace(Rect::new(10, 20, 180, 48)),
-        Rect::new(40, 25, 120, 38)
-    );
-    assert_eq!(view::workspace(Rect::new(0, 0, 300, 100)).width, 120);
+fn dashboard_uses_full_width_and_keeps_controls_near_content_after_resize() {
+    let mut app = app();
+    app.set_history(Ok(Archive::from_results(vec![])));
+    for (width, height) in [(80, 24), (120, 38), (214, 52), (300, 100), (80, 24)] {
+        let (text, buffer) = render(&mut app, width, height);
+        assert_eq!(buffer[(2, 1)].symbol(), "S", "header stays at top left");
+        assert_eq!(
+            buffer[(width - 3, 4)].symbol(),
+            "─",
+            "tabs span the terminal"
+        );
+        let footer = text.lines().position(|line| line.contains("quit")).unwrap();
+        assert!(footer <= usize::from(height - 2));
+        if height >= 38 {
+            assert!(
+                footer < usize::from(height - 5),
+                "Home does not push controls across blank rows"
+            );
+        }
+        assert_eq!(app.screen(), Screen::Home);
+        assert_eq!(app.activity, None);
+    }
+}
+
+#[test]
+fn home_keeps_speed_columns_together_and_result_action_visible_after_long_findings() {
+    let mut app = app();
+    let mut saved = comparison_results().pop().unwrap();
+    let finding = saved
+        .analysis
+        .as_mut()
+        .unwrap()
+        .quality
+        .findings
+        .first_mut()
+        .unwrap();
+    finding.title = "A detailed finding title ".repeat(30);
+    finding.evidence = "Detailed evidence ".repeat(80);
+    app.set_history(Ok(Archive::from_results(vec![saved])));
+    for (width, height) in [(80, 24), (120, 38), (214, 52)] {
+        let text = render(&mut app, width, height).0;
+        assert!(text.contains("v  Open result"));
+        let metrics = text
+            .lines()
+            .find(|line| line.contains("DOWNLOAD") && line.contains("UPLOAD"))
+            .unwrap();
+        assert!(metrics.find("UPLOAD").unwrap() - metrics.find("DOWNLOAD").unwrap() <= 40);
+        assert_eq!(app.activity, None);
+    }
 }
 
 #[test]
@@ -693,6 +1064,10 @@ fn comfortable_metrics_are_large_and_compact_values_remain_exact() {
         "five-row metric digits must be visible"
     );
     assert!(text.contains("Mbps"));
+    assert!(
+        text.contains("100.0 Mbps"),
+        "large digits retain an exact text readout"
+    );
     app.compact = true;
     let compact = render(&mut app, 120, 38).0;
     assert!(compact.contains("100.0 Mbps"));
@@ -701,6 +1076,177 @@ fn comfortable_metrics_are_large_and_compact_values_remain_exact() {
     app.compact = false;
     app.result.as_mut().unwrap().download.mbps = 1_000_000_000.0;
     assert!(render(&mut app, 120, 38).0.contains("1000000000.0 Mbps"));
+}
+
+#[test]
+fn home_and_results_keep_exact_readings_at_every_layout_size() {
+    let mut app = app();
+    for language in [crate::i18n::Language::En, crate::i18n::Language::It] {
+        app.language = language;
+        for (download, upload) in [(455.5, 312.3), (1_000.0, 10_000.0)] {
+            let mut saved = result();
+            saved.download.mbps = download;
+            saved.upload.mbps = upload;
+            app.set_history(Ok(Archive::from_results(vec![saved.clone()])));
+            app.result = Some(saved);
+            for screen in [Screen::Home, Screen::Results] {
+                app.pages.truncate(1);
+                if screen != Screen::Home {
+                    app.push(screen);
+                }
+                for (width, height) in [(80, 24), (120, 38), (214, 52)] {
+                    let text = render(&mut app, width, height).0;
+                    for value in [download, upload] {
+                        assert!(
+                            text.contains(&format!("{value:.1} Mbps")),
+                            "{language:?} {screen:?} {width}x{height}: {text}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn short_summaries_keep_controls_nearby_and_long_results_remain_scrollable() {
+    let mut app = app();
+    let records = comparison_results();
+    app.result = records.last().cloned();
+    app.set_history(Ok(Archive::from_results(records)));
+    for screen in [
+        Screen::Results,
+        Screen::Statistics,
+        Screen::Compare,
+        Screen::Live,
+    ] {
+        app.pages.truncate(1);
+        app.push(screen);
+        let text = render(&mut app, 214, 52).0;
+        let footer = text.lines().position(|line| line.contains("quit")).unwrap();
+        assert!(
+            footer < 45,
+            "{screen:?} leaves its controls across empty rows: {text}"
+        );
+        let labels: &[&str] = match screen {
+            Screen::Results => &["DOWNLOAD", "UPLOAD", "IDLE LATENCY", "JITTER"],
+            Screen::Statistics => &["MEDIAN DOWNLOAD", "MEDIAN UPLOAD", "MEDIAN LATENCY"],
+            _ => &[],
+        };
+        if !labels.is_empty() {
+            let header = text.lines().find(|line| line.contains(labels[0])).unwrap();
+            for pair in labels.windows(2) {
+                assert!(header.find(pair[1]).unwrap() - header.find(pair[0]).unwrap() <= 40);
+            }
+        }
+    }
+    app.pages.truncate(1);
+    app.push(Screen::Results);
+    app.result
+        .as_mut()
+        .unwrap()
+        .analysis
+        .as_mut()
+        .unwrap()
+        .quality
+        .findings[0]
+        .evidence = format!(
+        "{} end-of-long-result",
+        "Detailed finding evidence ".repeat(500)
+    );
+    app.page_mut().scroll = u16::MAX;
+    let text = render(&mut app, 214, 52).0;
+    assert!(text.contains("end-of-long-result"));
+    assert!(text.contains("LOADED LATENCY"));
+    assert!(text.contains("400.0 Mbps"));
+    assert!(app.page().scroll > 0);
+    assert!(text.lines().nth(50).unwrap().contains("quit"));
+}
+
+#[test]
+fn sparse_history_keeps_details_near_rows_and_long_history_uses_the_viewport() {
+    let mut app = app();
+    let records = |count| {
+        (0..count)
+            .map(|i| {
+                let mut saved = result();
+                saved.timestamp += chrono::Duration::seconds(i);
+                saved.backend = format!("row-{i:02}");
+                saved
+            })
+            .collect()
+    };
+    app.set_history(Ok(Archive::from_results(records(8))));
+    app.push(Screen::History);
+    let text = render(&mut app, 214, 52).0;
+    let last_row = text
+        .lines()
+        .position(|line| line.contains("row-00"))
+        .unwrap();
+    let status = text
+        .lines()
+        .position(|line| line.contains("Run 1 of 8"))
+        .unwrap();
+    assert!(status - last_row <= 2);
+    assert_eq!(app.history_page_size, 8);
+    app.set_history(Ok(Archive::from_results(records(40))));
+    render(&mut app, 214, 52);
+    assert!(app.history_page_size > 8);
+    key(&mut app, KeyCode::End);
+    let text = render(&mut app, 214, 52).0;
+    assert!(text.contains("row-00"));
+    assert!(text.contains("Run 40 of 40"));
+    assert!(text.lines().nth(50).unwrap().contains("quit"));
+}
+
+#[test]
+fn comparison_verdict_and_highlight_are_visible_without_scrolling_at_minimum_size() {
+    for language in [crate::i18n::Language::En, crate::i18n::Language::It] {
+        let mut app = app();
+        app.language = language;
+        app.set_history(Ok(Archive::from_results(comparison_results())));
+        app.push(Screen::History);
+        key(&mut app, KeyCode::Char('c'));
+        let comparison = app.comparison.as_ref().unwrap();
+        let messages = [&comparison.metrics.verdict, &comparison.metrics.highlight]
+            .map(|message| crate::i18n::narrative(language, message));
+        let compact = |value: &str| {
+            value
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>()
+        };
+        let text = render(&mut app, 80, 24).0;
+        for message in messages {
+            assert!(
+                compact(&text).contains(&compact(&message)),
+                "{language:?}: {text}"
+            );
+        }
+        assert_eq!(app.page().scroll, 0);
+    }
+}
+
+#[test]
+fn result_quality_label_and_owned_finding_titles_are_localized_before_composition() {
+    for language in crate::i18n::Language::ALL {
+        let mut app = app();
+        app.language = language;
+        let mut saved = comparison_results().pop().unwrap();
+        let findings = &mut saved.analysis.as_mut().unwrap().quality.findings;
+        findings.truncate(1);
+        findings[0].title = "Connection looks healthy under this test".into();
+        let source_title = findings[0].title.clone();
+        app.result = Some(saved);
+        app.push(Screen::Results);
+        let rendered = render(&mut app, 214, 52).0;
+        assert!(rendered.contains(&crate::i18n::text(language, "QUALITY")));
+        assert!(
+            rendered.contains(&crate::i18n::narrative(language, &source_title)),
+            "{}: {rendered}",
+            language.code()
+        );
+    }
 }
 
 #[test]
@@ -732,7 +1278,7 @@ fn history_headers_and_numeric_cells_share_their_right_edge() {
         let header = text.lines().find(|line| line.contains("QUALITY")).unwrap();
         let row = text
             .lines()
-            .find(|line| line.contains("01-01 00:00 UTC"))
+            .find(|line| line.contains("01-01 00:00") && line.contains("fixture"))
             .unwrap();
         let end_of = |text: &str, needle: &str| {
             let prefix = &text[..text.find(needle).unwrap()];
@@ -786,10 +1332,10 @@ fn capture_readability_frames_when_explicitly_requested() {
     latest.timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-05T12:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
-    latest.download.mbps = 742.8;
-    latest.upload.mbps = 128.4;
-    latest.download.bytes = 92_850_000;
-    latest.upload.bytes = 16_050_000;
+    latest.download.mbps = 455.5;
+    latest.upload.mbps = 312.3;
+    latest.download.bytes = 56_937_500;
+    latest.upload.bytes = 39_037_500;
     latest.analysis = Some(crate::analysis::build_network_analysis(
         &[8.0, 10.0, 12.0],
         &[18.0, 20.0, 22.0],
@@ -803,7 +1349,7 @@ fn capture_readability_frames_when_explicitly_requested() {
             let mut sample = latest.clone();
             sample.timestamp -= chrono::Duration::hours(7 - i);
             sample.download.mbps =
-                [512.0, 630.0, 605.0, 680.0, 580.0, 720.0, 694.0, 742.8][i as usize];
+                [512.0, 630.0, 605.0, 680.0, 580.0, 720.0, 694.0, 455.5][i as usize];
             sample
         })
         .collect();
@@ -847,20 +1393,30 @@ fn capture_readability_frames_when_explicitly_requested() {
             app.live.ping_ms = Some(10.0);
             app.live.jitter_ms = Some(2.0);
             app.live.speedometer.snap_to_with_peak(642.7, 700.0);
-            let mut terminal = Terminal::new(TestBackend::new(120, 38)).unwrap();
-            terminal
-                .draw(|frame| view::draw(frame, &mut app, theme, Duration::from_secs(6)))
-                .unwrap();
-            let buffer = terminal.backend().buffer();
-            let text = (0..38)
-                .map(|y| {
-                    (0..120)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            save_frame(&root, &format!("{theme_name}-{name}"), &text, buffer);
+            for language in [crate::i18n::Language::En, crate::i18n::Language::It] {
+                app.language = language;
+                for (width, height) in [(80, 24), (120, 38), (214, 52)] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal
+                        .draw(|frame| view::draw(frame, &mut app, theme, Duration::from_secs(6)))
+                        .unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let text = (0..height)
+                        .map(|y| {
+                            (0..width)
+                                .map(|x| buffer[(x, y)].symbol())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    save_frame(
+                        &root,
+                        &format!("{theme_name}-{name}-{}-{width}x{height}", language.code()),
+                        &text,
+                        buffer,
+                    );
+                }
+            }
             if app.pages.len() > 1 {
                 app.pages.pop();
             }

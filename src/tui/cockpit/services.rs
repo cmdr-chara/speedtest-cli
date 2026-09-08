@@ -13,7 +13,50 @@ const REPORT_LIMIT: usize = 256 * 1024;
 pub(super) struct Archive {
     pub results: Vec<TestResult>,
     pub summary: Option<history::HistorySummary>,
-    pub comparison: Option<compare::CompareResult>,
+    pub comparison: Option<ComparedRuns>,
+}
+
+/// A comparison keeps the source evidence alongside the existing domain analysis.
+/// These session snapshots remain valid if local history changes or cannot reload.
+#[derive(Debug, Clone)]
+pub(super) struct ComparedRuns {
+    pub before: TestResult,
+    pub after: TestResult,
+    pub metrics: compare::CompareResult,
+}
+
+impl ComparedRuns {
+    pub fn new(before: &TestResult, after: &TestResult) -> Self {
+        Self {
+            before: before.clone(),
+            after: after.clone(),
+            metrics: compare::compare(before, after),
+        }
+    }
+}
+
+/// Timestamp collisions are valid. Match the complete canonical record, and keep
+/// the occurrence when an archive contains identical duplicate records.
+#[derive(Debug)]
+pub(super) struct HistoryAnchor {
+    timestamp: chrono::DateTime<chrono::Utc>,
+    record: String,
+    occurrence: usize,
+}
+
+impl HistoryAnchor {
+    fn matches(&self, result: &TestResult) -> bool {
+        result.timestamp == self.timestamp
+            && serde_json::to_string(result).is_ok_and(|record| record == self.record)
+    }
+}
+
+pub(super) fn same_result(left: &TestResult, right: &TestResult) -> bool {
+    left.timestamp == right.timestamp
+        && matches!(
+            (serde_json::to_string(left), serde_json::to_string(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
 }
 
 impl Archive {
@@ -28,12 +71,46 @@ impl Archive {
         let comparison = results
             .len()
             .checked_sub(2)
-            .map(|index| compare::compare(&results[index], &results[index + 1]));
+            .map(|index| ComparedRuns::new(&results[index], &results[index + 1]));
         Self {
             results,
             summary,
             comparison,
         }
+    }
+
+    pub fn newest(&self, index: usize) -> Option<&TestResult> {
+        self.results
+            .len()
+            .checked_sub(index.checked_add(1)?)
+            .and_then(|index| self.results.get(index))
+    }
+
+    pub fn anchor(&self, selected: usize) -> Option<HistoryAnchor> {
+        let result = self.newest(selected)?;
+        let mut anchor = HistoryAnchor {
+            timestamp: result.timestamp,
+            record: serde_json::to_string(result).ok()?,
+            occurrence: 0,
+        };
+        anchor.occurrence = self
+            .results
+            .iter()
+            .rev()
+            .take(selected)
+            .filter(|result| anchor.matches(result))
+            .count();
+        Some(anchor)
+    }
+
+    pub fn position(&self, anchor: &HistoryAnchor) -> Option<usize> {
+        self.results
+            .iter()
+            .rev()
+            .enumerate()
+            .filter(|(_, result)| anchor.matches(result))
+            .nth(anchor.occurrence)
+            .map(|(index, _)| index)
     }
 }
 

@@ -365,6 +365,8 @@ async fn upload_worker(
         let submitted = Arc::new(AtomicU64::new(0));
         let started = Instant::now();
         let response = tokio::select! {
+            biased;
+            _ = sleep_until(deadline) => break,
             response = client
                 .post(&endpoint)
                 .query(&[("r", cache_buster())])
@@ -372,9 +374,13 @@ async fn upload_worker(
                 .header("cache-control", "no-store")
                 .header(CONTENT_LENGTH, payload_len.to_string())
                 .body(http::upload_body(Arc::clone(&submitted), payload_len))
-                .send() => response.context("Cloudflare upload request failed")?,
-            _ = sleep_until(deadline) => break,
+                .send() => response,
         };
+
+        if Instant::now() >= deadline {
+            break;
+        }
+        let response = response.context("Cloudflare upload request failed")?;
 
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             rate_limit_retries += 1;
@@ -396,17 +402,17 @@ async fn upload_worker(
         rate_limit_retries = 0;
         let response =
             http::success(response).context("Cloudflare upload endpoint returned an error")?;
-        tokio::select! {
-            result = http::drain(response, 1024 * 1024) => result?,
-            _ = sleep_until(deadline) => break,
+        if !http::complete_upload(
+            http::drain(response, 1024 * 1024),
+            &submitted,
+            payload_len,
+            &total,
+            deadline,
+        )
+        .await?
+        {
+            break;
         }
-        anyhow::ensure!(
-            submitted.load(Ordering::Relaxed) == payload_len as u64,
-            "upload endpoint responded before the complete request body was submitted"
-        );
-        // Only a completed, successful response commits this request's bytes.
-        // Rejected, buffered, or deadline-cancelled requests are not goodput.
-        total.fetch_add(payload_len as u64, Ordering::Relaxed);
         if started.elapsed() < Duration::from_millis(250) {
             payload_len = (payload_len * 2).min(UPLOAD_MAX_BYTES);
         } else if started.elapsed() > Duration::from_secs(1) {

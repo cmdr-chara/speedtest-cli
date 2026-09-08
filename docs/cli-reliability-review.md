@@ -54,6 +54,10 @@ The focused slices do not certify the repository as secure or prove calibrated W
 
 The LAN protocol remains unauthenticated and unencrypted; limits reduce resource exposure but are not Internet-facing service hardening. Only use it on a trusted network with firewall controls. HTTP custom endpoints remain explicitly permitted for self-hosting; TLS is verified for HTTPS, and redirects are not followed. URLs may still contain user-chosen sensitive path segments; do not put secrets in them. Plain output filters terminal/bidi control characters, not all possible misleading text.
 
-Storage remains a follow-up: JSONL writers lack cross-process coordination, automatic per-result filenames use second precision, and general history/compare reads are not uniformly bounded or transactional. Prefer `--no-save` and unique explicit result files for concurrent automation until that subsystem is addressed. The new offline `check` reader is bounded to 4 MiB. Filesystem permissions and historical data retention are not comprehensively redesigned here.
+Storage follow-up, 2026-09-07: shared JSONL reads/writes now coordinate through file
+locks, automatic filenames preserve runs with identical timestamps, and regular
+JSON/CSV exports use atomic replacement. Individual speed-test JSON/history inputs
+are bounded to 4 MiB. Export, per-run result, and history remain separate operations;
+retention is unchanged. See [the current storage contract](usage.md#data-storage).
 
 Automated success on loopback validates lifecycle, accounting formulas, error paths, and script contracts, not Internet server policies. Public endpoint checks must be recorded separately with their actual outcome. PTY behavior is exercised on Unix; Windows native console restoration requires additional direct evidence. No claim is made of screen-reader certification, exhaustive security audit, or equivalent scores across vendors.

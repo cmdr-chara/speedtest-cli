@@ -267,10 +267,15 @@ fn render_center_readout(
             Alignment::Center,
         );
     let mut lines = Vec::new();
-    if !big {
+    if big {
+        lines.push(Line::from(vec![
+            Span::styled(value, base.add_modifier(Modifier::BOLD)),
+            Span::styled(ui(" Mbps"), base.fg(palette.secondary)),
+        ]));
+    } else {
         lines.push(Line::styled(value, base.add_modifier(Modifier::BOLD)));
+        lines.push(Line::styled(ui("Mbps"), base.fg(palette.secondary)));
     }
-    lines.push(Line::styled(ui("Mbps"), base.fg(palette.secondary)));
     if show_value {
         lines.push(Line::styled(
             ui(format!(
@@ -409,5 +414,47 @@ mod tests {
                 });
         assert!(text.contains("742.8"));
         assert!(text.contains("Mbps"));
+    }
+
+    #[test]
+    fn enlarged_readout_keeps_exact_values_and_hides_unmeasured_values() {
+        let palette = GaugePalette {
+            background: Color::Reset,
+            accent: Color::Cyan,
+            text: Color::Reset,
+            secondary: Color::Reset,
+            track: Color::Reset,
+        };
+        for (width, height) in [(70, 22), (100, 30)] {
+            for value in [455.5, 10_000.0, 100_000.0] {
+                let mut state = SpeedometerState::default();
+                state.snap_to_with_peak(value, value);
+                for show_value in [true, false] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            render_center_readout(
+                                frame,
+                                frame.area(),
+                                &state,
+                                show_value,
+                                palette,
+                                true,
+                            );
+                        })
+                        .unwrap();
+                    let text = terminal
+                        .backend()
+                        .buffer()
+                        .content()
+                        .iter()
+                        .map(|cell| cell.symbol())
+                        .collect::<String>();
+                    assert!(text.contains("Mbps"));
+                    assert_eq!(text.contains(&format!("{value:.1}")), show_value);
+                    assert_eq!(text.contains("peak"), show_value);
+                }
+            }
+        }
     }
 }

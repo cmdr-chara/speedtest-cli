@@ -1,6 +1,52 @@
 use super::*;
 use std::collections::BTreeSet;
 
+#[test]
+fn comparison_sentences_translate_domain_terms_without_translating_server_names() {
+    for (source, expected) in [
+        (
+            "download increased by 300% (better)",
+            "Download aumentato del 300% (migliore)",
+        ),
+        (
+            "ping increased by 50% (worse)",
+            "Latenza aumentata del 50% (peggiore)",
+        ),
+        (
+            "ping decreased by 25% (better)",
+            "Latenza diminuita del 25% (migliore)",
+        ),
+        (
+            "quality score improved by 30 points",
+            "punteggio qualità migliorato di 30 punti",
+        ),
+        (
+            "quality score fell by 5 points",
+            "punteggio qualità sceso di 5 punti",
+        ),
+        (
+            "bufferbloat decreased by 42.0 ms",
+            "bufferbloat diminuito di 42.0 ms",
+        ),
+    ] {
+        assert_eq!(narrative(Language::It, source), expected);
+        assert_eq!(narrative(Language::En, source), source);
+    }
+    for language in Language::ALL {
+        for server in [
+            "increased",
+            "decreased",
+            "improved",
+            "fell",
+            "better",
+            "worse",
+        ] {
+            assert!(narrative(language, &format!("Before server: {server}")).ends_with(server));
+            assert!(narrative(language, &format!("After server: {server}")).ends_with(server));
+        }
+    }
+}
+
 fn placeholders(value: &str) -> Vec<String> {
     let mut result = Vec::new();
     for tail in value.split('{').skip(1) {

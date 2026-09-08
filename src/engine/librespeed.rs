@@ -202,6 +202,7 @@ impl LibreSpeedEngine {
         if bytes == 0 {
             return Err(anyhow!("LibreSpeed server delivered no download data"));
         }
+        emit_loaded(&loaded_samples, TestPhase::Download, tx);
         Ok((
             ThroughputResult {
                 mbps: mbps(bytes, self.config.phase_duration.as_secs_f64()),
@@ -239,6 +240,7 @@ impl LibreSpeedEngine {
         if bytes == 0 {
             return Err(anyhow!("LibreSpeed server accepted no upload data"));
         }
+        emit_loaded(&loaded_samples, TestPhase::Upload, tx);
         Ok((
             ThroughputResult {
                 mbps: mbps(bytes, self.config.phase_duration.as_secs_f64()),
@@ -434,30 +436,37 @@ async fn upload_worker(
         let started = Instant::now();
         let url = server.base.join(&server.upload_path)?;
         let response = tokio::select! {
+            biased;
+            _ = sleep_until(deadline) => break,
             value = client
                 .post(url)
                 .query(&[("cors", "true"), ("r", &Utc::now().timestamp_micros().to_string())])
                 .header("content-type", "application/octet-stream")
                 .header(reqwest::header::CONTENT_LENGTH, payload_len)
                 .body(http::upload_body(Arc::clone(&submitted), payload_len))
-                .send() => value.context("LibreSpeed upload request failed")?,
-            _ = sleep_until(deadline) => break,
+                .send() => value,
         };
+        if Instant::now() >= deadline {
+            break;
+        }
+        let response = response.context("LibreSpeed upload request failed")?;
         if response.status() == StatusCode::PAYLOAD_TOO_LARGE && payload_len > 16 * 1024 {
             payload_len = (payload_len / 2).max(16 * 1024);
             continue;
         }
         let response =
             http::success(response).context("LibreSpeed upload endpoint returned an error")?;
-        tokio::select! {
-            result = http::drain(response, 1024 * 1024) => result?,
-            _ = sleep_until(deadline) => break,
+        if !http::complete_upload(
+            http::drain(response, 1024 * 1024),
+            &submitted,
+            payload_len,
+            &total,
+            deadline,
+        )
+        .await?
+        {
+            break;
         }
-        anyhow::ensure!(
-            submitted.load(Ordering::Relaxed) == payload_len as u64,
-            "upload endpoint responded before the complete request body was submitted"
-        );
-        total.fetch_add(payload_len as u64, Ordering::Relaxed);
         if started.elapsed() < Duration::from_millis(250) {
             payload_len = (payload_len * 2).min(8 * 1024 * 1024);
         } else if started.elapsed() > Duration::from_secs(1) {
@@ -513,6 +522,12 @@ fn mbps(bytes: u64, seconds: f64) -> f64 {
     bytes as f64 * 8.0 / seconds / 1_000_000.0
 }
 
+fn emit_loaded(samples: &[f64], phase: TestPhase, tx: &UnboundedSender<EngineEvent>) {
+    if let Some(ms) = analysis::distribution(samples).map(|stats| stats.median_ms) {
+        let _ = tx.send(EngineEvent::LoadedLatency { phase, ms });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,5 +545,103 @@ mod tests {
         let server = resolve_custom_server("https://speed.example.test/backend").unwrap();
         assert_eq!(server.base.as_str(), "https://speed.example.test/backend/");
         assert_eq!(server.download_path, "garbage.php");
+    }
+
+    #[tokio::test]
+    async fn completed_phases_emit_their_loaded_latency_before_returning() {
+        let (url, peer) = crate::engine::test_support::measurement_peer().await;
+        let engine = LibreSpeedEngine {
+            client: Client::builder().no_proxy().build().unwrap(),
+            config: EngineConfig {
+                streams: 1,
+                phase_duration: Duration::from_millis(150),
+            },
+            server: None,
+        };
+        let server = resolve_custom_server(&url).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for phase in [TestPhase::Download, TestPhase::Upload] {
+            let (result, samples) = match phase {
+                TestPhase::Download => engine.measure_download(&server, &tx).await.unwrap(),
+                TestPhase::Upload => engine.measure_upload(&server, &tx).await.unwrap(),
+                _ => unreachable!(),
+            };
+            assert!(result.bytes > 0);
+            let expected = analysis::distribution(&samples).unwrap().median_ms;
+            let mut loaded_events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                if let EngineEvent::LoadedLatency { phase, ms } = event {
+                    loaded_events.push((phase, ms));
+                }
+            }
+            assert_eq!(loaded_events, vec![(phase, expected)]);
+        }
+        peer.abort();
+        let _ = peer.await;
+    }
+
+    #[test]
+    fn failed_loaded_probes_do_not_invent_a_latency_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        emit_loaded(&[], TestPhase::Download, &tx);
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    use crate::engine::test_support::upload_peer;
+
+    #[tokio::test]
+    async fn rejected_uploads_never_count_as_goodput() {
+        let (url, peer) = upload_peer(vec![(413, Duration::ZERO), (500, Duration::ZERO)]).await;
+        let total = Arc::new(AtomicU64::new(0));
+        let result = upload_worker(
+            Client::builder().no_proxy().build().unwrap(),
+            resolve_custom_server(&url).unwrap(),
+            Arc::clone(&total),
+            64 * 1024,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+        assert_eq!(peer.await.unwrap(), vec![64 * 1024, 32 * 1024]);
+    }
+
+    #[tokio::test]
+    async fn deadline_cancelled_upload_is_not_counted() {
+        let (url, peer) = upload_peer(vec![(200, Duration::from_millis(250))]).await;
+        let total = Arc::new(AtomicU64::new(0));
+        upload_worker(
+            Client::builder().no_proxy().build().unwrap(),
+            resolve_custom_server(&url).unwrap(),
+            Arc::clone(&total),
+            64 * 1024,
+            Instant::now() + Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+        peer.abort();
+        let _ = peer.await;
+    }
+
+    #[tokio::test]
+    async fn only_successful_complete_requests_commit_bytes() {
+        let (url, peer) = upload_peer(vec![(200, Duration::ZERO), (500, Duration::ZERO)]).await;
+        let total = Arc::new(AtomicU64::new(0));
+        assert!(upload_worker(
+            Client::builder().no_proxy().build().unwrap(),
+            resolve_custom_server(&url).unwrap(),
+            Arc::clone(&total),
+            64 * 1024,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .is_err());
+        assert_eq!(total.load(Ordering::Relaxed), 64 * 1024);
+        peer.await.unwrap();
     }
 }

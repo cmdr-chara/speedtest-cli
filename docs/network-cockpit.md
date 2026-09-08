@@ -18,10 +18,18 @@ labels carry meaning without depending on color. Settings include reduced motion
 Fixed palettes select truecolor/indexed rendering from advertised capabilities and
 fall back to native colors on basic terminals. Monochrome retains markers, bold
 labels, and inverse selection without emitting specific foreground/background colors.
-Comfortable layout uses multi-cell digits when complete values fit; Compact and
-small areas use exact ordinary values without rounding away data. The workspace
-is centered and bounded to 120 columns by 38 rows, keeping table values near their
-headers and limiting the gauge size. Body font size remains the terminal's setting.
+Comfortable layout uses five-column digits when complete values fit, with an exact
+ordinary value and unit underneath; Compact and small areas use exact ordinary
+values without rounding away data. The shell uses the terminal width, leaving two
+columns and one row at the edges. Home groups its two speed readings into adjacent
+columns and places the footer after its summary, rather than stretching controls
+and dividers across unused rows. The full-result action remains visible beneath
+long findings. Results, Statistics, and Compare also place controls after short
+content; long findings retain the full scroll viewport. Numeric groups use adjacent
+columns up to 40 cells wide. Sparse histories size the table to their record count,
+while long histories use all available table rows for paging. The live dial grows
+up to 96 columns by 30 rows and keeps its readings beside it. Resizing recomputes
+report scroll limits. Body font size remains the terminal's setting.
 Action highlights are label-sized; descriptions and blank rows are not selected.
 
 ## Ownership
@@ -43,6 +51,16 @@ There is no new network measurement implementation. UI configuration maps into
 final results use the existing `TestResult`. The canonical result returned by the
 engine, not a potentially duplicated progress event, triggers completion once.
 History summaries call `history::summarize`; comparison calls `compare::compare`.
+
+History supports row movement, viewport-sized PageUp/PageDown, and Home/End jumps.
+Selection follows the complete result through reloads instead of retaining a numeric
+row offset; timestamp alone does not identify a run. `b` pins a result snapshot as
+the before baseline. `c` compares it with the selected after result, or compares the
+selected result with its immediately older neighbor when no baseline is pinned.
+The comparison snapshot identifies both timestamps/backends and shows all six
+canonical metric deltas, including optional quality and bufferbloat evidence.
+Baseline and comparison snapshots remain local to the session and never save data
+or start network work.
 
 ## Lifecycle and navigation
 
@@ -68,8 +86,10 @@ Local history reads and result writes use `spawn_blocking`, not the terminal loo
 The save future is not dropped on keyboard cancellation; the result is retained if
 writing fails. External SIGINT restores the terminal through the existing runtime
 and guard; already-running blocking file work is not aborted halfway through.
-Export/persistence keep their existing ordering and failure semantics; no transaction
-or concurrency guarantees are added to storage by this UI.
+Export/persistence keep their existing ordering and failure semantics. The storage
+layer now atomically replaces regular exports and coordinates JSONL readers/writers;
+the export, per-run file, and history append remain separate operations. See
+[data storage](usage.md#data-storage) for failure and filesystem guarantees.
 
 Input polling drains bounded batches every 16 ms. Live physics keep the existing
 240 Hz schedule independently of the requested render cap; idle screens redraw only
@@ -133,8 +153,8 @@ script explicitly skips; manual real-console evidence is still required there.
 
 These tests do not calibrate WAN throughput or contact public speed-test providers.
 No public network test, privileged DNS write, release publication, or deployment is
-required to verify this presentation-layer change. Existing storage collision and
-concurrent-writer limitations remain unchanged.
+required to verify the cockpit. Storage collision and concurrent-writer regressions
+are separately covered by deterministic temporary-directory tests.
 
 ### Readability regression coverage
 

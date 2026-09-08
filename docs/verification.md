@@ -1,5 +1,9 @@
 # Verification evidence and residual dependency risks
 
+For the 2026-09-07 frontend/backend improvement work, see
+[the current implementation and local verification report](fullstack-improvements.md).
+The evidence below describes the earlier reliability revision and remains historical.
+
 Review date: 2026-09-05, Europe/Rome. See [the assessment and research](cli-reliability-review.md) for scope, compatibility changes, and non-dependency limitations. Use the PR's current commit checks for final cross-platform status; evidence from an earlier revision is not interchangeable with a later one.
 
 ## Identified implementation evidence

@@ -12,7 +12,6 @@ use chrono::Utc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::Semaphore,
     task::JoinSet,
     time::{sleep, sleep_until, timeout, Instant},
 };
@@ -48,23 +47,28 @@ pub async fn serve(bind: SocketAddr) -> Result<()> {
 
 /// Run on an already-bound listener, allowing accurate readiness and ephemeral-port tests.
 pub async fn serve_listener(listener: TcpListener) -> Result<()> {
-    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("LAN server accept failed")?;
-                if let Ok(permit) = Arc::clone(&permits).try_acquire_owned() {
-                    connections.spawn(async move {
-                        let _permit = permit;
-                        let _ = timeout(SESSION_TIMEOUT, handle_connection(stream)).await;
-                    });
-                }
-                // When full, drop the connection rather than allocating a task/queue.
+                admit_connection(&mut connections, stream);
             }
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
         }
     }
+}
+
+fn admit_connection(connections: &mut JoinSet<()>, stream: TcpStream) {
+    // Finished tasks still occupy JoinSet entries until they are joined. Reap
+    // them before admission and bound the set itself, not only running sessions.
+    while connections.try_join_next().is_some() {}
+    if connections.len() >= MAX_CONNECTIONS {
+        return;
+    }
+    connections.spawn(async move {
+        let _ = timeout(SESSION_TIMEOUT, handle_connection(stream)).await;
+    });
 }
 
 pub async fn run(server: SocketAddr, config: LanConfig) -> Result<TestResult> {
@@ -417,5 +421,60 @@ mod protocol_tests {
         .await
         .unwrap();
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn admission_reaps_completed_tasks_before_starting_another_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut connections = JoinSet::new();
+        // Emulate completed sessions whose outputs have not yet been joined.
+        let (finished, mut completed) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..MAX_CONNECTIONS {
+            let finished = finished.clone();
+            connections.spawn(async move {
+                finished.send(()).unwrap();
+            });
+        }
+        for _ in 0..MAX_CONNECTIONS {
+            completed.recv().await.unwrap();
+        }
+        assert_eq!(connections.len(), MAX_CONNECTIONS);
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        admit_connection(&mut connections, stream);
+        assert_eq!(connections.len(), 1);
+        client.write_all(b"NSL1\0").await.unwrap();
+        let mut reply = [0; 5];
+        timeout(Duration::from_secs(1), client.read_exact(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&reply, b"NSL1\0");
+    }
+
+    #[tokio::test]
+    async fn admission_never_retains_more_than_the_connection_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut connections = JoinSet::new();
+        for _ in 0..MAX_CONNECTIONS {
+            connections.spawn(std::future::pending::<()>());
+        }
+        assert_eq!(connections.len(), MAX_CONNECTIONS);
+
+        let mut excess = TcpStream::connect(address).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        admit_connection(&mut connections, stream);
+        assert_eq!(connections.len(), MAX_CONNECTIONS);
+        let mut byte = [0];
+        assert_eq!(
+            timeout(Duration::from_secs(1), excess.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
     }
 }

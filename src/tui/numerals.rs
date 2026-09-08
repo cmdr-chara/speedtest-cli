@@ -1,4 +1,5 @@
-//! Three-/five-row terminal digits. Unsupported or oversized values use caller fallbacks.
+//! Wide three-/five-row terminal digits with explicit character spacing.
+//! Unsupported or oversized values use caller fallbacks.
 use ratatui::{
     layout::{Alignment, Rect},
     style::Style,
@@ -9,36 +10,36 @@ use ratatui::{
 
 fn glyph(ch: char) -> Option<[&'static str; 3]> {
     Some(match ch {
-        '0' => ["█▀█", "█ █", "█▄█"],
-        '1' => [" ▀█", "  █", "  █"],
-        '2' => ["▀▀█", "█▀▀", "█▄▄"],
-        '3' => ["▀▀█", " ▀█", "▄▄█"],
-        '4' => ["█ █", "▀▀█", "  █"],
-        '5' => ["█▀▀", "▀▀█", "▄▄█"],
-        '6' => ["█▀▀", "█▀█", "█▄█"],
-        '7' => ["▀▀█", "  █", "  █"],
-        '8' => ["█▀█", "█▀█", "█▄█"],
-        '9' => ["█▀█", "▀▀█", "▄▄█"],
-        '.' => [" ", " ", "▄"],
-        '-' | '—' => ["   ", "▀▀▀", "   "],
+        '0' => ["█▀▀▀█", "█   █", "█▄▄▄█"],
+        '1' => [" ▄█  ", "  █  ", "▄▄█▄▄"],
+        '2' => ["▀▀▀▀█", "█▀▀▀▀", "█▄▄▄▄"],
+        '3' => ["▀▀▀▀█", " ▀▀▀█", "▄▄▄▄█"],
+        '4' => ["█   █", "▀▀▀▀█", "    █"],
+        '5' => ["█▀▀▀▀", "▀▀▀▀█", "▄▄▄▄█"],
+        '6' => ["█▀▀▀▀", "█▀▀▀█", "█▄▄▄█"],
+        '7' => ["▀▀▀▀█", "   █ ", "  █  "],
+        '8' => ["█▀▀▀█", "█▀▀▀█", "█▄▄▄█"],
+        '9' => ["█▀▀▀█", "▀▀▀▀█", "▄▄▄▄█"],
+        '.' => ["  ", "  ", "▄▄"],
+        '-' | '—' => ["     ", "▀▀▀▀▀", "     "],
         _ => return None,
     })
 }
 
 fn glyph_tall(ch: char) -> Option<[&'static str; 5]> {
     Some(match ch {
-        '0' => ["███", "█ █", "█ █", "█ █", "███"],
-        '1' => [" ██", "  █", "  █", "  █", "  █"],
-        '2' => ["███", "  █", "███", "█  ", "███"],
-        '3' => ["███", "  █", " ██", "  █", "███"],
-        '4' => ["█ █", "█ █", "███", "  █", "  █"],
-        '5' => ["███", "█  ", "███", "  █", "███"],
-        '6' => ["███", "█  ", "███", "█ █", "███"],
-        '7' => ["███", "  █", "  █", "  █", "  █"],
-        '8' => ["███", "█ █", "███", "█ █", "███"],
-        '9' => ["███", "█ █", "███", "  █", "███"],
-        '.' => [" ", " ", " ", " ", "█"],
-        '-' | '—' => ["   ", "   ", "███", "   ", "   "],
+        '0' => ["▄███▄", "█   █", "█   █", "█   █", "▀███▀"],
+        '1' => [" ▄█  ", "▀ █  ", "  █  ", "  █  ", "▄▄█▄▄"],
+        '2' => ["▄███▄", "    █", " ▄██▀", "█    ", "█████"],
+        '3' => ["████▄", "    █", " ▀██▄", "    █", "████▀"],
+        '4' => ["█   █", "█   █", "▀▀▀▀█", "    █", "    █"],
+        '5' => ["█████", "█    ", "▀███▄", "    █", "████▀"],
+        '6' => ["▄███▄", "█    ", "████▄", "█   █", "▀███▀"],
+        '7' => ["█████", "    █", "   █ ", "  █  ", "  █  "],
+        '8' => ["▄███▄", "█   █", "▄███▄", "█   █", "▀███▀"],
+        '9' => ["▄███▄", "█   █", "▀████", "    █", "▀███▀"],
+        '.' => ["  ", "  ", "  ", "  ", "▄▄"],
+        '-' | '—' => ["     ", "     ", "▀▀▀▀▀", "     ", "     "],
         _ => return None,
     })
 }
@@ -115,9 +116,44 @@ mod tests {
     #[test]
     fn digit_rows_have_consistent_cell_widths() {
         for ch in "0123456789.-—".chars() {
-            let rows = glyph(ch).unwrap();
-            assert_eq!(rows[0].chars().count(), rows[1].chars().count());
-            assert_eq!(rows[0].chars().count(), rows[2].chars().count());
+            for rows in [
+                glyph(ch).unwrap().to_vec(),
+                glyph_tall(ch).unwrap().to_vec(),
+            ] {
+                let width = rows[0].chars().count();
+                assert!(rows.iter().all(|row| row.chars().count() == width));
+            }
+        }
+    }
+
+    #[test]
+    fn complete_reading_fits_exactly_or_leaves_the_buffer_untouched() {
+        // Four five-cell digits, a two-cell decimal, and four separating spaces.
+        for height in [3, 5] {
+            for width in [25, 26] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        assert_eq!(
+                            draw(
+                                frame,
+                                frame.area(),
+                                "455.5",
+                                Style::default(),
+                                Alignment::Left
+                            ),
+                            width == 26
+                        );
+                    })
+                    .unwrap();
+                let untouched = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .all(|cell| cell.symbol() == " ");
+                assert_eq!(untouched, width == 25);
+            }
         }
     }
 }

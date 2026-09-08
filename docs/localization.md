@@ -101,6 +101,11 @@ format string. Display columns use terminal cell width, including CJK characters
 
 Dynamic analysis text uses a closed set of validated built-in templates in
 `src/i18n/narrative.rs`; score computation and canonical serialization are untouched.
+Comparison direction and evaluation words are translated only in their known
+template slots. The same words used as server names remain data. Ping-change
+sentences have complete templates in all eight catalogs. Result quality labels and
+finding/anomaly titles are translated before being combined with their values or
+severity labels, so formatting does not prevent a catalog lookup.
 Do not extend this into unconstrained string replacement over saved/user data.
 
 ```bash
@@ -117,5 +122,6 @@ python .github/scripts/test_package_release.py
 The PTY scripts run on Unix and explicitly skip on Windows. Linux/macOS/Windows
 all run Rust rendering/navigation and executable contracts in CI. No WAN speed
 test, privileged network write, or physical Windows-console validation is implied
-by a passing unit test. Existing storage collision/concurrent-writer limitations
-and dependency advisories remain outside this presentation-focused change.
+by a passing unit test. Storage guarantees are documented in
+[data storage](usage.md#data-storage); dependency advisories remain tracked in
+[verification](verification.md).
