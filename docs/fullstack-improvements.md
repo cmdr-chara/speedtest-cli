@@ -62,8 +62,11 @@ terminal profile.
 Additional fixture previews show the [results layout](images/results-readability.png)
 and [short-history layout](images/history-readability.png) at the same terminal size.
 
-The follow-up passes 171 Rust tests, formatting, Clippy, the executable build, and
-the CLI, real-PTY cockpit, and eight-language localization smoke suites on Linux.
+The readability follow-up passed 171 Rust tests before integration. The final
+v0.5.2 tree merged with `main` passes **213 Rust tests**, formatting, Clippy, the
+executable build, and the CLI, real-PTY cockpit, and eight-language localization
+smoke suites on Linux. It also passes the release packaging tests and offline crate
+packaging.
 Readability captures cover English and Italian at 80×24, 120×38, and 214×52 in all
 four palettes. Regressions check resizing, exact values, oversized glyph fallbacks,
 hidden live readings, sparse and long histories, long findings, visible comparison

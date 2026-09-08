@@ -1,7 +1,8 @@
 pub mod system;
 
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
+    io::Write,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::atomic::{AtomicU16, Ordering},
     time::Duration,
@@ -25,6 +26,7 @@ use crate::{
 
 const DNS_TIMEOUT: Duration = Duration::from_millis(1_500);
 const DNS_PORT: u16 = 53;
+const MIN_WINNER_SUCCESS_RATE_PERCENT: f64 = 80.0;
 const TEST_DOMAINS: [&str; 10] = [
     "cloudflare.com",
     "google.com",
@@ -114,6 +116,25 @@ impl DnsProvider {
             .filter_map(|address| address.parse::<IpAddr>().ok())
             .collect::<Vec<_>>();
         if include_ipv6 {
+            addresses.extend(
+                self.ipv6
+                    .iter()
+                    .filter_map(|address| address.parse::<IpAddr>().ok()),
+            );
+        }
+        addresses
+    }
+
+    pub fn addresses_for_routes(self, ipv4: bool, ipv6: bool) -> Vec<IpAddr> {
+        let mut addresses = Vec::new();
+        if ipv4 {
+            addresses.extend(
+                self.ipv4
+                    .iter()
+                    .filter_map(|address| address.parse::<IpAddr>().ok()),
+            );
+        }
+        if ipv6 {
             addresses.extend(
                 self.ipv6
                     .iter()
@@ -432,7 +453,7 @@ impl DnsBenchmarkResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DnsBackup {
     pub timestamp: DateTime<Utc>,
     pub state: system::DnsSystemState,
@@ -492,10 +513,13 @@ pub async fn test_current(queries: usize) -> Result<DnsProviderBenchmark> {
 pub async fn benchmark(profile: BenchmarkProfile, queries: usize) -> Result<DnsBenchmarkResult> {
     let queries = queries.clamp(3, 100);
     let mut workers = JoinSet::new();
+    let (ipv4_route, ipv6_route) = system::inspect(None)
+        .map(|state| (state.ipv4_default_route, state.ipv6_default_route))
+        .unwrap_or((true, false));
 
     for provider in providers_for_profile(profile) {
         workers.spawn(async move {
-            let addresses = provider.addresses(false);
+            let addresses = provider.addresses_for_routes(ipv4_route, ipv6_route);
             benchmark_servers(
                 provider.id,
                 provider.provider,
@@ -540,10 +564,7 @@ pub async fn benchmark(profile: BenchmarkProfile, queries: usize) -> Result<DnsB
             .cmp(&left.score)
             .then_with(|| median_or_inf(left).total_cmp(&median_or_inf(right)))
     });
-    let winner_id = entries
-        .iter()
-        .find(|entry| entry.successes > 0)
-        .map(|entry| entry.provider_id.clone());
+    let winner_id = select_winner_id(&entries);
 
     Ok(DnsBenchmarkResult {
         timestamp: Utc::now(),
@@ -620,13 +641,15 @@ fn score_single(raw: RawBenchmark) -> DnsProviderBenchmark {
     let median_score = absolute_latency_score(median);
     let p95_score = absolute_latency_score(p95);
     let stability_score = latency.as_ref().map_or(0.0, spread_score);
-    let score = (median_score * 0.40
-        + p95_score * 0.25
-        + success_rate_percent * 0.20
-        + stability_score * 0.10
-        + f64::from(raw.successes > 0) * 100.0 * 0.05)
-        .round()
-        .clamp(0.0, 100.0) as u8;
+    let score = finalize_score(
+        raw.successes,
+        success_rate_percent,
+        median_score * 0.40
+            + p95_score * 0.25
+            + success_rate_percent * 0.20
+            + stability_score * 0.10
+            + f64::from(raw.successes > 0) * 100.0 * 0.05,
+    );
     let grade = grade_for_score(score);
     let s_tier = score >= 98 && success_rate_percent >= 100.0 && median <= 15.0;
 
@@ -650,10 +673,12 @@ fn score_single(raw: RawBenchmark) -> DnsProviderBenchmark {
 fn score_entries(raw_entries: Vec<RawBenchmark>) -> Vec<DnsProviderBenchmark> {
     let best_median = raw_entries
         .iter()
+        .filter(|raw| percent(raw.successes, raw.queries) >= MIN_WINNER_SUCCESS_RATE_PERCENT)
         .filter_map(|raw| analysis::distribution(&raw.samples).map(|stats| stats.median_ms))
         .fold(f64::INFINITY, f64::min);
     let best_p95 = raw_entries
         .iter()
+        .filter(|raw| percent(raw.successes, raw.queries) >= MIN_WINNER_SUCCESS_RATE_PERCENT)
         .filter_map(|raw| analysis::distribution(&raw.samples).map(|stats| stats.p95_ms))
         .fold(f64::INFINITY, f64::min);
 
@@ -668,13 +693,15 @@ fn score_entries(raw_entries: Vec<RawBenchmark>) -> Vec<DnsProviderBenchmark> {
             let p95_score = relative_latency_score(p95, best_p95);
             let stability_score = latency.as_ref().map_or(0.0, spread_score);
             let correctness_score = if raw.successes > 0 { 100.0 } else { 0.0 };
-            let score = (median_score * 0.40
-                + p95_score * 0.25
-                + success_rate_percent * 0.20
-                + stability_score * 0.10
-                + correctness_score * 0.05)
-                .round()
-                .clamp(0.0, 100.0) as u8;
+            let score = finalize_score(
+                raw.successes,
+                success_rate_percent,
+                median_score * 0.40
+                    + p95_score * 0.25
+                    + success_rate_percent * 0.20
+                    + stability_score * 0.10
+                    + correctness_score * 0.05,
+            );
             let grade = grade_for_score(score);
             let s_tier =
                 score >= 98 && success_rate_percent >= 100.0 && median <= best_median * 1.10 + 0.25;
@@ -723,7 +750,32 @@ fn spread_score(stats: &LatencyDistribution) -> f64 {
     (100.0 - relative * 100.0).clamp(15.0, 100.0)
 }
 
-fn grade_for_score(score: u8) -> QualityGrade {
+pub(crate) fn finalize_score(
+    successes: usize,
+    success_rate_percent: f64,
+    weighted_score: f64,
+) -> u8 {
+    if successes == 0 {
+        0
+    } else {
+        (weighted_score.round().clamp(0.0, 100.0) as u8)
+            .min(reliability_score_cap(success_rate_percent))
+    }
+}
+
+fn reliability_score_cap(success_rate_percent: f64) -> u8 {
+    match success_rate_percent {
+        rate if rate >= 100.0 => 100,
+        rate if rate >= 99.0 => 95,
+        rate if rate >= 95.0 => 88,
+        rate if rate >= 90.0 => 78,
+        rate if rate >= 80.0 => 65,
+        rate if rate >= 50.0 => 40,
+        _ => 20,
+    }
+}
+
+pub(crate) fn grade_for_score(score: u8) -> QualityGrade {
     if score >= 95 {
         QualityGrade::APlus
     } else if score >= 88 {
@@ -737,6 +789,13 @@ fn grade_for_score(score: u8) -> QualityGrade {
     } else {
         QualityGrade::F
     }
+}
+
+pub(crate) fn select_winner_id(entries: &[DnsProviderBenchmark]) -> Option<String> {
+    entries
+        .iter()
+        .find(|entry| percent(entry.successes, entry.queries) >= MIN_WINNER_SUCCESS_RATE_PERCENT)
+        .map(|entry| entry.provider_id.clone())
 }
 
 fn median_or_inf(entry: &DnsProviderBenchmark) -> f64 {
@@ -798,12 +857,52 @@ pub fn save_backup(state: &system::DnsSystemState) -> Result<std::path::PathBuf>
         timestamp: Utc::now(),
         state: state.clone(),
     };
-    fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string_pretty(&backup)?),
-    )
-    .context("failed to write DNS rollback snapshot")?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("DNS backup path has no parent directory"))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .context("failed to create temporary DNS rollback snapshot")?;
+    serde_json::to_writer_pretty(&mut temporary, &backup)
+        .context("failed to serialize DNS rollback snapshot")?;
+    temporary
+        .write_all(b"\n")
+        .context("failed to finish DNS rollback snapshot")?;
+    temporary.flush().context("failed to flush DNS rollback snapshot")?;
+    temporary
+        .as_file()
+        .sync_all()
+        .context("failed to sync DNS rollback snapshot")?;
+    temporary
+        .persist(&path)
+        .map_err(|error| error.error)
+        .context("failed to atomically replace DNS rollback snapshot")?;
     Ok(path)
+}
+
+pub struct DnsOperationGuard {
+    file: File,
+}
+
+impl Drop for DnsOperationGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+pub fn lock_operation() -> Result<DnsOperationGuard> {
+    let directory = storage::data_root()?.join("dns");
+    fs::create_dir_all(&directory).context("failed to create DNS state directory")?;
+    let path = directory.join("operation.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("failed to open DNS operation lock at {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("failed to lock DNS operations at {}", path.display()))?;
+    Ok(DnsOperationGuard { file })
 }
 
 pub fn load_backup() -> Result<DnsBackup> {
@@ -830,6 +929,47 @@ pub async fn verify_system_resolution() -> Result<()> {
 mod tests {
     use super::*;
 
+    fn raw_benchmark(
+        provider_id: &str,
+        queries: usize,
+        successes: usize,
+        samples: Vec<f64>,
+    ) -> RawBenchmark {
+        RawBenchmark {
+            provider_id: provider_id.to_string(),
+            provider_name: provider_id.to_string(),
+            profile_name: "test".to_string(),
+            category: DnsCategory::Standard,
+            servers: Vec::new(),
+            queries,
+            successes,
+            samples,
+            is_current: false,
+        }
+    }
+
+    fn benchmark_entry(
+        provider_id: &str,
+        queries: usize,
+        successes: usize,
+    ) -> DnsProviderBenchmark {
+        DnsProviderBenchmark {
+            provider_id: provider_id.to_string(),
+            provider_name: provider_id.to_string(),
+            profile_name: "test".to_string(),
+            category: DnsCategory::Standard,
+            servers: Vec::new(),
+            queries,
+            successes,
+            success_rate_percent: percent(successes, queries),
+            latency: None,
+            score: 100,
+            grade: QualityGrade::APlus,
+            s_tier: true,
+            is_current: false,
+        }
+    }
+
     #[test]
     fn provider_registry_has_unique_ids_and_multiple_leagues() {
         let mut ids = PROVIDERS
@@ -844,6 +984,50 @@ mod tests {
         assert!(providers_for_profile(BenchmarkProfile::Fastest).len() >= 6);
         assert!(providers_for_profile(BenchmarkProfile::Security).len() >= 4);
         assert!(providers_for_profile(BenchmarkProfile::Family).len() >= 5);
+    }
+
+    #[test]
+    fn provider_addresses_follow_available_route_families() {
+        let cloudflare = provider("cloudflare").unwrap();
+        let ipv6_only = cloudflare.addresses_for_routes(false, true);
+        assert!(!ipv6_only.is_empty());
+        assert!(ipv6_only.iter().all(IpAddr::is_ipv6));
+
+        let dual_stack = cloudflare.addresses_for_routes(true, true);
+        assert!(dual_stack.iter().any(IpAddr::is_ipv4));
+        assert!(dual_stack.iter().any(IpAddr::is_ipv6));
+    }
+
+    #[test]
+    fn unreliable_dns_results_cannot_win_or_receive_high_scores() {
+        let unreliable = benchmark_entry("unreliable", 1_000, 799);
+        let boundary = benchmark_entry("boundary", 5, 4);
+        assert_eq!(select_winner_id(std::slice::from_ref(&unreliable)), None);
+        assert_eq!(
+            select_winner_id(&[unreliable, boundary]),
+            Some("boundary".to_string())
+        );
+
+        let zero = score_single(raw_benchmark("zero", 10, 0, Vec::new()));
+        assert_eq!(zero.score, 0);
+        assert_eq!(zero.grade, QualityGrade::F);
+
+        let half = score_single(raw_benchmark("half", 10, 5, vec![5.0; 5]));
+        assert!(half.score <= 40);
+        assert_eq!(half.grade, QualityGrade::F);
+    }
+
+    #[test]
+    fn unreliable_latency_does_not_define_relative_score_baselines() {
+        let entries = score_entries(vec![
+            raw_benchmark("one-lucky-reply", 10, 1, vec![1.0]),
+            raw_benchmark("reliable", 10, 10, vec![20.0; 10]),
+        ]);
+        let reliable = entries
+            .iter()
+            .find(|entry| entry.provider_id == "reliable")
+            .unwrap();
+        assert_eq!(reliable.score, 100);
     }
 
     #[test]

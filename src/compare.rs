@@ -109,11 +109,11 @@ pub fn compare(before: &TestResult, after: &TestResult) -> CompareResult {
 }
 
 fn higher_is_better(before: f64, after: f64) -> MetricDelta {
-    metric_delta(before, after, after >= before)
+    metric_delta(before, after, after > before)
 }
 
 fn lower_is_better(before: f64, after: f64) -> MetricDelta {
-    metric_delta(before, after, after <= before)
+    metric_delta(before, after, after < before)
 }
 
 fn metric_delta(before: f64, after: f64, improved: bool) -> MetricDelta {
@@ -127,11 +127,11 @@ fn metric_delta(before: f64, after: f64, improved: bool) -> MetricDelta {
 }
 
 fn optional_higher_is_better(before: Option<f64>, after: Option<f64>) -> OptionalMetricDelta {
-    optional_metric_delta(before, after, |before, after| after >= before)
+    optional_metric_delta(before, after, |before, after| after > before)
 }
 
 fn optional_lower_is_better(before: Option<f64>, after: Option<f64>) -> OptionalMetricDelta {
-    optional_metric_delta(before, after, |before, after| after <= before)
+    optional_metric_delta(before, after, |before, after| after < before)
 }
 
 fn optional_metric_delta(
@@ -161,10 +161,11 @@ fn percent_change(before: f64, after: f64) -> Option<f64> {
 }
 
 fn significant_vote(metric: &MetricDelta, threshold_percent: f64, weight: i32) -> i32 {
-    let Some(change) = metric.percent_change else {
-        return 0;
+    let significant = match metric.percent_change {
+        Some(change) => change.abs() >= threshold_percent,
+        None => metric.absolute_change.abs() > f64::EPSILON,
     };
-    if change.abs() < threshold_percent {
+    if !significant {
         0
     } else if metric.improved {
         weight
@@ -188,24 +189,28 @@ fn strongest_highlight(
     push_percent_highlight(&mut candidates, "jitter", jitter, false);
 
     if let (Some(change), Some(improved)) = (quality.absolute_change, quality.improved) {
-        candidates.push((
-            change.abs() * 4.0,
-            format!(
-                "quality score {} by {:.0} points",
-                if improved { "improved" } else { "fell" },
-                change.abs()
-            ),
-        ));
+        if change.abs() > f64::EPSILON {
+            candidates.push((
+                change.abs() * 4.0,
+                format!(
+                    "quality score {} by {:.0} points",
+                    if improved { "improved" } else { "fell" },
+                    change.abs()
+                ),
+            ));
+        }
     }
     if let (Some(change), Some(improved)) = (bufferbloat.absolute_change, bufferbloat.improved) {
-        candidates.push((
-            change.abs(),
-            format!(
-                "bufferbloat {} by {:.1} ms",
-                if improved { "decreased" } else { "increased" },
-                change.abs()
-            ),
-        ));
+        if change.abs() > f64::EPSILON {
+            candidates.push((
+                change.abs(),
+                format!(
+                    "bufferbloat {} by {:.1} ms",
+                    if improved { "decreased" } else { "increased" },
+                    change.abs()
+                ),
+            ));
+        }
     }
 
     candidates
@@ -220,6 +225,9 @@ fn push_percent_highlight(
     metric: &MetricDelta,
     higher: bool,
 ) {
+    if metric.absolute_change.abs() <= f64::EPSILON {
+        return;
+    }
     if let Some(change) = metric.percent_change {
         let direction = if change >= 0.0 {
             "increased"
@@ -232,6 +240,19 @@ fn push_percent_highlight(
             format!(
                 "{label} {direction} by {:.0}% ({})",
                 change.abs(),
+                if desirable { "better" } else { "worse" }
+            ),
+        ));
+    } else {
+        let increased = metric.absolute_change > 0.0;
+        let direction = if increased { "increased" } else { "decreased" };
+        let desirable = if higher { increased } else { !increased };
+        candidates.push((
+            metric.absolute_change.abs(),
+            format!(
+                "{label} {direction} from {:.1} to {:.1} ({})",
+                metric.before,
+                metric.after,
                 if desirable { "better" } else { "worse" }
             ),
         ));
@@ -283,5 +304,34 @@ mod tests {
         assert!(comparison.verdict.contains("after"));
         assert!(comparison.download_mbps.improved);
         assert!(comparison.ping_ms.improved);
+    }
+
+    #[test]
+    fn zero_baseline_improvement_votes_for_after() {
+        let before = result(0.0, 50.0, 20.0, 8.0);
+        let after = result(25.0, 50.0, 20.0, 8.0);
+
+        let comparison = compare(&before, &after);
+
+        assert!(comparison.download_mbps.improved);
+        assert_eq!(comparison.download_mbps.percent_change, None);
+        assert_eq!(comparison.verdict, "after is slightly better overall");
+        assert_eq!(
+            comparison.highlight,
+            "download increased from 0.0 to 25.0 (better)"
+        );
+    }
+
+    #[test]
+    fn equal_results_have_no_dominant_change() {
+        let before = result(100.0, 50.0, 20.0, 8.0);
+        let after = before.clone();
+
+        let comparison = compare(&before, &after);
+
+        assert_eq!(comparison.verdict, "results are mixed or effectively tied");
+        assert_eq!(comparison.highlight, "no dominant change");
+        assert!(!comparison.download_mbps.improved);
+        assert!(!comparison.ping_ms.improved);
     }
 }

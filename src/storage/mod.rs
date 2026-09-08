@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -346,30 +347,35 @@ impl<'a> From<&'a TestResult> for CsvRecord<'a> {
 fn data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        return env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .map(|path| path.join("speedtest"));
+        return absolute_env_path(env::var_os("LOCALAPPDATA")).map(|path| path.join("speedtest"));
     }
 
     #[cfg(target_os = "macos")]
     {
-        return env::var_os("HOME")
-            .map(PathBuf::from)
+        return absolute_env_path(env::var_os("HOME"))
             .map(|path| path.join("Library/Application Support/speedtest"));
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if let Some(path) = env::var_os("XDG_DATA_HOME") {
-            return Some(PathBuf::from(path).join("speedtest"));
-        }
-        return env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|path| path.join(".local/share/speedtest"));
+        return unix_data_dir(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"));
     }
 
     #[allow(unreachable_code)]
     None
+}
+
+fn absolute_env_path(value: Option<OsString>) -> Option<PathBuf> {
+    value
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty() && path.is_absolute())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unix_data_dir(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    absolute_env_path(xdg_data_home)
+        .map(|path| path.join("speedtest"))
+        .or_else(|| absolute_env_path(home).map(|path| path.join(".local/share/speedtest")))
 }
 
 #[cfg(test)]
@@ -591,6 +597,22 @@ mod tests {
             .unwrap_err()
             .chain()
             .any(|error| error.to_string().contains("4 MiB")));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn relative_data_directories_are_rejected() {
+        assert_eq!(
+            unix_data_dir(
+                Some(OsString::from("relative/xdg")),
+                Some(OsString::from("/home/example")),
+            ),
+            Some(PathBuf::from("/home/example/.local/share/speedtest"))
+        );
+        assert_eq!(
+            unix_data_dir(Some(OsString::new()), Some(OsString::from("relative-home"))),
+            None
+        );
     }
 
     #[cfg(unix)]

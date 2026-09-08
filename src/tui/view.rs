@@ -434,7 +434,7 @@ fn footer(app: &App) -> Paragraph<'static> {
     };
 
     Paragraph::new(Line::from(vec![
-        Span::styled(ui("Cloudflare Edge"), Style::default().fg(Color::Gray)),
+        Span::styled(app.footer_source(), Style::default().fg(Color::Gray)),
         Span::raw(ui("  •  ")),
         Span::styled(instruction, Style::default().fg(Color::DarkGray)),
     ]))

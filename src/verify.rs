@@ -32,11 +32,14 @@ impl VerifyReport {
 
 pub async fn run(config: EngineConfig, librespeed_server: Option<&str>) -> Result<VerifyReport> {
     let cloudflare = InternetEngine::Cloudflare(CloudflareEngine::new(config.clone())?);
+    // Construct both engines before starting either measurement so malformed custom
+    // LibreSpeed settings fail immediately instead of after a full Cloudflare run.
+    let librespeed = InternetEngine::LibreSpeed(LibreSpeedEngine::new(config, librespeed_server)?);
+
     let cloudflare = run_engine(cloudflare)
         .await
         .context("Cloudflare verification run failed")?;
 
-    let librespeed = InternetEngine::LibreSpeed(LibreSpeedEngine::new(config, librespeed_server)?);
     let librespeed = run_engine(librespeed)
         .await
         .context("LibreSpeed verification run failed")?;

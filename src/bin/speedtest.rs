@@ -498,7 +498,7 @@ async fn run_dns_set(args: DnsSetArgs) -> Result<()> {
             state.backend
         );
     }
-    let servers = provider.addresses(state.ipv6_default_route);
+    let servers = provider.addresses_for_routes(state.ipv4_default_route, state.ipv6_default_route);
     if servers.is_empty() {
         bail!(
             "{} does not expose DNS53 addresses",
@@ -549,7 +549,7 @@ async fn run_dns_optimize(args: DnsOptimizeArgs) -> Result<()> {
             state.backend
         );
     }
-    let servers = provider.addresses(state.ipv6_default_route);
+    let servers = provider.addresses_for_routes(state.ipv4_default_route, state.ipv6_default_route);
     println!();
     println!("{}", tr("DNS OPTIMIZER RECOMMENDATION"));
     println!(
@@ -616,8 +616,22 @@ async fn run_dns_reset(args: DnsResetArgs) -> Result<()> {
         return Ok(());
     }
 
+    let _operation = dns::lock_operation()?;
+    let state = revalidate_dns_mutation_state(&state)?;
     let backup_path = dns::save_backup(&state)?;
-    dns::system::reset(&state)?;
+    if let Err(error) = dns::system::reset(&state) {
+        dns::system::flush_cache();
+        match dns::system::restore(&state) {
+            Ok(()) => {
+                dns::system::flush_cache();
+                bail!("DNS reset failed ({error:#}); the previous configuration was restored");
+            }
+            Err(rollback_error) => bail!(
+                "DNS reset failed ({error:#}) and rollback also failed ({rollback_error:#}); snapshot: {}",
+                backup_path.display()
+            ),
+        }
+    }
     dns::system::flush_cache();
     if let Err(error) = dns::verify_system_resolution().await {
         let rollback = dns::system::restore(&state);
@@ -676,11 +690,33 @@ async fn run_dns_rollback(args: DnsRollbackArgs) -> Result<()> {
         println!("{}", tr("No changes made."));
         return Ok(());
     }
-    dns::system::restore(&backup.state)?;
+    let _operation = dns::lock_operation()?;
+    let current_backup = dns::load_backup()?;
+    if current_backup != backup {
+        bail!("the DNS rollback snapshot changed while awaiting confirmation; rerun the command");
+    }
+    ensure_active_dns_mutation_target(&current_backup.state)?;
+    if !current_backup.state.can_configure() {
+        bail!("the saved DNS snapshot cannot be restored safely by this platform backend");
+    }
+    let pre_rollback_state = dns::system::inspect(Some(&current_backup.state.interface))?;
+    if !pre_rollback_state.can_configure() {
+        bail!("the current DNS state cannot be restored safely if rollback verification fails");
+    }
+    dns::system::restore(&current_backup.state)?;
     dns::system::flush_cache();
-    dns::verify_system_resolution()
-        .await
-        .context("rollback was applied but system DNS verification failed")?;
+    if let Err(error) = dns::verify_system_resolution().await {
+        let recovery = dns::system::restore(&pre_rollback_state);
+        dns::system::flush_cache();
+        match recovery {
+            Ok(()) => bail!(
+                "rollback verification failed ({error:#}); the configuration from before this rollback attempt was restored"
+            ),
+            Err(recovery_error) => bail!(
+                "rollback verification failed ({error:#}) and restoring the configuration from before the attempt also failed ({recovery_error:#})"
+            ),
+        }
+    }
     println!("{}", tr("✓ Previous DNS snapshot restored and verified."));
     Ok(())
 }
@@ -690,11 +726,25 @@ async fn apply_dns_change(
     servers: &[std::net::IpAddr],
     label: &str,
 ) -> Result<()> {
-    let backup_path = dns::save_backup(state)?;
-    dns::system::apply_servers(state, servers)?;
+    let _operation = dns::lock_operation()?;
+    let state = revalidate_dns_mutation_state(state)?;
+    let backup_path = dns::save_backup(&state)?;
+    if let Err(error) = dns::system::apply_servers(&state, servers) {
+        dns::system::flush_cache();
+        match dns::system::restore(&state) {
+            Ok(()) => {
+                dns::system::flush_cache();
+                bail!("DNS configuration failed ({error:#}); the previous configuration was restored");
+            }
+            Err(rollback_error) => bail!(
+                "DNS configuration failed ({error:#}) and rollback failed ({rollback_error:#}); recovery snapshot: {}",
+                backup_path.display()
+            ),
+        }
+    }
     dns::system::flush_cache();
     if let Err(error) = dns::verify_system_resolution().await {
-        let rollback = dns::system::restore(state);
+        let rollback = dns::system::restore(&state);
         dns::system::flush_cache();
         match rollback {
             Ok(()) => bail!(
@@ -715,6 +765,41 @@ async fn apply_dns_change(
         tr("✓ Resolver cache flushed and system DNS verification passed.")
     );
     println!("{}", tr("  Rollback: speedtest dns rollback"));
+    Ok(())
+}
+
+fn revalidate_dns_mutation_state(
+    original: &dns::system::DnsSystemState,
+) -> Result<dns::system::DnsSystemState> {
+    let current = dns::system::inspect(Some(&original.interface))?;
+    if &current != original {
+        bail!("DNS or route state changed while awaiting confirmation; review the new state and rerun the command");
+    }
+    ensure_active_dns_mutation_target(&current)?;
+    if !current.can_configure() {
+        bail!(
+            "{} cannot safely preserve and restore DNS on this interface",
+            current.backend
+        );
+    }
+    Ok(current)
+}
+
+fn ensure_active_dns_mutation_target(state: &dns::system::DnsSystemState) -> Result<()> {
+    let active = dns::system::inspect(None)?;
+    if active.interface != state.interface {
+        bail!(
+            "refusing to change DNS on non-active interface `{}` because post-change probes cannot be bound safely; active interface is `{}`",
+            state.interface,
+            active.interface
+        );
+    }
+    if !(state.ipv4_default_route || state.ipv6_default_route) {
+        bail!(
+            "refusing to change DNS on `{}` because it has no active default route",
+            state.interface
+        );
+    }
     Ok(())
 }
 
