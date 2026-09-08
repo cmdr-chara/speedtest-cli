@@ -24,10 +24,13 @@ use crate::{
     tui::{numerals, speedometer},
 };
 
-const BRAND: [&str; 3] = [
-    "█▀▀ █▀█ █▀▀ █▀▀ █▀▄ ▀█▀ █▀▀ █▀▀ ▀█▀",
-    "▀▀█ █▀▀ █▀  █▀  █ █  █  █▀  ▀▀█  █ ",
-    "▄▄█ █   █▄▄ █▄▄ █▄▀  █  █▄▄ ▄▄█  █ ",
+// OpenCode-inspired terminal lettering: angular bowls, a descending p, and
+// an ascending d. Keep the 35-cell width for the minimum dashboard layout.
+const BRAND: [&str; 4] = [
+    "                  █  █           █ ",
+    "█▀▀ █▀█ █▀█ █▀█ █▀█ ▀█▀ █▀█ █▀▀ ▀█▀",
+    "▀▀█ █▄█ █▀▀ █▀▀ █ █  █  █▀▀ ▀▀█  █ ",
+    "▀▀▀ █   ▀▀▀ ▀▀▀ ▀▀▀  ▀▀ ▀▀▀ ▀▀▀  ▀▀",
 ];
 
 pub(super) fn draw(frame: &mut Frame, app: &mut Cockpit, theme: Theme, elapsed: Duration) {
