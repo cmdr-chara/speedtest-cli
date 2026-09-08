@@ -11,7 +11,7 @@ on:
       - "src/**"
   push:
     branches:
-      - main
+      - determination
   workflow_dispatch:
 
 permissions:
