@@ -4,6 +4,12 @@
 
 Use current stable Rust and Python 3.10 or newer. Cargo.lock is committed for repeatable dependency resolution; dependency changes must include an intentional lockfile update.
 
+Storage uses the standard library's file-locking APIs (available since Rust 1.89).
+The already locked `tempfile` dependency also supplies atomic export replacement.
+Persistence tests use isolated directories and concurrent writers; never test them
+against personal history. A filesystem that does not support locks must report an
+error rather than silently falling back to uncoordinated writes.
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -38,6 +44,16 @@ To inspect the exact synthetic test-backend frames (not WAN results), opt in:
 ```bash
 COCKPIT_SNAPSHOT_DIR=/tmp/speedtest-frames cargo test --locked --lib capture_review_frames_when_explicitly_requested
 ```
+
+For metric readability and full-terminal layout captures, use:
+
+```bash
+READABILITY_SNAPSHOT_DIR=/tmp/speedtest-readability cargo test --locked --lib capture_readability_frames_when_explicitly_requested
+```
+
+These include English and Italian fixture screens at 80×24, 120×38, and 214×52 in
+all four palettes. When rasterizing the buffers, render block elements to the exact
+cell edges; ordinary font advances can introduce seams that the TUI never emits.
 
 Keep business logic in the engine/analysis/storage modules and shared completion
 policy in `session`. Do not start network work from a constructor, view, section

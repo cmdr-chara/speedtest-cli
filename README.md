@@ -1,374 +1,61 @@
-# speedtest-cli
+<h1 align="center">speedtest-cli</h1>
 
-A fast, polished terminal network quality analyzer written in Rust.
+<p align="center">
+  <strong>Know your speed. Understand your connection.</strong><br>
+  A terminal network lab for throughput, latency, bufferbloat, DNS, and connection history.<br>
+  Built with Rust. Keyboard driven. Ready for scripts.
+</p>
 
-`speedtest-cli` measures throughput and latency, then explains how the connection behaves under load. It includes network-quality scoring, bufferbloat analysis, stability monitoring, historical intelligence, DNS diagnostics/configuration, multiple Internet backends, real ICMP loss testing, Wi-Fi inspection, and a self-hosted LAN mode.
+<p align="center">
+  <a href="https://github.com/cmdr-chara/speedtest-cli/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/cmdr-chara/speedtest-cli?style=for-the-badge&amp;color=36c9b0"></a>
+  <a href="https://github.com/cmdr-chara/speedtest-cli/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/cmdr-chara/speedtest-cli/ci.yml?style=for-the-badge&amp;label=CI"></a>
+  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-80a5dc?style=for-the-badge"></a>
+</p>
 
-## Highlights
+<p align="center">
+  <a href="https://github.com/cmdr-chara/speedtest-cli/releases/latest"><strong>Download</strong></a>
+  &nbsp;•&nbsp;
+  <a href="#get-started">Get started</a>
+  &nbsp;•&nbsp;
+  <a href="#see-it-in-action">Screenshots</a>
+  &nbsp;•&nbsp;
+  <a href="./docs/usage.md">User guide</a>
+  &nbsp;•&nbsp;
+  <a href="https://github.com/cmdr-chara/speedtest-cli/issues">Get help</a>
+</p>
 
-- Full-screen keyboard-driven network cockpit with an offline home dashboard
-- Download/upload throughput with concurrent streams
-- Idle and loaded latency, jitter, p95/p99 tails
-- Explainable 0–100 quality score with A+–F grades
-- Rare `◆ S-TIER` distinction for exceptional high-confidence runs
-- Bufferbloat and workload analysis for gaming, calls, streaming, and cloud gaming
-- Long-running stability mode
-- History, trends, sparklines, and anomaly detection
-- DNS inspection, health testing, benchmarking, configuration, rollback, and optimization
-- 20 built-in DNS resolver profiles across multiple providers
-- DNS-over-UDP and real DNS-over-HTTPS benchmarking
-- Cloudflare and LibreSpeed Internet backends
-- Backend cross-checking with `speedtest verify`
-- Real ICMP echo response-loss measurement with `speedtest loss`
-- Native Wi-Fi diagnostics on Windows, macOS, and Linux
-- Built-in self-hosted LAN speed-test server/client
-- Script-safe terminal detection, explicit progress/color policy, and stable exit statuses
-- Offline threshold/freshness checks for saved JSON results
-- JSON output, CSV export, per-run JSON, and JSONL history
-- Native release binaries for Windows, Linux, Intel macOS, and Apple Silicon macOS
+<p align="center">
+  <img src="./docs/images/readme/home.png" width="960" alt="speedtest-cli dashboard with download and upload readings, measurement settings, and keyboard navigation">
+</p>
 
-## Network cockpit
+<p align="center"><sub>Current development UI, captured from the application's renderer with illustrative test data. These are not measured connection speeds; published releases may differ.</sub></p>
 
-In an interactive terminal, `speedtest` opens a full-screen home dashboard rather than
-starting a measurement immediately. Opening the menu reads **local history only**:
-no connectivity check, DNS query, server discovery, or throughput test runs until you
-explicitly start a network operation. Idle status badges are intentionally omitted;
-the measurement profile explains that no background network probes run.
+## Why speedtest-cli?
 
-```bash
-speedtest                 # Open the dashboard; no automatic network traffic
-speedtest --run           # Bypass the menu; start the existing live speedometer
-speedtest --plain         # Run immediately, with noninteractive text output
-speedtest --json          # Run immediately, with the existing canonical JSON output
-```
+A fast connection can still struggle with calls or games. speedtest-cli puts throughput beside latency under load, explains the result, and lets you compare it with earlier runs.
 
-The main flow is **Home → Run Speed Test → configuration → Start test → live gauge →
-results**. Review duration, concurrent streams, backend, render rate, timeout, and
-history preference before starting. Existing command-line options seed those values;
-for example, `speedtest --backend librespeed --duration 5 --no-save` opens the cockpit
-with that profile. `--run` retains the immediate-test workflow with the same options.
+- **See more than Mbps.** Measure download, upload, idle and loaded latency, jitter, and bufferbloat, with an explained quality score and workload grades.
+- **Find where performance changes.** Cross-check Cloudflare and LibreSpeed, inspect Wi-Fi, or test between two machines on your LAN.
+- **Keep a useful history.** Browse saved runs, spot trends, pin a baseline, and compare six metrics before and after a change.
+- **Investigate DNS and stability.** Inspect resolvers, benchmark UDP or DoH, monitor HTTP availability, and measure ICMP echo response loss separately.
+- **Use it your way.** An offline home dashboard, eight languages, four palettes, and plain text, JSON, and CSV for automation.
 
-Home also provides **History**, **Statistics**, **DNS Tools**, **Diagnostics**, and
-**Settings**. The recent result opens with `v`. History shows the last 30 days with
-keyboard selection; `Enter` opens a saved result without saving it again, and `c`
-compares the two newest saved runs. Statistics and comparison reuse the CLI's existing
-analysis, including explicit better/worse labels rather than color alone.
+## Download
 
-| Key | Action |
+Download a native archive from [GitHub Releases](https://github.com/cmdr-chara/speedtest-cli/releases/latest). **Rust is not required** to run a prebuilt binary.
+
+| Your computer | Package |
 | --- | --- |
-| `↑` / `↓` or `k` / `j` | Select a row; scroll on report/result screens |
-| `Enter` | Open, start, or edit the selected item |
-| `Tab` / `Shift+Tab`, `←` / `→` | Switch sibling sections |
-| `Esc` / `Backspace` | Back to the previous screen, preserving its selection |
-| `+` / `-`, `Space` | Change the selected configuration/setting value |
-| `PgUp` / `PgDn` | Scroll long reports |
-| `r` | Reload history or retry/start the current tool or failed test |
-| `?` | Open/close the keyboard guide |
-| `z` | Open the scrollable text-size guide, including Arch/Omarchy guidance |
-| `q` | Quit; ask before cancelling active work |
-| `Ctrl+C` | Cancel and exit (130); keyboard cancellation waits for an ongoing save |
+| Windows · Intel / AMD 64-bit | [speedtest-windows-x86_64.zip](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-windows-x86_64.zip) |
+| Linux · Intel / AMD 64-bit | [speedtest-linux-x86_64.tar.gz](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-linux-x86_64.tar.gz) |
+| macOS · Apple Silicon | [speedtest-macos-aarch64.tar.gz](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-macos-aarch64.tar.gz) |
+| macOS · Intel | [speedtest-macos-x86_64.tar.gz](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-macos-x86_64.tar.gz) |
 
-During a test or diagnostic, section navigation pauses but help, resize, and cancellation
-remain responsive. `Esc` opens a confirmation with **Continue** selected by default;
-choose **Cancel** or press `y` to stop. Incomplete measurements are never saved. A
-completed result remains visible if export/history fails, with a **SAVE FAILED** notice.
+Each archive has a matching `.sha256` file on the release page. Extract the archive and launch `speedtest` (`speedtest.exe` on Windows).
 
-Settings apply to **this session only**; they do not change a configuration file or the
-CLI defaults for future launches. They include a reduced-motion option that removes
-needle interpolation and animated activity markers. The balanced timing preset uses
-8-second phases, 2 streams, 60 FPS, and a 120-second deadline. CLI `--timeout` starts
-when an operation starts, not while browsing the menu.
+<details>
+<summary><strong>Installation commands for Windows, Linux, and macOS</strong></summary>
 
-DNS and diagnostic tools have a separate **Ready to start** screen. They run the
-existing read-only commands and show their reports in scrollable panels, with bounded
-output, timeout, cancellation, and retry. Available tools include DNS configuration
-inspection/catalog/testing/UDP and DoH benchmarks, Network Doctor, Wi-Fi, ICMP loss,
-stability monitoring, and backend verification. They do **not** change DNS settings;
-configuration/rollback and all specialized options remain available through the
-unchanged CLI subcommands. Stability in the menu runs for 60 seconds without saving.
-
-The cockpit supports **80×24** and larger terminals. Below that size, navigation is
-preserved behind a resize notice and hidden controls cannot start a test. The default
-**Terminal (adaptive)** palette inherits the terminal's foreground, background, and
-ANSI colors on Linux, macOS, and Windows, rather than forcing a dark canvas. Settings
-also offers Graphite, Light, and Monochrome palettes. Fixed palettes use truecolor or
-256 colors when advertised and safely fall back to terminal-native colors otherwise.
-No terminal profile or palette is modified, and no mouse is required. For screen readers, no-color environments, pipes, or non-animated
-reports, use `--plain`; automatic terminal detection is unchanged.
-
-**Comfortable** layout uses five-row metric digits on spacious screens, three-row
-digits on medium screens, and ordinary values where space is limited; **Compact** uses ordinary text. Related content stays in a centered workspace
-of at most 120 columns and 38 rows. Highlights cover the selected action label,
-not its description or an entire empty row. To enlarge all body text, use your
-terminal's Zoom In or font-size setting: the application reflows after resizing
-but never changes your font or window size. Appearance settings are session-only.
-
-`--output` and `--format json|csv` keep their existing export behavior. In a menu
-session, the explicit output path is reused for each completed test (overwriting
-that file); history remains controlled independently by `--no-save` or the session
-setting. Use distinct paths between launches to keep separate exports. Browsing an
-old result never exports or persists it again.
-
-See [cockpit architecture and verification](docs/network-cockpit.md) for the state
-machine, service boundaries, and test commands.
-
-## Interface language and text size
-
-The interface supports **English, Italian, Spanish, French, German, Portuguese,
-Simplified Chinese, and Japanese**. Select a language in **Settings → Language**
-without restarting or making a network request, or use the global option:
-
-```bash
-speedtest --language it
-speedtest --language ja --help
-speedtest dns benchmark --language de --help
-SPEEDTEST_LANGUAGE=fr speedtest history
-speedtest --language en --json --no-save > result.json
-```
-
-Supported codes: `en`, `it`, `es`, `fr`, `de`, `pt`, `zh-CN`, `ja`, and `auto`.
-Precedence: explicit `--language`, then `SPEEDTEST_LANGUAGE`, then the first nonempty
-`LC_ALL`, `LC_MESSAGES`, or `LANG`. Unsupported system locales fall back to English;
-unsupported explicit codes are usage errors. Regional tags such as `it_IT.UTF-8`
-and `pt-BR` resolve to their base language. Traditional Chinese locales are not
-mislabeled as Simplified Chinese. Windows users can select a language explicitly or
-use `SPEEDTEST_LANGUAGE`; a Windows display-language API is not queried.
-
-Navigation, settings, help, built-in human summaries, findings, and the immediate
-speedometer/stability views are localized. **Commands, flags, shortcuts, provider
-names, units, canonical JSON (including machine error records), CSV columns and
-stored results do not change language.** Native OS/provider error details and
-unknown/custom saved prose are preserved verbatim; generated parser annotations
-and some low-level error details remain English. Diagnostic reports retain the
-language used when started; rerun a report after changing the interface language.
-All translations are embedded, require no downloads, and have key/placeholder
-parity tests. Community linguistic review is welcome.
-
-For larger ordinary text, press **`z`** for guidance. The application cannot portably
-change a terminal's font size: larger panels do not enlarge each character.
-On **Omarchy's default Alacritty**, edit the existing `[font]` section in
-`~/.config/alacritty/alacritty.toml`, for example `size = 14.0`. Preserve the other
-settings and imports; do not add a duplicate `[font]` section. The cockpit reflows
-when the resulting terminal grid changes; keep at least **80 columns × 24 rows**.
-No terminal or desktop configuration is modified by Speedtest. Details and primary
-terminal documentation are in [localization and sizing](docs/localization.md).
-
-## v0.5 Network Lab
-
-### Adaptive Cloudflare backend
-
-The Cloudflare backend no longer depends on one fixed request such as:
-
-```text
-https://speed.cloudflare.com/__down?bytes=250000000
-```
-
-Large requests to the public endpoint can be rejected depending on endpoint policy, edge behavior, network, or request size. v0.5 uses a time-based adaptive download strategy instead: it starts with a moderate payload, scales up when responses complete quickly, and automatically downshifts when Cloudflare returns size/rejection statuses such as HTTP 403, 413, or 400. HTTP 429 still uses bounded `Retry-After`/backoff handling.
-
-The objective is to measure sustained throughput without making a successful test depend on one 250 MB response.
-
-### Multiple Internet backends
-
-Cloudflare remains the default:
-
-```bash
-speedtest
-speedtest --backend cloudflare
-```
-
-LibreSpeed is also available:
-
-```bash
-speedtest --backend librespeed
-```
-
-A compatible custom LibreSpeed installation can be selected with:
-
-```bash
-speedtest --backend librespeed --librespeed-server https://speed.example.com
-```
-
-The custom URL is treated as the LibreSpeed base URL and standard `garbage.php` / `empty.php` endpoints are assumed.
-
-### Backend verification
-
-Use both Internet engines to check whether a result is strongly backend/path dependent:
-
-```bash
-speedtest verify
-speedtest verify --duration 8 --streams 2
-speedtest verify --json
-```
-
-`verify` compares Cloudflare and LibreSpeed results rather than assuming a single public endpoint is ground truth.
-
-### Real ICMP response loss
-
-```bash
-speedtest loss
-speedtest loss --target 1.1.1.1 --count 50
-speedtest loss --json
-```
-
-This is a real ICMP echo response-loss measurement. It is deliberately separate from HTTP probe availability: HTTP failures, DNS failures, and endpoint throttling are **not** labeled packet loss.
-
-ICMP still has an important limitation: some hosts, routers, and firewalls block or deprioritize echo traffic, so ICMP loss can look worse than application traffic.
-
-### Wi-Fi diagnostics
-
-```bash
-speedtest wifi
-speedtest wifi --json
-speedtest wifi --interface Wi-Fi
-```
-
-Depending on the OS and driver/tooling, the report can include:
-
-- active interface
-- SSID
-- signal strength / estimated dBm
-- band
-- channel
-- PHY/link rate
-- radio metadata
-
-PHY/link rate is not presented as Internet throughput.
-
-### Self-hosted LAN mode
-
-Run a server on another machine in the LAN, binding its trusted LAN address explicitly:
-
-```bash
-speedtest serve --bind 192.168.1.50:9876
-```
-
-Without `--bind`, the server listens only on `127.0.0.1:9876`. The LAN protocol is unauthenticated and unencrypted: do not expose it to the Internet. Use firewall rules on shared networks. The server bounds live connections and expires idle or overlong sessions; those limits are not authentication.
-
-Then from another machine:
-
-```bash
-speedtest lan 192.168.1.50:9876
-speedtest lan 192.168.1.50:9876 --duration 10 --streams 4
-speedtest lan 192.168.1.50:9876 --json
-```
-
-This gives you a local throughput/latency baseline. If LAN performance is poor, the problem is likely local before the ISP/WAN path is even involved.
-
-## DNS suite
-
-Inspect the current resolver configuration:
-
-```bash
-speedtest dns show
-speedtest dns list
-```
-
-Test the active resolver or explicit DNS server IPs:
-
-```bash
-speedtest dns test
-speedtest dns test --resolver 1.1.1.1 --resolver 8.8.8.8
-```
-
-Benchmark comparable resolver leagues over classic UDP/53:
-
-```bash
-speedtest dns benchmark
-speedtest dns benchmark --profile privacy
-speedtest dns benchmark --profile security
-speedtest dns benchmark --profile adblock
-speedtest dns benchmark --profile family
-```
-
-Benchmark providers using real DNS-over-HTTPS wire-format requests:
-
-```bash
-speedtest dns benchmark --protocol doh
-speedtest dns benchmark --profile privacy --protocol doh
-```
-
-DoH benchmarking performs connection warm-up separately so the measured query distribution is not simply the first TCP/TLS handshake time.
-
-Configure a known resolver profile:
-
-```bash
-speedtest dns set cloudflare --dry-run
-speedtest dns set cloudflare
-speedtest dns set quad9
-```
-
-Automatically benchmark a league and select the best eligible resolver:
-
-```bash
-speedtest dns optimize --dry-run
-speedtest dns optimize
-speedtest dns optimize --profile privacy
-speedtest dns optimize --profile security
-```
-
-Recovery:
-
-```bash
-speedtest dns rollback
-speedtest dns reset
-```
-
-DNS writes snapshot the existing configuration before applying changes, verify resolution afterward, and attempt automatic rollback if post-change validation fails. On Linux, persistent automatic configuration currently requires NetworkManager; unmanaged resolver setups remain read-only.
-
-## Network Doctor and comparison
-
-```bash
-speedtest doctor
-speedtest doctor --full
-speedtest doctor --json
-```
-
-The lightweight doctor checks route/interface state, gateway latency where available, IPv4/IPv6 reachability, DNS health, HTTPS, and platform network context. `--full` also runs throughput/bufferbloat analysis.
-
-Compare the two latest saved runs:
-
-```bash
-speedtest compare
-```
-
-Or compare explicit canonical JSON results:
-
-```bash
-speedtest compare before.json after.json
-speedtest compare before.json after.json --json
-```
-
-## Stability
-
-`speedtest stability` continuously sends conservative HTTP probes instead of repeatedly saturating the connection:
-
-```bash
-speedtest stability
-speedtest stability --duration 5m
-speedtest stability --duration 5m --interval 750ms
-speedtest stability --plain
-speedtest stability --json
-```
-
-**HTTP probe availability is not packet loss.** A failed stability probe can be caused by endpoint throttling, route/server behavior, or the local connection. Use `speedtest loss` when you specifically want ICMP echo response-loss measurement.
-
-## History and statistics
-
-```bash
-speedtest history
-speedtest history --days 30 --limit 50
-speedtest history --json
-
-speedtest stats
-speedtest stats --days 90
-speedtest stats --json
-```
-
-History/statistics include median/best throughput, latency statistics, quality context, S-tier counts, trend detection, a Unicode throughput sparkline, and latest-run anomaly detection against prior saved results.
-
-## Installation
-
-### Prebuilt binaries
 
 GitHub Releases are the recommended installation method; Rust is not required.
 
@@ -407,205 +94,144 @@ sudo install -m 0755 "speedtest-macos-${ASSET}/speedtest" /usr/local/bin/speedte
 
 Each packaged release includes SHA-256 checksum files.
 
-### Install from source
+
+</details>
+
+<details>
+<summary><strong>Build the current checkout</strong></summary>
+
+Requires the current stable Rust toolchain. From the repository directory:
 
 ```bash
-cargo install --locked --git https://github.com/cmdr-chara/speedtest-cli --branch determination --force
-speedtest --version
+cargo build --release --locked --bin speedtest
+cargo run --release --locked --bin speedtest
 ```
 
-## Normal speed-test usage
+The executable is written to `target/release/speedtest` (`speedtest.exe` on Windows).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and verification instructions.
+
+</details>
+
+## Get started
 
 ```bash
-speedtest
-speedtest --run
-speedtest --backend cloudflare
-speedtest --backend librespeed
-speedtest --fps 144
-speedtest --plain
-speedtest --json
-speedtest --streams 4 --duration 10
-speedtest --output result.json
-speedtest --output result.csv --format csv
-speedtest --no-save
+speedtest                         # Open the dashboard
+speedtest --run                   # Start a test immediately
+speedtest --backend librespeed    # Open with LibreSpeed selected
+speedtest --plain                 # Run with plain text output
+speedtest --json                  # Run with JSON output
 ```
 
-Main options:
+1. Open `speedtest` in a terminal of at least **80 × 24** characters.
+2. Choose **Run Speed Test** and review the backend, duration, and streams.
+3. Start the test, then review throughput, latency, and connection quality.
+4. Open **History** to revisit a run or compare it with an earlier baseline.
 
-```text
---run                        bypass the menu and start immediately
---backend <BACKEND>          cloudflare or librespeed
---librespeed-server <URL>    custom LibreSpeed base URL
---streams <N>                concurrent transfer streams (default: 2)
---duration <SEC>             seconds for each throughput phase (default: 8)
---fps <N>                    interactive render cap, 30–240 FPS
---plain                      disable interactive TUI
---json                       print canonical JSON
---output <PATH>              also write completed result
---format <FORMAT>            json or csv
---no-save                    disable automatic history/result persistence
---timeout <SEC>              overall Internet measurement deadline (default: 120)
---color <POLICY>             auto, always, or never
---progress <POLICY>          auto, always, or never; phase lines use stderr
-```
+Opening the interactive dashboard reads local history only. Network operations begin when you start them. Completed tests are saved locally unless you use `--no-save`.
 
-The speedometer physics run independently of the render cap, so lowering `--fps` reduces terminal work without changing network measurements.
-
-## Terminal and automation behavior
-
-Normal tests automatically use plain output when stdin or stdout is redirected. `TERM=dumb`, nonempty `NO_COLOR`, `CLICOLOR=0`, `--color never`, and `--progress never` also select the non-animated interface. `--color always` overrides color environment preferences but never forces raw mode on a pipe or a dumb terminal. The `--run` speedometer keeps its completed result in terminal scrollback. The cockpit keeps results in its Results screen and, when enabled, local history.
-
-Results go to stdout. Default-test phase progress goes to stderr: `auto` shows it only on a terminal and keeps JSON mode quiet; `always` explicitly enables it; `never` suppresses it. Plain reports use text labels rather than relying on color. JSON field names and units do not vary with terminal preferences.
-
-```bash
-speedtest --json --no-save --timeout 45 > result.json
-speedtest --plain --progress always --no-save > result.txt 2> progress.log
-speedtest --color never
-```
-
-`--timeout` bounds the default Internet measurement, including server selection. Ctrl+C cancels default, stability, verify, LAN, server, and loss operations; owned network work is dropped and terminal state is restored. Configuration-changing DNS operations retain their existing rollback lifecycle rather than being interrupted halfway through a write. DNS confirmation without a terminal fails with guidance to use `--dry-run` or an explicit `--yes`.
-
-| Exit | Meaning |
+| Key | Action |
 | --- | --- |
-| 0 | Success; also a consumer deliberately closing stdout early |
-| 1 | Runtime, input-file, network, or persistence failure |
-| 2 | Invalid command/arguments (Clap usage error) |
-| 3 | A valid offline threshold check failed |
-| 124 | Overall Internet measurement deadline exceeded |
-| 130 | Handled cancellation |
+| `↑` / `↓` or `k` / `j` | Select or scroll |
+| `Enter` | Open or confirm |
+| `Tab` / `Shift+Tab` | Switch sections |
+| `Esc` | Go back |
+| `b` / `c` in History | Pin a baseline / compare |
+| `?` / `q` | Keyboard guide / quit |
 
-In JSON mode, runtime failures emit `{"error":{"code":1,"message":"..."}}` on **stderr**, without a success result on stdout. Usage errors remain human-readable on stderr. In immediate CLI runs, explicit file exports and automatic persistence must succeed before a completed default/stability result is printed. The menu instead retains the completed result on screen and labels a save/export failure explicitly. A broken pipe is handled without a panic/backtrace; it does not roll back already completed persistence.
+[Full keyboard guide and cockpit behavior →](./docs/usage.md#network-cockpit)
 
-Color/progress flags are global. Measurement flags are command-specific: use `speedtest verify --duration 5`, not `speedtest --duration 5 verify`. Options that would otherwise be silently ignored before a subcommand are rejected. `--format` requires `--output`, and `--librespeed-server` requires `--backend librespeed`; these mistakes fail before any measurement starts.
+## See it in action
 
-## Offline checks for scripts
+### Watch the connection under load
 
-Evaluate a saved canonical result without contacting the network or changing history:
+The live dial shows throughput alongside latency readings as the test progresses.
+
+<p align="center">
+  <img src="./docs/images/readme/live-demo.gif" width="960" alt="Animated speedtest-cli walkthrough from the dashboard into a live download measurement and back">
+</p>
+
+### Explore results and history
+
+Browse saved tests, pin a baseline, compare it with another run, and open the full result.
+
+<p align="center">
+  <img src="./docs/images/readme/cockpit-tour.gif" width="960" alt="Animated speedtest-cli tour through History, baseline comparison, Results, and back to Home">
+</p>
+
+<details>
+<summary><strong>View static result and comparison screenshots</strong></summary>
+
+Review the exact numbers, quality grade, bufferbloat, and findings in one place.
+
+<p align="center">
+  <img src="./docs/images/readme/results.png" width="960" alt="Completed result showing download, upload, latency, jitter, quality, and diagnostic findings">
+</p>
+
+Select a saved run and press `b` to pin it. Select another run and press `c` to compare download, upload, latency, jitter, quality, and bufferbloat.
+
+<p align="center">
+  <img src="./docs/images/readme/history.png" width="960" alt="Saved run history with throughput and quality columns and a preview of the selected result">
+</p>
+
+<p align="center">
+  <img src="./docs/images/readme/compare.png" width="960" alt="Pinned baseline comparison with before and after values, metric changes, and a verdict">
+</p>
+
+</details>
+
+<details>
+<summary><strong>Choose your language and appearance</strong></summary>
+
+English, Italian, Spanish, French, German, Portuguese, Simplified Chinese, and Japanese are available in **Settings → Language**, or with `speedtest --language it`.
+
+Choose Terminal (adaptive), Graphite, Light, or Monochrome, and Comfortable or Compact layouts. Settings apply to the current session. Use your terminal's font-size controls to enlarge all text; the interface reflows with the window.
+
+[Language and readability guide →](./docs/usage.md#interface-language-and-text-size)
+
+</details>
+
+All gallery images use deterministic fixtures rendered by the current application. [Capture details →](./docs/images/readme/README.md)
+
+## A network lab in one command
+
+| What you want to learn | Command |
+| --- | --- |
+| Do two Internet backends agree? | `speedtest verify` |
+| Is the local network the bottleneck? | `speedtest serve --bind 192.168.1.50:9876` on one machine, then `speedtest lan 192.168.1.50:9876` on another |
+| What does the network diagnosis show? | `speedtest doctor` |
+| How is the Wi-Fi link configured? | `speedtest wifi` |
+| Are ICMP echo responses being lost? | `speedtest loss --target 1.1.1.1 --count 50` |
+| Does HTTP availability stay consistent? | `speedtest stability --duration 5m` |
+| Which DNS resolvers respond well? | `speedtest dns benchmark --protocol doh` |
+| How has the connection changed? | `speedtest history` / `speedtest stats` / `speedtest compare` |
+
+LAN mode is unauthenticated and unencrypted; bind only on a trusted network and do not expose it to the Internet. HTTP availability and ICMP loss describe different behavior. Quality grades are explained local heuristics, not certifications. [Measurement semantics and limitations →](./docs/usage.md#accuracy-notes)
+
+DNS inspection and benchmarks are read-only. Configuration commands such as `dns set` and `dns optimize` change system settings; preview with `--dry-run` and read the [DNS and recovery guide](./docs/usage.md#dns-suite) first.
+
+## Made for scripts, too
+
+Export a result, then check it offline against your own thresholds:
 
 ```bash
 speedtest --json --no-save > result.json
 speedtest check result.json --min-download 100 --min-upload 20 --max-latency 30
-speedtest check result.json --max-jitter 5 --max-loaded-latency 80 --max-age 300 --json
-cat result.json | speedtest check - --min-download 100 --json
 ```
 
-At least one threshold is required. Throughput thresholds use decimal **Mbps**, latency/jitter use **ms**, and `--max-age` uses **seconds**. Equality passes. `--max-loaded-latency` checks both download and upload loaded latency; a missing value fails, rather than becoming zero. Freshness rejects future timestamps. Input is limited to one JSON document of at most 4 MiB. Nonfinite or negative thresholds are rejected.
+A passing check exits **0**; failed thresholds exit **3**. JSON uses stable field names and units across interface languages. CSV export is available with `--output result.csv --format csv`.
 
-The versioned check report contains `schema_version`, `passed`, `result_timestamp`, and per-metric `checks` with `actual`, `limit`, `operator`, `unit`, and `passed`. A missing measurement has `actual: null`. Failed thresholds return **3**; malformed input returns **1**. These are user-selected acceptance criteria, not a certified diagnosis or proof that a saved file is authentic.
+Read the [automation contract](./docs/usage.md#terminal-and-automation-behavior), [offline checks](./docs/usage.md#offline-checks-for-scripts), and [storage guarantees](./docs/usage.md#data-storage) for errors, cancellation, output streams, and concurrent jobs.
 
-For concurrent automation, use `--no-save` and distinct explicit output files: the existing shared JSONL history does not yet coordinate concurrent writers.
+## Documentation and contributing
 
-## Result semantics
+- [User guide](./docs/usage.md) — commands, installation, keyboard controls, DNS, result semantics, and storage.
+- [Contributing](./CONTRIBUTING.md) — build, test, and verification workflow.
+- [Architecture](./docs/network-cockpit.md) — cockpit state, services, and rendering.
+- [Verification reports](./docs/verification.md) — recorded checks and remaining limitations.
+- [Report an issue](https://github.com/cmdr-chara/speedtest-cli/issues) — include the command, platform, and relevant output.
 
-Normal Internet and LAN tests use the existing canonical result structure:
-
-```json
-{
-  "timestamp": "2026-08-20T14:00:00Z",
-  "backend": "cloudflare",
-  "server": {
-    "host": "speed.cloudflare.com",
-    "name": "Cloudflare Edge"
-  },
-  "latency": {
-    "idle_ms": 8.2,
-    "jitter_ms": 1.1,
-    "download_loaded_ms": 19.4,
-    "upload_loaded_ms": 82.7,
-    "packet_loss_percent": null
-  },
-  "download": {
-    "mbps": 842.6,
-    "bytes": 842600000,
-    "seconds": 8.0
-  },
-  "upload": {
-    "mbps": 193.4,
-    "bytes": 193400000,
-    "seconds": 8.0
-  }
-}
-```
-
-**Upload accounting:** only complete requests acknowledged by a successful HTTP response count toward Cloudflare/LibreSpeed upload goodput. Rejected, buffered-only, and deadline-cancelled requests do not count. Adaptive payloads start small, but a final in-flight request may still be excluded, so this is a conservative application-level measurement—not TCP wire throughput. LAN upload timing includes acknowledgement drain and validates the returned byte count. Old upload results may not be directly comparable after this correction.
-
-Custom LibreSpeed URLs must use HTTP(S) without credentials, query strings, or fragments. Measurement redirects are not followed; supply the final endpoint URL. HTTPS certificate verification remains enabled. Do not place secrets in URL paths: server metadata is part of the result.
-
-Standalone `speedtest loss` does not silently inject ICMP loss into an unrelated saved throughput run. That separation keeps protocol semantics explicit.
-
-## Data storage
-
-Completed tests are stored in the platform data directory unless `--no-save` is used.
-
-```text
-speedtest/
-├── history.jsonl
-├── results/
-├── dns/
-│   └── last-backup.json
-└── stability/
-    ├── history.jsonl
-    └── results/
-```
-
-## Architecture
-
-```text
-src/
-├── analysis/
-├── bin/
-│   └── speedtest.rs
-├── dns/
-│   ├── doh.rs
-│   ├── mod.rs
-│   └── system.rs
-├── engine/
-│   ├── cloudflare_adaptive.rs
-│   ├── internet.rs
-│   ├── librespeed.rs
-│   └── mod.rs
-├── compare.rs
-├── doctor.rs
-├── history.rs
-├── lan.rs
-├── loss.rs
-├── model/
-├── stability.rs
-├── storage/
-├── tui/
-│   ├── cockpit/            # reducer, runtime, views, theme, read-only adapters
-│   └── speedometer/        # shared live gauge and physics
-├── verify.rs
-├── wifi.rs
-└── lib.rs
-```
-
-Measurement, analysis, UI, persistence, DNS, local-network diagnostics, and backend implementations are kept separate so they can evolve independently.
-
-## Accuracy notes
-
-This is an independent CLI, not an official Cloudflare or LibreSpeed client. Results vary with routing, congestion, Wi-Fi conditions, endpoint behavior, protocol overhead, server capacity, and test methodology.
-
-The quality score, workload grades, stability grades, history trend, anomaly flags, and DNS scores are local heuristics rather than standardized certifications.
-
-A public speed-test server is part of the path being measured. Use `speedtest verify` when you need cross-backend evidence and `speedtest lan` when you need to isolate the local network from the WAN.
-
-ICMP echo loss measures ICMP echo response behavior; it does not prove every transport/application experiences identical loss.
-
-See [the assessment, competitive research, prioritized plan, and remaining risks](docs/cli-reliability-review.md) and [contributor verification instructions](CONTRIBUTING.md).
-
-## Roadmap
-
-- deeper IPv4 vs IPv6 A/B workflow
-- VPN on/off comparison workflow
-- MTU and fragmentation diagnostics
-- TCP/TLS handshake decomposition
-- HTTP/2 vs HTTP/3 / QUIC diagnostics
-- DoT and DoQ active benchmarks
-- additional Internet measurement backends and server discovery
-- configurable but restrained TUI themes
-- Homebrew and WinGet packages
+speedtest-cli is an independent project, not an official Cloudflare or LibreSpeed client.
 
 ## License
 
-MIT
+[MIT](./LICENSE)

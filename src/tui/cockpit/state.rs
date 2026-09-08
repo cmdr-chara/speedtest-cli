@@ -7,7 +7,7 @@ use crate::{
 };
 
 use super::{
-    services::{Archive, Tool},
+    services::{same_result, Archive, ComparedRuns, HistoryAnchor, Tool},
     theme::Palette,
 };
 use crate::tui::app::App;
@@ -124,6 +124,10 @@ pub(super) struct Cockpit {
     pub language: crate::i18n::Language,
     pub modal_scroll: u16,
     pub history: Load<Archive>,
+    history_anchor: Option<HistoryAnchor>,
+    pub history_page_size: usize,
+    pub baseline: Option<TestResult>,
+    pub comparison: Option<ComparedRuns>,
     pub table: TableState,
     pub live: App,
     pub result: Option<TestResult>,
@@ -149,6 +153,10 @@ impl Cockpit {
             language: crate::i18n::cli_language(),
             modal_scroll: 0,
             history: Load::Loading,
+            history_anchor: None,
+            history_page_size: 10,
+            baseline: None,
+            comparison: None,
             table: TableState::default(),
             live: App::default(),
             result: None,
@@ -246,6 +254,18 @@ impl Cockpit {
     }
 
     pub fn set_history(&mut self, outcome: Result<Archive, String>) {
+        let anchor = self
+            .history_anchor
+            .take()
+            .or_else(|| self.selected_anchor());
+        let selected = match (&outcome, &anchor) {
+            (Ok(archive), Some(anchor)) => archive.position(anchor),
+            _ => None,
+        };
+        // Keep the anchor through a failed reload so Retry can restore the run.
+        if outcome.is_err() {
+            self.history_anchor = anchor;
+        }
         self.history = match outcome {
             Ok(value) => Load::Ready(value),
             Err(error) => Load::Failed(error),
@@ -253,9 +273,73 @@ impl Cockpit {
         let count = self.history_count();
         for page in &mut self.pages {
             if page.screen == Screen::History {
-                page.selected = page.selected.min(count.saturating_sub(1));
+                page.selected = selected
+                    .unwrap_or(page.selected)
+                    .min(count.saturating_sub(1));
             }
         }
+    }
+
+    fn selected_anchor(&self) -> Option<HistoryAnchor> {
+        let Load::Ready(archive) = &self.history else {
+            return None;
+        };
+        let page = self
+            .pages
+            .iter()
+            .find(|page| page.screen == Screen::History)?;
+        archive.anchor(page.selected)
+    }
+
+    fn selected_result(&self) -> Option<&TestResult> {
+        let Load::Ready(archive) = &self.history else {
+            return None;
+        };
+        archive.newest(self.page().selected)
+    }
+
+    pub fn is_baseline(&self, result: &TestResult) -> bool {
+        self.baseline
+            .as_ref()
+            .is_some_and(|baseline| same_result(baseline, result))
+    }
+
+    fn pin_baseline(&mut self) {
+        let Some(result) = self.selected_result() else {
+            return;
+        };
+        if self.is_baseline(result) {
+            self.baseline = None;
+            self.notice =
+                "Baseline cleared. Compare uses the selected run and its older neighbor.".into();
+        } else {
+            self.baseline = Some(result.clone());
+            self.notice = "Baseline pinned. Select another run and press c to compare.".into();
+        }
+    }
+
+    fn compare_selected(&mut self) {
+        let Load::Ready(archive) = &self.history else {
+            return;
+        };
+        let Some(after) = archive.newest(self.page().selected) else {
+            return;
+        };
+        let before = self
+            .baseline
+            .as_ref()
+            .or_else(|| archive.newest(self.page().selected.saturating_add(1)));
+        let Some(before) = before else {
+            self.notice = "No older run. Pin a baseline with b, then select another run.".into();
+            return;
+        };
+        if self.baseline.is_some() && same_result(before, after) {
+            self.notice = "Select another run to compare with the pinned baseline.".into();
+            return;
+        }
+        self.comparison = Some(ComparedRuns::new(before, after));
+        self.notice.clear();
+        self.push(Screen::Compare);
     }
 
     pub fn tool_finished(&mut self, result: Result<String, String>) {
@@ -302,6 +386,38 @@ impl Cockpit {
             page.scroll = page
                 .scroll
                 .saturating_add_signed(delta.clamp(-100, 100) as i16);
+        }
+    }
+
+    fn page_scroll(&mut self, forward: bool) {
+        if self.screen() == Screen::History && self.history_count() > 0 {
+            let count = self.history_count();
+            let step = self.history_page_size.max(1);
+            let page = self.page_mut();
+            page.selected = if forward {
+                page.selected.saturating_add(step).min(count - 1)
+            } else {
+                page.selected.saturating_sub(step)
+            };
+            page.scroll = 0;
+        } else {
+            let page = self.page_mut();
+            page.scroll = if forward {
+                page.scroll.saturating_add(10)
+            } else {
+                page.scroll.saturating_sub(10)
+            };
+        }
+    }
+
+    fn jump(&mut self, end: bool) {
+        let count = self.select_count();
+        let page = self.page_mut();
+        if count > 0 {
+            page.selected = if end { count - 1 } else { 0 };
+            page.scroll = 0;
+        } else {
+            page.scroll = if end { u16::MAX } else { 0 };
         }
     }
 
@@ -419,6 +535,8 @@ impl Cockpit {
                     | KeyCode::Char('k')
                     | KeyCode::PageUp
                     | KeyCode::PageDown
+                    | KeyCode::Home
+                    | KeyCode::End
                     | KeyCode::Char('+')
                     | KeyCode::Char('-')
             )
@@ -447,6 +565,8 @@ impl Cockpit {
                             self.modal_scroll = self.modal_scroll.saturating_add(8)
                         }
                         KeyCode::PageUp => self.modal_scroll = self.modal_scroll.saturating_sub(8),
+                        KeyCode::Home => self.modal_scroll = 0,
+                        KeyCode::End => self.modal_scroll = u16::MAX,
                         _ => {}
                     }
                     if matches!(
@@ -533,8 +653,10 @@ impl Cockpit {
             KeyCode::BackTab | KeyCode::Left => self.sibling(-1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::PageDown => self.page_mut().scroll = self.page().scroll.saturating_add(10),
-            KeyCode::PageUp => self.page_mut().scroll = self.page().scroll.saturating_sub(10),
+            KeyCode::PageDown => self.page_scroll(true),
+            KeyCode::PageUp => self.page_scroll(false),
+            KeyCode::Home => self.jump(false),
+            KeyCode::End => self.jump(true),
             KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char(' ')
                 if matches!(self.screen(), Screen::Configure | Screen::Settings) =>
             {
@@ -550,6 +672,7 @@ impl Cockpit {
                 ) =>
             {
                 if !matches!(self.history, Load::Loading) {
+                    self.history_anchor = self.selected_anchor().or(self.history_anchor.take());
                     self.history = Load::Loading;
                     return Effect::LoadHistory;
                 }
@@ -561,7 +684,8 @@ impl Cockpit {
                     self.push(Screen::Results);
                 }
             }
-            KeyCode::Char('c') if self.screen() == Screen::History => self.push(Screen::Compare),
+            KeyCode::Char('b') if self.screen() == Screen::History => self.pin_baseline(),
+            KeyCode::Char('c') if self.screen() == Screen::History => self.compare_selected(),
             KeyCode::Char('r') if !matches!(self.screen(), Screen::Tool | Screen::Failure) => {}
             KeyCode::Enter | KeyCode::Char('r') => match self.screen() {
                 Screen::Home => self.push(HOME[self.page().selected]),
@@ -573,20 +697,20 @@ impl Cockpit {
                 }
                 Screen::History => {
                     if let Load::Ready(archive) = &self.history {
-                        if let Some(result) = archive
-                            .results
-                            .iter()
-                            .rev()
-                            .nth(self.page().selected)
-                            .cloned()
-                        {
+                        if let Some(result) = archive.newest(self.page().selected).cloned() {
                             self.result = Some(result);
                             self.save_notice = "SAVED RESULT • local history".into();
                             self.push(Screen::Results);
                         }
                     }
                 }
-                Screen::Statistics => self.push(Screen::Compare),
+                Screen::Statistics => {
+                    self.comparison = match &self.history {
+                        Load::Ready(archive) => archive.comparison.clone(),
+                        _ => None,
+                    };
+                    self.push(Screen::Compare);
+                }
                 Screen::Dns | Screen::Diagnostics => {
                     let tools = if self.screen() == Screen::Dns {
                         Tool::DNS

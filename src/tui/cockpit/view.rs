@@ -37,46 +37,59 @@ pub(super) fn draw(frame: &mut Frame, app: &mut Cockpit, theme: Theme, elapsed: 
     if area.width < 80 || area.height < 24 {
         small(frame, app, theme, area);
     } else {
-        let inner = workspace(area).inner(Margin::new(2, 1));
+        let inner = area.inner(Margin::new(2, 1));
+        // Short summaries and the live dial keep their controls nearby;
+        // scrolling reports retain the full available viewport.
+        let content = match app.screen() {
+            Screen::Home => {
+                Constraint::Length(inner.height.saturating_sub(6).min(if app.compact {
+                    14
+                } else {
+                    24
+                }))
+            }
+            Screen::Live => Constraint::Length(inner.height.saturating_sub(6).min(35)),
+            _ => Constraint::Min(1),
+        };
         let rows = Layout::vertical([
             Constraint::Length(2),
             Constraint::Length(2),
-            Constraint::Min(1),
+            content,
             Constraint::Length(2),
         ])
+        .flex(ratatui::layout::Flex::Start)
         .split(inner);
         chrome(frame, app, theme, rows[0], rows[1]);
+        let mut footer_area = rows[3];
         match app.screen() {
             Screen::Home => home(frame, app, theme, rows[2]),
             Screen::Configure | Screen::Settings => configure(frame, app, theme, rows[2]),
             Screen::Live => live(frame, app, theme, rows[2], elapsed),
-            Screen::Results => results(frame, app, theme, rows[2]),
-            Screen::History => history(frame, app, theme, rows[2]),
-            Screen::Statistics => statistics(frame, app, theme, rows[2]),
-            Screen::Compare => compare(frame, app, theme, rows[2]),
+            Screen::Results => {
+                let used = results(frame, app, theme, rows[2]);
+                footer_area.y = rows[2].y + used;
+            }
+            Screen::History => {
+                let used = history(frame, app, theme, rows[2]);
+                footer_area.y = rows[2].y + used;
+            }
+            Screen::Statistics => {
+                let used = statistics(frame, app, theme, rows[2]);
+                footer_area.y = rows[2].y + used;
+            }
+            Screen::Compare => {
+                let used = compare(frame, app, theme, rows[2]);
+                footer_area.y = rows[2].y + used;
+            }
             Screen::Dns | Screen::Diagnostics => tools(frame, app, theme, rows[2]),
             Screen::Tool => report(frame, app, theme, rows[2], elapsed),
             Screen::Failure => failure(frame, app, theme, rows[2]),
         }
-        footer(frame, app, theme, rows[3]);
+        footer(frame, app, theme, footer_area);
     }
     if let Some(modal) = app.modal {
         overlay(frame, app, modal, theme, area);
     }
-}
-
-/// Keep related information together on ultrawide/maximized terminals. A TUI
-/// cannot resize the emulator font; responsive composition and multi-cell values
-/// improve hierarchy without changing the user's profile or window size.
-pub(super) fn workspace(area: Rect) -> Rect {
-    let width = area.width.min(120);
-    let height = area.height.min(38);
-    Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
-        width,
-        height,
-    )
 }
 
 fn metric_height(app: &Cockpit, area: Rect) -> u16 {
@@ -203,8 +216,11 @@ fn heading(frame: &mut Frame, title: &str, subtitle: &str, t: Theme, area: Rect)
 
 fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(5), Constraint::Min(1)]).split(area);
-    let hero =
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[0]);
+    let hero = Layout::horizontal([
+        Constraint::Length((u32::from(area.width) * 55 / 100).min(48) as u16),
+        Constraint::Min(1),
+    ])
+    .split(rows[0]);
     let mut logo: Vec<_> = BRAND.iter().map(|s| Line::styled(*s, t.focus())).collect();
     logo.push(Line::styled(ui("Your network, in focus."), t.strong()));
     frame.render_widget(Paragraph::new(logo), hero[0]);
@@ -226,7 +242,13 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
     );
     let spacious = !app.compact && rows[1].height >= 18;
     let columns = Layout::horizontal([
-        Constraint::Length(if area.width >= 96 { 34 } else { 29 }),
+        Constraint::Length(if area.width >= 140 {
+            44
+        } else if area.width >= 96 {
+            34
+        } else {
+            29
+        }),
         Constraint::Min(1),
     ])
     .split(rows[1]);
@@ -247,12 +269,14 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
         );
         if spacious || index == 0 {
             frame.render_widget(
-                Paragraph::new(ui(*description)).style(t.muted()),
+                Paragraph::new(ui(*description))
+                    .style(t.muted())
+                    .wrap(Wrap { trim: true }),
                 Rect::new(
                     columns[0].x + 3,
                     y + 1,
                     columns[0].width.saturating_sub(5),
-                    1,
+                    2,
                 ),
             );
             y += 3;
@@ -288,7 +312,8 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
             ]),
             rows[0],
         );
-        let metrics = Layout::horizontal([Constraint::Percentage(50); 2]).split(rows[1]);
+        let metric_area = Rect::new(rows[1].x, rows[1].y, rows[1].width.min(80), rows[1].height);
+        let metrics = Layout::horizontal([Constraint::Percentage(50); 2]).split(metric_area);
         metric(
             frame,
             "DOWNLOAD",
@@ -332,16 +357,27 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
                         "No findings in this result. This is not a continuous connection monitor.",
                     )));
                 }
-                lines.push(Line::default());
             }
         }
-        lines.push(Line::styled(ui("v  Open result"), t.focus()));
+        let summary = Paragraph::new(lines)
+            .style(t.base())
+            .wrap(Wrap { trim: true });
+        let summary_height = summary
+            .line_count(rows[2].width)
+            .min(usize::from(rows[2].height.saturating_sub(2))) as u16;
         frame.render_widget(
-            Paragraph::new(lines)
-                .style(t.base())
-                .wrap(Wrap { trim: true }),
-            rows[2],
+            summary,
+            Rect::new(rows[2].x, rows[2].y, rows[2].width, summary_height),
         );
+        if rows[2].height > 0 {
+            // A wrapped finding may exceed this preview; keep its full-result
+            // action visible even when the window has no more room to grow.
+            let link_y = rows[2].y + (summary_height + 1).min(rows[2].height - 1);
+            frame.render_widget(
+                Paragraph::new(Line::styled(ui("v  Open result"), t.focus())),
+                Rect::new(rows[2].x, link_y, rows[2].width, 1),
+            );
+        }
     } else {
         let (title, text, color) = match &app.history {
             Load::Loading => ("READING LOCAL HISTORY", "Loading saved results. No network activity.", t.text),
@@ -385,7 +421,10 @@ fn metric(frame: &mut Frame, label: &str, value: &str, unit: &str, t: Theme, are
         )
     {
         frame.render_widget(
-            Paragraph::new(ui(unit)).style(t.muted()),
+            Paragraph::new(Line::from(vec![
+                Span::styled(value.to_owned(), t.strong()),
+                Span::styled(ui(format!(" {unit}")), t.muted()),
+            ])),
             Rect::new(area.x, area.y + digit_height + 1, area.width, 1),
         );
     } else {
@@ -568,17 +607,12 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
     }
     frame.render_widget(Paragraph::new(Line::from(rail)), rows[0]);
     let columns = Layout::horizontal([
-        Constraint::Percentage(64),
+        Constraint::Length((u32::from(rows[1].width) * 64 / 100).min(96) as u16),
         Constraint::Length(3),
         Constraint::Min(1),
     ])
     .split(rows[1]);
-    let gauge = Rect::new(
-        columns[0].x + columns[0].width.saturating_sub(70) / 2,
-        columns[0].y,
-        columns[0].width.min(70),
-        columns[0].height.min(22),
-    );
+    let gauge = columns[0];
     speedometer::render_themed(
         frame,
         gauge,
@@ -673,9 +707,12 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
     );
 }
 
-fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
+/// Return the used body height so the footer follows short results while long
+/// findings retain the full available scroll viewport.
+fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
+    let top = area.y;
     let Some(result) = app.result.as_ref() else {
-        return;
+        return area.height;
     };
     let subtitle = format!(
         "{} UTC · {} · {}",
@@ -735,12 +772,13 @@ fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
     if let Some(analysis) = &result.analysis {
         let q = &analysis.quality;
         summary.push(Line::styled(
-            ui(format!(
-                "QUALITY  {}/100  {}{}",
+            format!(
+                "{}  {}/100  {}{}",
+                ui("QUALITY"),
                 q.score,
                 q.grade.label(),
                 if q.is_s_tier() { " / S-TIER" } else { "" }
-            )),
+            ),
             t.strong().fg(grade_color(q.grade, t)),
         ));
         summary.push(Line::from(ui(format!(
@@ -789,11 +827,11 @@ fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
         }
         for finding in &q.findings {
             findings.push(Line::styled(
-                ui(format!(
+                format!(
                     "{} · {}",
-                    finding.severity.label(),
-                    single(&finding.title)
-                )),
+                    ui(finding.severity.label()),
+                    ui(single(&finding.title))
+                ),
                 t.strong().fg(severity_color(finding.severity, t)),
             ));
             findings.push(Line::from(ui(single(&finding.evidence))));
@@ -814,32 +852,51 @@ fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
     ));
     if roomy {
         let columns = Layout::horizontal([
-            Constraint::Length(34),
+            Constraint::Length(if area.width >= 140 { 44 } else { 34 }),
             Constraint::Length(3),
             Constraint::Min(1),
         ])
         .split(rows[1]);
+        let summary = Paragraph::new(summary)
+            .style(t.base())
+            .wrap(Wrap { trim: true });
+        let findings_width = columns[2].width.min(100);
+        let findings = Paragraph::new(findings)
+            .style(t.base())
+            .wrap(Wrap { trim: false });
+        let findings_height = findings.line_count(findings_width);
+        let content_height = summary
+            .line_count(columns[0].width)
+            .max(findings_height)
+            .min(usize::from(rows[1].height)) as u16;
         frame.render_widget(
-            Paragraph::new(summary)
-                .style(t.base())
-                .wrap(Wrap { trim: true }),
-            columns[0],
+            summary,
+            Rect::new(columns[0].x, columns[0].y, columns[0].width, content_height),
         );
         frame.render_widget(
             Block::default()
                 .borders(Borders::LEFT)
                 .border_style(t.base().fg(t.line)),
-            columns[1],
+            Rect::new(columns[1].x, columns[1].y, columns[1].width, content_height),
         );
-        scroll(frame, app, t, columns[2], findings);
+        scroll_paragraph(
+            frame,
+            app,
+            t,
+            Rect::new(columns[2].x, columns[2].y, findings_width, content_height),
+            findings,
+        );
+        rows[1].y - top + content_height.saturating_add(1).min(rows[1].height)
     } else {
         summary.push(Line::default());
         summary.extend(findings);
-        scroll(frame, app, t, rows[1], summary);
+        let content_height = scroll(frame, app, t, rows[1], summary);
+        rows[1].y - top + content_height.saturating_add(1).min(rows[1].height)
     }
 }
 
 fn result_metrics(frame: &mut Frame, result: &TestResult, t: Theme, area: Rect) {
+    let area = Rect::new(area.x, area.y, area.width.min(160), area.height);
     let columns = Layout::horizontal([Constraint::Percentage(25); 4]).split(area);
     for (rect, label, value, unit) in [
         (columns[0], "DOWNLOAD", result.download.mbps, "Mbps"),
@@ -868,26 +925,38 @@ fn archive_state(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> 
     }
 }
 
-fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
+fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
+    let top = area.y;
+    let available = area.height;
     let area = heading(
         frame,
         "YOUR NETWORK, OVER TIME",
-        "Last 30 days · newest first · Enter opens a result · c compares latest two",
+        "Last 30 days · newest first · Enter opens a result",
         t,
         area,
     );
     if archive_state(frame, app, t, area) {
-        return;
+        return available;
     }
     let Load::Ready(archive) = &app.history else {
-        return;
+        return available;
     };
     let preview = !app.compact && area.height >= 19;
+    let preview_height = if preview { 9 } else { 0 };
+    let table_height = archive
+        .results
+        .len()
+        .saturating_add(2)
+        .min(usize::from(area.height.saturating_sub(2 + preview_height)))
+        as u16;
     let layout = Layout::vertical([
-        Constraint::Min(5),
-        Constraint::Length(if preview { 9 } else { 0 }),
+        Constraint::Length(table_height),
+        Constraint::Length(2),
+        Constraint::Length(preview_height),
     ])
+    .flex(ratatui::layout::Flex::Start)
     .split(area);
+    app.history_page_size = usize::from(layout[0].height.saturating_sub(2).max(1));
     let rows: Vec<_> = archive
         .results
         .iter()
@@ -897,7 +966,8 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
                 format!("{} {}", a.quality.score, a.quality.grade.label())
             });
             Row::new(vec![
-                Cell::from(r.timestamp.format("%m-%d %H:%M UTC").to_string()),
+                Cell::from(if app.is_baseline(r) { "B" } else { "" }),
+                Cell::from(r.timestamp.format("%m-%d %H:%M").to_string()),
                 Cell::from(single(&r.backend)),
                 right(format!("{:.1}", r.download.mbps)),
                 right(format!("{:.1}", r.upload.mbps)),
@@ -911,7 +981,8 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
         Table::new(
             rows,
             [
-                Constraint::Length(if area.width >= 100 { 19 } else { 15 }),
+                Constraint::Length(1),
+                Constraint::Length(if area.width >= 100 { 15 } else { 11 }),
                 Constraint::Length(if area.width >= 100 { 13 } else { 11 }),
                 Constraint::Fill(1),
                 Constraint::Fill(1),
@@ -921,6 +992,7 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
         )
         .header(
             Row::new(vec![
+                Cell::from(""),
                 Cell::from(ui("DATE / UTC")),
                 Cell::from(ui("BACKEND")),
                 right("DOWN Mbps".into()),
@@ -935,18 +1007,55 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
         .highlight_symbol("› ")
         .column_spacing(1)
         .style(t.base()),
-        layout[0],
+        Rect::new(
+            layout[0].x,
+            layout[0].y,
+            layout[0].width.min(120),
+            layout[0].height,
+        ),
         &mut app.table,
     );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                ui(format!(
+                    "Run {} of {} · PgUp/PgDn page · Home/End",
+                    app.page().selected + 1,
+                    archive.results.len()
+                )),
+                t.muted(),
+            ),
+            Line::styled(
+                app.baseline.as_ref().map_or_else(
+                    || ui("b pin baseline · c compare selected with its older neighbor"),
+                    |baseline| {
+                        ui(format!(
+                            "BASELINE {} UTC · {}",
+                            baseline.timestamp.format("%m-%d %H:%M:%S"),
+                            single(&baseline.backend)
+                        ))
+                    },
+                ),
+                t.focus(),
+            ),
+        ]),
+        layout[1],
+    );
     if preview {
-        if let Some(selected) = archive.results.iter().rev().nth(app.page().selected) {
+        if let Some(selected) = archive.newest(app.page().selected) {
+            let preview_area = Rect::new(
+                layout[2].x,
+                layout[2].y,
+                layout[2].width.min(160),
+                layout[2].height,
+            );
             let block = Block::default()
                 .borders(Borders::TOP)
                 .border_style(t.base().fg(t.line))
                 .title(ui(" SELECTED RESULT "))
                 .title_style(t.strong());
-            let detail = block.inner(layout[1]);
-            frame.render_widget(block, layout[1]);
+            let detail = block.inner(preview_area);
+            frame.render_widget(block, preview_area);
             let parts =
                 Layout::vertical([Constraint::Length(2), Constraint::Length(6)]).split(detail);
             frame.render_widget(
@@ -961,13 +1070,20 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
             result_metrics(frame, selected, t, parts[1]);
         }
     }
+    layout[2]
+        .bottom()
+        .saturating_sub(top)
+        .saturating_add(1)
+        .min(available)
 }
 
 fn right(value: String) -> Cell<'static> {
     Cell::from(Line::from(ui(value)).alignment(Alignment::Right))
 }
 
-fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
+fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
+    let top = area.y;
+    let available = area.height;
     let area = heading(
         frame,
         "THE BIGGER PICTURE",
@@ -976,25 +1092,25 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
         area,
     );
     if archive_state(frame, app, t, area) {
-        return;
+        return available;
     }
     let Load::Ready(archive) = &app.history else {
-        return;
+        return available;
     };
     let Some(summary) = &archive.summary else {
-        return;
+        return available;
     };
     let rows = Layout::vertical([
         Constraint::Length(metric_height(app, area)),
         Constraint::Min(1),
     ])
     .split(area);
-    let columns = Layout::horizontal([
-        Constraint::Percentage(34),
-        Constraint::Percentage(33),
-        Constraint::Percentage(33),
-    ])
-    .split(rows[0]);
+    let columns = Layout::horizontal([Constraint::Ratio(1, 3); 3]).split(Rect::new(
+        rows[0].x,
+        rows[0].y,
+        rows[0].width.min(120),
+        rows[0].height,
+    ));
     metric(
         frame,
         "MEDIAN DOWNLOAD",
@@ -1118,87 +1234,210 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
     }
     for anomaly in &summary.anomalies {
         lines.push(Line::styled(
-            ui(format!(
+            format!(
                 "{} · {}",
-                anomaly.severity.label(),
-                single(&anomaly.message)
-            )),
+                ui(anomaly.severity.label()),
+                ui(single(&anomaly.message))
+            ),
             t.base().fg(t.warning),
         ));
     }
-    scroll(frame, app, t, parts[1], lines);
+    let used = scroll(frame, app, t, parts[1], lines);
+    parts[1].y - top + used.saturating_add(1).min(parts[1].height)
 }
 
-fn compare(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
+fn compare(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
+    let top = area.y;
+    let available = area.height;
     let area = heading(
         frame,
         "BEFORE / AFTER",
-        "Latest two saved runs · last 30 days · no new measurement",
+        "Saved result snapshots · no new measurement · Home/End jumps through details",
         t,
         area,
     );
-    if archive_state(frame, app, t, area) {
-        return;
-    }
-    let Load::Ready(archive) = &app.history else {
-        return;
-    };
-    let Some(c) = &archive.comparison else {
+    let comparison = app.comparison.as_ref().or(match &app.history {
+        Load::Ready(archive) => archive.comparison.as_ref(),
+        _ => None,
+    });
+    let Some(comparison) = comparison else {
+        if archive_state(frame, app, t, area) {
+            return available;
+        }
         frame.render_widget(Paragraph::new(ui("Two saved tests are needed for a comparison.\n\nRun another test with history enabled, then press r to reload.")).style(t.base()).wrap(Wrap { trim: true }), area);
-        return;
+        return available;
     };
-    let mut lines = vec![
-        Line::styled(
+    let c = &comparison.metrics;
+    let mut lines = vec![];
+    for (label, result) in [("BEFORE", &comparison.before), ("AFTER", &comparison.after)] {
+        lines.push(Line::styled(
             ui(format!(
-                "BEFORE {}  →  AFTER {} UTC",
-                c.before_timestamp.format("%d %b %H:%M"),
-                c.after_timestamp.format("%d %b %H:%M")
+                "{label} {} UTC · {}",
+                result.timestamp.format("%Y-%m-%d %H:%M:%S%.f"),
+                single(&result.backend)
             )),
-            t.muted(),
-        ),
-        Line::default(),
-        Line::styled(
-            ui("METRIC             BEFORE        AFTER       CHANGE"),
-            t.muted(),
-        ),
-    ];
+            t.strong(),
+        ));
+    }
+    lines.push(Line::default());
+    let mut rows = vec![];
     for (label, delta, unit) in [
         ("Download", &c.download_mbps, "Mbps"),
         ("Upload", &c.upload_mbps, "Mbps"),
         ("Idle latency", &c.ping_ms, "ms"),
         ("Jitter", &c.jitter_ms, "ms"),
     ] {
-        let direction = if delta.absolute_change.abs() < f64::EPSILON {
-            "same"
-        } else if delta.improved {
-            "better"
-        } else {
-            "worse"
-        };
-        lines.push(Line::styled(
-            ui(format!(
-                "{label:<16} {:>9.1}  {:>11.1}  {:+9.1} {unit} ({direction})",
-                delta.before, delta.after, delta.absolute_change
-            )),
-            t.base().fg(if direction == "same" {
-                t.text
-            } else if delta.improved {
-                t.success
-            } else {
-                t.warning
-            }),
+        rows.push(ComparisonRow::new(
+            label,
+            format!("{:.1} {unit}", delta.before),
+            format!("{:.1} {unit}", delta.after),
+            Some(delta.absolute_change),
+            Some(delta.improved),
+            unit,
         ));
     }
+    for (label, delta, unit) in [
+        ("Quality", &c.quality_score, "pts"),
+        ("Loaded increase", &c.bufferbloat_ms, "ms"),
+    ] {
+        let value = |value: Option<f64>| {
+            value.map_or_else(
+                || ui("n/a"),
+                |value| {
+                    if unit == "pts" {
+                        format!("{value:.0}/100")
+                    } else {
+                        format!("{value:.1} {unit}")
+                    }
+                },
+            )
+        };
+        rows.push(ComparisonRow::new(
+            label,
+            value(delta.before),
+            value(delta.after),
+            delta.absolute_change,
+            delta.improved,
+            unit,
+        ));
+    }
+    lines.extend(comparison_table(rows, t, area.width));
     lines.extend([
+        Line::styled(ui(single(&c.verdict)), t.focus()),
+        Line::from(ui(single(&c.highlight))),
         Line::default(),
-        Line::styled(single(&c.verdict), t.focus()),
+        Line::from(ui(format!(
+            "Before server: {}",
+            single(&comparison.before.server.host)
+        ))),
+        Line::from(ui(format!(
+            "After server: {}",
+            single(&comparison.after.server.host)
+        ))),
         Line::default(),
+        Line::styled(
+            ui("Loaded increase is worst bufferbloat; n/a means the saved run lacks that analysis."),
+            t.muted(),
+        ),
         Line::styled(
             ui("Paths, backends and test conditions can differ; compare like-for-like runs."),
             t.muted(),
         ),
     ]);
-    scroll(frame, app, t, area, lines);
+    let used = scroll(frame, app, t, area, lines);
+    area.y - top + used.saturating_add(1).min(area.height)
+}
+
+struct ComparisonRow {
+    cells: [String; 4],
+    improved: Option<bool>,
+}
+
+impl ComparisonRow {
+    fn new(
+        label: &str,
+        before: String,
+        after: String,
+        change: Option<f64>,
+        improved: Option<bool>,
+        unit: &str,
+    ) -> Self {
+        let direction = match (change, improved) {
+            (Some(change), _) if change.abs() < f64::EPSILON => "same",
+            (_, Some(true)) => "better",
+            (_, Some(false)) => "worse",
+            _ => "n/a",
+        };
+        let delta = change.map_or_else(
+            || ui("n/a"),
+            |change| {
+                let value = if unit == "pts" {
+                    format!("{change:+.0}")
+                } else {
+                    format!("{change:+.1}")
+                };
+                format!("{value} {unit} ({})", ui(direction))
+            },
+        );
+        Self {
+            cells: [ui(label), before, after, delta],
+            improved: improved.filter(|_| direction != "same"),
+        }
+    }
+}
+
+/// Measure terminal cells after translation. When the complete values cannot fit
+/// side by side, stack labeled values rather than clipping evidence or units.
+fn comparison_table(rows: Vec<ComparisonRow>, t: Theme, width: u16) -> Vec<Line<'static>> {
+    let headers = [ui("METRIC"), ui("BEFORE"), ui("AFTER"), ui("CHANGE")];
+    let mut widths = headers
+        .each_ref()
+        .map(|value| Line::from(value.as_str()).width());
+    for row in &rows {
+        for (index, cell) in row.cells.iter().enumerate() {
+            widths[index] = widths[index].max(Line::from(cell.as_str()).width());
+        }
+    }
+    let fits = widths.iter().sum::<usize>() + 6 <= usize::from(width);
+    let aligned = |cells: [String; 4], style| {
+        let mut spans = vec![];
+        for (index, cell) in cells.into_iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("  "));
+            }
+            let pad = " ".repeat(widths[index].saturating_sub(Line::from(cell.as_str()).width()));
+            spans.push(Span::styled(
+                if index == 0 {
+                    format!("{cell}{pad}")
+                } else {
+                    format!("{pad}{cell}")
+                },
+                style,
+            ));
+        }
+        Line::from(spans)
+    };
+    let mut lines = vec![];
+    if fits {
+        lines.push(aligned(headers.clone(), t.strong()));
+    }
+    for row in rows {
+        let style = t.base().fg(match row.improved {
+            Some(true) => t.success,
+            Some(false) => t.warning,
+            None => t.text,
+        });
+        if fits {
+            lines.push(aligned(row.cells, style));
+        } else {
+            lines.push(Line::styled(row.cells[0].clone(), t.strong()));
+            for (index, cell) in row.cells.into_iter().enumerate().skip(1) {
+                lines.push(Line::styled(format!("{}: {cell}", headers[index]), style));
+            }
+            lines.push(Line::default());
+        }
+    }
+    lines
 }
 
 fn tools(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
@@ -1315,10 +1554,27 @@ fn failure(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
     scroll(frame, app, t, area, lines);
 }
 
-fn scroll(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect, lines: Vec<Line<'static>>) {
+fn scroll(
+    frame: &mut Frame,
+    app: &mut Cockpit,
+    t: Theme,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+) -> u16 {
     let paragraph = Paragraph::new(Text::from(lines))
         .style(t.base())
         .wrap(Wrap { trim: false });
+    scroll_paragraph(frame, app, t, area, paragraph)
+}
+
+/// Draw a report and return its occupied height, including an overflow hint.
+fn scroll_paragraph(
+    frame: &mut Frame,
+    app: &mut Cockpit,
+    t: Theme,
+    area: Rect,
+    paragraph: Paragraph<'static>,
+) -> u16 {
     // Exact wrapped heights are essential for navigation after terminal/font zoom.
     let count = paragraph.line_count(area.width);
     let overflow = count > usize::from(area.height) && area.height > 1;
@@ -1343,6 +1599,7 @@ fn scroll(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect, lines: Vec
             Rect::new(area.x, area.y + visible, area.width, 1),
         );
     }
+    count.min(usize::from(area.height)) as u16
 }
 
 fn footer(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
@@ -1367,9 +1624,10 @@ fn footer(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
                 "Esc cancel test  ·  q cancel and quit  ·  Ctrl+C stop immediately".into()
             }
             Screen::Results => "Enter another test  ·  j/k or PgUp/PgDn scroll details".into(),
-            Screen::History => "Enter result  ·  c compare latest two  ·  r reload".into(),
-            Screen::Statistics | Screen::Compare => {
-                "Enter compare (from Stats)  ·  j/k scroll  ·  r reload".into()
+            Screen::History => "Enter result  ·  b pin baseline  ·  c compare  ·  r reload".into(),
+            Screen::Statistics => "Enter compare (from Stats)  ·  j/k scroll  ·  r reload".into(),
+            Screen::Compare => {
+                "j/k or PgUp/PgDn scroll  ·  Home/End  ·  Esc back to saved runs".into()
             }
             Screen::Dns | Screen::Diagnostics => {
                 "Enter open tool  ·  no network activity on this screen".into()
@@ -1471,6 +1729,8 @@ fn overlay(frame: &mut Frame, app: &mut Cockpit, modal: Modal, t: Theme, area: R
                 Line::from(ui("Esc / Backspace  Back; confirm before cancelling")),
                 Line::from(ui("+ / - / Space   Edit a selected setting")),
                 Line::from(ui("PgUp / PgDn      Scroll report details")),
+                Line::from(ui("History: PgUp/PgDn page; Home/End first/last run.")),
+                Line::from(ui("History: b pin baseline; c compare selected with baseline or older neighbor.")),
                 Line::from(ui("r               Reload history / retry a test")),
                 Line::from(ui("q               Quit; confirm if a task is running")),
                 Line::from(ui("Ctrl+C          Stop immediately (save finishes first)")),
