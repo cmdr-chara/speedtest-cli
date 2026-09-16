@@ -1,0 +1,59 @@
+name: One-shot release bump
+
+on:
+  push:
+    branches:
+      - improve/engine-performance-and-deadlines
+    paths:
+      - .github/workflows/one-shot-release-bump.yml
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: improve/engine-performance-and-deadlines
+          fetch-depth: 0
+
+      - name: Bump manifest and lockfile
+        shell: python
+        run: |
+          from pathlib import Path
+
+          manifest = Path("Cargo.toml")
+          text = manifest.read_text(encoding="utf-8")
+          old = 'version = "0.6.1"'
+          new = 'version = "0.6.2"'
+          if text.count(old) != 1:
+              raise SystemExit("expected exactly one 0.6.1 package version in Cargo.toml")
+          manifest.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          lock = Path("Cargo.lock")
+          text = lock.read_text(encoding="utf-8")
+          old_block = 'name = "speedtest-cli"\nversion = "0.6.1"'
+          new_block = 'name = "speedtest-cli"\nversion = "0.6.2"'
+          if text.count(old_block) != 1:
+              raise SystemExit("expected exactly one speedtest-cli 0.6.1 entry in Cargo.lock")
+          lock.write_text(text.replace(old_block, new_block, 1), encoding="utf-8")
+
+      - name: Verify exact version-only lockfile change
+        shell: bash
+        run: |
+          git diff -- Cargo.toml Cargo.lock
+          test "$(git diff --numstat -- Cargo.toml Cargo.lock | awk '{a+=$1; d+=$2} END {print a ":" d}')" = "2:2"
+          grep -q '^version = "0.6.2"$' Cargo.toml
+          grep -A1 '^name = "speedtest-cli"$' Cargo.lock | grep -q '^version = "0.6.2"$'
+
+      - name: Commit version bump and remove this workflow
+        shell: bash
+        run: |
+          git rm .github/workflows/one-shot-release-bump.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): bump version to 0.6.2"
+          git push origin HEAD:improve/engine-performance-and-deadlines
