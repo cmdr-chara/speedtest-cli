@@ -45,21 +45,28 @@ pub(crate) async fn finish_phase(
     loaded: impl std::future::Future<Output = Vec<f64>>,
 ) -> anyhow::Result<Vec<f64>> {
     use anyhow::Context;
-    let collect = async {
-        while let Some(result) = workers.join_next().await {
-            result.context("transfer worker failed")??;
-        }
-        Ok::<_, anyhow::Error>(())
+    let result = {
+        let collect = async {
+            while let Some(result) = workers.join_next().await {
+                result.context("transfer worker failed")??;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::try_join!(
+            collect,
+            async {
+                samples.await;
+                Ok(())
+            },
+            async { Ok(loaded.await) },
+        )
     };
-    let (_, _, latency) = tokio::try_join!(
-        collect,
-        async {
-            samples.await;
-            Ok(())
-        },
-        async { Ok(loaded.await) },
-    )?;
-    Ok(latency)
+    if result.is_err() {
+        // Abort AND join siblings before reporting failure. Dropping a JoinSet
+        // only requests cancellation and can leave worker cleanup pending.
+        workers.shutdown().await;
+    }
+    result.map(|(_, _, latency)| latency)
 }
 
 #[cfg(test)]
@@ -93,6 +100,57 @@ mod tests {
         )
         .await;
         assert!(result.unwrap().is_err());
+    }
+
+    struct DropSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_failure_joins_cancelled_siblings_before_returning() {
+        for panic in [false, true] {
+            let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let signal = DropSignal(std::sync::Arc::clone(&dropped));
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let mut workers = tokio::task::JoinSet::new();
+            workers.spawn(async move {
+                let _signal = signal;
+                started.send(()).unwrap();
+                std::future::pending::<anyhow::Result<()>>().await
+            });
+            workers.spawn(async move {
+                ready.await.unwrap();
+                assert!(!panic, "fixture worker panic");
+                anyhow::bail!("fixture worker error")
+            });
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                finish_phase(workers, std::future::pending(), std::future::pending()),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(error.to_string().contains(if panic {
+                "transfer worker failed"
+            } else {
+                "fixture worker error"
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_phase_preserves_loaded_samples() {
+        let mut workers = tokio::task::JoinSet::new();
+        workers.spawn(async { Ok(()) });
+        let samples = finish_phase(workers, async {}, async { vec![1.0, 2.0] })
+            .await
+            .unwrap();
+        assert_eq!(samples, vec![1.0, 2.0]);
     }
 }
 

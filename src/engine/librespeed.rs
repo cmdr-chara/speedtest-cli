@@ -8,7 +8,6 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, Url};
 use tokio::{
     sync::mpsc::UnboundedSender,
@@ -23,6 +22,9 @@ use crate::{
 };
 
 const IDLE_SAMPLES: usize = 20;
+// One shared budget includes connection establishment and all three probes.
+// A stalled candidate must not hold healthy candidates behind 25-second requests.
+const SERVER_SELECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_CHUNK_MB: u32 = 32;
 const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
@@ -263,7 +265,12 @@ impl LibreSpeedEngine {
         let mut previous_bytes = 0_u64;
         let mut previous_at = Instant::now();
         loop {
-            interval.tick().await;
+            if http::before_deadline(deadline, interval.tick())
+                .await
+                .is_none()
+            {
+                break;
+            }
             let now = Instant::now();
             let current = total.load(Ordering::Relaxed);
             let delta_seconds = now.duration_since(previous_at).as_secs_f64();
@@ -311,28 +318,58 @@ fn resolve_builtin(server: LibreSpeedServer) -> Result<ResolvedServer> {
 }
 
 async fn select_public_server(client: &Client) -> Result<ResolvedServer> {
+    let servers = PUBLIC_SERVERS
+        .iter()
+        .copied()
+        .map(resolve_builtin)
+        .collect::<Result<Vec<_>>>()?;
+    select_server(client, servers, Instant::now() + SERVER_SELECTION_TIMEOUT).await
+}
+
+async fn select_server(
+    client: &Client,
+    servers: Vec<ResolvedServer>,
+    deadline: Instant,
+) -> Result<ResolvedServer> {
+    if Instant::now() >= deadline {
+        return Err(anyhow!("no built-in LibreSpeed server was reachable"));
+    }
     let mut workers = JoinSet::new();
-    for server in PUBLIC_SERVERS.iter().copied() {
+    for (index, server) in servers.into_iter().enumerate() {
         let client = client.clone();
         workers.spawn(async move {
-            let resolved = resolve_builtin(server)?;
-            let samples = measure_latency(&client, &resolved, 3).await?;
+            let samples = measure_latency(&client, &server, 3).await?;
             let median = analysis::distribution(&samples)
                 .map(|stats| stats.median_ms)
                 .unwrap_or(f64::INFINITY);
-            Result::<_, anyhow::Error>::Ok((resolved, median))
+            Result::<_, anyhow::Error>::Ok((server, median, index))
         });
     }
+    select_candidates(workers, deadline).await
+}
+
+async fn select_candidates(
+    mut workers: JoinSet<Result<(ResolvedServer, f64, usize)>>,
+    deadline: Instant,
+) -> Result<ResolvedServer> {
     let mut candidates = Vec::new();
-    while let Some(result) = workers.join_next().await {
+    while let Some(Some(result)) = http::before_deadline(deadline, workers.join_next()).await {
         if let Ok(Ok(candidate)) = result {
-            candidates.push(candidate);
+            if candidate.1.is_finite() {
+                candidates.push(candidate);
+            }
         }
     }
+    // Also join cancelled probes: the next measurement must not overlap them.
+    workers.shutdown().await;
     candidates
         .into_iter()
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .map(|(server, _)| server)
+        .min_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then_with(|| left.2.cmp(&right.2))
+        })
+        .map(|(server, _, _)| server)
         .ok_or_else(|| anyhow!("no built-in LibreSpeed server was reachable"))
 }
 
@@ -342,11 +379,11 @@ async fn measure_latency(
     count: usize,
 ) -> Result<Vec<f64>> {
     let mut samples = Vec::with_capacity(count);
+    let url = server.base.join(&server.ping_path)?;
     for index in 0..count {
-        let url = server.base.join(&server.ping_path)?;
         let started = Instant::now();
         let response = client
-            .get(url)
+            .get(url.clone())
             .query(&[
                 ("cors", "true"),
                 ("r", &format!("{index}-{}", Utc::now().timestamp_micros())),
@@ -359,7 +396,9 @@ async fn measure_latency(
             .context("LibreSpeed latency endpoint returned an error")?;
         http::drain(response, 64 * 1024).await?;
         samples.push(started.elapsed().as_secs_f64() * 1000.0);
-        sleep(Duration::from_millis(75)).await;
+        if index + 1 < count {
+            sleep(Duration::from_millis(75)).await;
+        }
     }
     Ok(samples)
 }
@@ -371,10 +410,10 @@ async fn download_worker(
     deadline: Instant,
 ) -> Result<()> {
     let mut chunk_mb = DOWNLOAD_CHUNK_MB;
+    let url = server.base.join(&server.download_path)?;
     while Instant::now() < deadline {
-        let url = server.base.join(&server.download_path)?;
         let request = client
-            .get(url)
+            .get(url.clone())
             .query(&[
                 ("ckSize", chunk_mb.to_string()),
                 ("cors", "true".to_string()),
@@ -382,10 +421,10 @@ async fn download_worker(
             ])
             .header("cache-control", "no-store")
             .send();
-        let response = tokio::select! {
-            value = request => value.context("LibreSpeed download request failed")?,
-            _ = sleep_until(deadline) => break,
+        let Some(response) = http::before_deadline(deadline, request).await else {
+            break;
         };
+        let response = response.context("LibreSpeed download request failed")?;
         if matches!(
             response.status(),
             StatusCode::PAYLOAD_TOO_LARGE | StatusCode::FORBIDDEN
@@ -396,27 +435,11 @@ async fn download_worker(
         }
         let response =
             http::success(response).context("LibreSpeed download endpoint returned an error")?;
-        let mut body = response.bytes_stream();
-        let mut request_bytes = 0u64;
-        loop {
-            let next = tokio::select! {
-                value = body.next() => value,
-                _ = sleep_until(deadline) => None,
-            };
-            match next {
-                Some(Ok(chunk)) => {
-                    request_bytes += chunk.len() as u64;
-                    total.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                }
-                Some(Err(error)) => return Err(error).context("LibreSpeed download stream failed"),
-                None => break,
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-        }
+        let body = http::download(response, &total, deadline)
+            .await
+            .context("LibreSpeed download stream failed")?;
         anyhow::ensure!(
-            request_bytes > 0 || Instant::now() >= deadline,
+            !body.completed || body.bytes > 0,
             "LibreSpeed returned an empty download body"
         );
     }
@@ -431,15 +454,15 @@ async fn upload_worker(
     deadline: Instant,
 ) -> Result<()> {
     let mut payload_len = initial_payload;
+    let url = server.base.join(&server.upload_path)?;
     while Instant::now() < deadline {
         let submitted = Arc::new(AtomicU64::new(0));
         let started = Instant::now();
-        let url = server.base.join(&server.upload_path)?;
         let response = tokio::select! {
             biased;
             _ = sleep_until(deadline) => break,
             value = client
-                .post(url)
+                .post(url.clone())
                 .query(&[("cors", "true"), ("r", &Utc::now().timestamp_micros().to_string())])
                 .header("content-type", "application/octet-stream")
                 .header(reqwest::header::CONTENT_LENGTH, payload_len)
@@ -482,28 +505,28 @@ async fn measure_loaded_latency(
     deadline: Instant,
 ) -> Vec<f64> {
     let mut samples = Vec::new();
+    let Ok(url) = server.base.join(&server.ping_path) else {
+        return samples;
+    };
     let mut index = 0_u64;
     while Instant::now() < deadline {
-        let url = match server.base.join(&server.ping_path) {
-            Ok(url) => url,
-            Err(_) => break,
-        };
         let started = Instant::now();
-        let response = tokio::select! {
-            value = client
-                .get(url)
-                .query(&[("cors", "true"), ("r", &format!("load-{index}-{}", Utc::now().timestamp_micros()))])
+        let probe = async {
+            let response = client
+                .get(url.clone())
+                .query(&[
+                    ("cors", "true"),
+                    ("r", &format!("load-{index}-{}", Utc::now().timestamp_micros())),
+                ])
                 .header("cache-control", "no-store")
-                .send() => value.ok(),
-            _ = sleep_until(deadline) => None,
+                .send()
+                .await?;
+            http::drain(response, 64 * 1024).await?;
+            Ok::<_, anyhow::Error>(started.elapsed().as_secs_f64() * 1000.0)
         };
-        if let Some(response) = response {
-            if matches!(
-                tokio::time::timeout_at(deadline, http::drain(response, 64 * 1024)).await,
-                Ok(Ok(()))
-            ) {
-                samples.push(started.elapsed().as_secs_f64() * 1000.0);
-            }
+        let probe_deadline = deadline.min(started + Duration::from_secs(3));
+        if let Some(Ok(ms)) = http::before_deadline(probe_deadline, probe).await {
+            samples.push(ms);
         }
         index += 1;
         let now = Instant::now();
@@ -645,3 +668,7 @@ mod upload_tests {
         peer.await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "librespeed_selection_tests.rs"]
+mod selection_tests;

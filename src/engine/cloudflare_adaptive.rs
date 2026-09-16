@@ -9,7 +9,6 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use futures_util::StreamExt;
 use reqwest::{
     header::{CONTENT_LENGTH, RETRY_AFTER},
     Client, Response, StatusCode,
@@ -139,9 +138,11 @@ impl CloudflareEngine {
 
     async fn measure_idle_latency(&self, count: usize) -> Result<Vec<f64>> {
         let mut samples = Vec::with_capacity(count);
-        for _ in 0..count {
+        for index in 0..count {
             samples.push(latency_probe(&self.client).await?);
-            sleep(Duration::from_millis(75)).await;
+            if index + 1 < count {
+                sleep(Duration::from_millis(75)).await;
+            }
         }
         Ok(samples)
     }
@@ -227,7 +228,12 @@ impl CloudflareEngine {
         let mut history = VecDeque::with_capacity(8);
 
         loop {
-            interval.tick().await;
+            if http::before_deadline(deadline, interval.tick())
+                .await
+                .is_none()
+            {
+                break;
+            }
             let now = Instant::now();
             let current = total.load(Ordering::Relaxed);
             history.push_back((now, current));
@@ -275,15 +281,16 @@ async fn download_worker(client: Client, total: Arc<AtomicU64>, deadline: Instan
     while Instant::now() < deadline {
         let bytes = DOWNLOAD_LADDER[chunk_index];
         let request_started = Instant::now();
-        let response = tokio::select! {
-            response = client
-                .get(DOWNLOAD_URL)
-                .query(&[("bytes", bytes), ("r", cache_buster())])
-                .header("accept", "application/octet-stream")
-                .header("cache-control", "no-store")
-                .send() => response.context("Cloudflare download request failed")?,
-            _ = sleep_until(deadline) => break,
+        let request = client
+            .get(DOWNLOAD_URL)
+            .query(&[("bytes", bytes), ("r", cache_buster())])
+            .header("accept", "application/octet-stream")
+            .header("cache-control", "no-store")
+            .send();
+        let Some(response) = http::before_deadline(deadline, request).await else {
+            break;
         };
+        let response = response.context("Cloudflare download request failed")?;
 
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             rate_limit_retries += 1;
@@ -313,36 +320,15 @@ async fn download_worker(client: Client, total: Arc<AtomicU64>, deadline: Instan
         rate_limit_retries = 0;
         let response =
             http::success(response).context("Cloudflare download endpoint returned an error")?;
-        let mut body = response.bytes_stream();
-        let mut completed = true;
-        let mut request_bytes = 0u64;
-        loop {
-            let next = tokio::select! {
-                chunk = body.next() => chunk,
-                _ = sleep_until(deadline) => {
-                    completed = false;
-                    None
-                },
-            };
-            match next {
-                Some(Ok(chunk)) => {
-                    request_bytes += chunk.len() as u64;
-                    total.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                }
-                Some(Err(error)) => return Err(error).context("Cloudflare download stream failed"),
-                None => break,
-            }
-            if Instant::now() >= deadline {
-                completed = false;
-                break;
-            }
-        }
+        let body = http::download(response, &total, deadline)
+            .await
+            .context("Cloudflare download stream failed")?;
 
         anyhow::ensure!(
-            !completed || request_bytes > 0,
+            !body.completed || body.bytes > 0,
             "Cloudflare returned an empty download body"
         );
-        if completed
+        if body.completed
             && request_started.elapsed() < Duration::from_millis(700)
             && chunk_index > floor_index
         {
@@ -462,15 +448,8 @@ async fn measure_loaded_latency(client: Client, deadline: Instant) -> Vec<f64> {
     let mut samples = Vec::new();
     while Instant::now() < deadline {
         let now = Instant::now();
-        let remaining = deadline.saturating_duration_since(now);
-        if remaining.is_zero() {
-            break;
-        }
-        let probe = tokio::time::timeout(
-            remaining.min(Duration::from_secs(3)),
-            latency_probe(&client),
-        );
-        if let Ok(Ok(ms)) = probe.await {
+        let probe_deadline = deadline.min(now + Duration::from_secs(3));
+        if let Some(Ok(ms)) = http::before_deadline(probe_deadline, latency_probe(&client)).await {
             samples.push(ms);
         }
         if !sleep_before_deadline(LOADED_LATENCY_INTERVAL, deadline).await {

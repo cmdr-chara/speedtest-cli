@@ -7,15 +7,36 @@ use std::sync::{
 };
 
 use anyhow::{bail, Context, Result};
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use reqwest::{Response, Url};
 use tokio::time::{sleep_until, Instant};
+
+// All requests borrow the same immutable payload. In particular, small adaptive
+// uploads no longer allocate and zero a fresh 64 KiB buffer for every request.
+static UPLOAD_CHUNK: [u8; 64 * 1024] = [0; 64 * 1024];
 
 pub fn success(response: Response) -> Result<Response> {
     if !response.status().is_success() {
         bail!("measurement endpoint returned HTTP {}; redirects are not followed; use the final server URL", response.status());
     }
     Ok(response)
+}
+
+/// Do not poll expired work or accept work that finishes a long poll after the
+/// cutoff. A timer race alone cannot enforce the latter on a busy executor.
+pub(crate) async fn before_deadline<T>(
+    deadline: Instant,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let value = tokio::select! {
+        biased;
+        _ = sleep_until(deadline) => return None,
+        value = work => value,
+    };
+    (Instant::now() < deadline).then_some(value)
 }
 
 /// Drain small control responses without retaining or accepting arbitrary bodies.
@@ -38,9 +59,67 @@ pub async fn drain(response: Response, limit: usize) -> Result<()> {
     Ok(())
 }
 
+pub(crate) struct DownloadBody {
+    pub bytes: u64,
+    pub completed: bool,
+}
+
+/// Stream a download without retaining its body. Partial data received before
+/// the cutoff is useful goodput, but late chunks (including late errors) are not.
+pub(crate) async fn download(
+    response: Response,
+    total: &AtomicU64,
+    deadline: Instant,
+) -> Result<DownloadBody> {
+    count_download(success(response)?.bytes_stream(), total, deadline).await
+}
+
+async fn count_download<S, E>(
+    stream: S,
+    total: &AtomicU64,
+    deadline: Instant,
+) -> Result<DownloadBody>
+where
+    S: Stream<Item = std::result::Result<Bytes, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let cutoff = sleep_until(deadline);
+    futures_util::pin_mut!(stream, cutoff);
+    let mut bytes = 0_u64;
+    loop {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let next = tokio::select! {
+            biased;
+            _ = &mut cutoff => break,
+            next = stream.next() => next,
+        };
+        if Instant::now() >= deadline {
+            break;
+        }
+        match next {
+            Some(chunk) => {
+                let len = chunk?.len() as u64;
+                bytes += len;
+                total.fetch_add(len, Ordering::Relaxed);
+            }
+            None => {
+                return Ok(DownloadBody {
+                    bytes,
+                    completed: true,
+                });
+            }
+        }
+    }
+    Ok(DownloadBody {
+        bytes,
+        completed: false,
+    })
+}
+
 /// Commit only uploads whose complete successful response was observed before the
-/// cutoff. An async response body can finish a long poll after its deadline, even
-/// when it is raced against a timer, so check the clock after it returns as well.
+/// cutoff. Submitted application bytes alone are not acknowledged upload goodput.
 pub(crate) async fn complete_upload(
     response_body: impl std::future::Future<Output = Result<()>>,
     submitted: &AtomicU64,
@@ -48,17 +127,9 @@ pub(crate) async fn complete_upload(
     total: &AtomicU64,
     deadline: Instant,
 ) -> Result<bool> {
-    if Instant::now() >= deadline {
+    let Some(result) = before_deadline(deadline, response_body).await else {
         return Ok(false);
-    }
-    let result = tokio::select! {
-        biased;
-        _ = sleep_until(deadline) => return Ok(false),
-        result = response_body => result,
     };
-    if Instant::now() >= deadline {
-        return Ok(false);
-    }
     result?;
     anyhow::ensure!(
         submitted.load(Ordering::Relaxed) == payload_len as u64,
@@ -89,20 +160,22 @@ pub fn base_url(value: &str) -> Result<Url> {
 }
 
 pub(crate) fn upload_body(total: Arc<AtomicU64>, payload_len: usize) -> Body {
-    let chunk = Bytes::from(vec![0_u8; 64 * 1024]);
-    let stream = futures_util::stream::unfold(
-        (payload_len, chunk, total),
-        |(remaining, chunk, total)| async move {
-            if remaining == 0 {
-                return None;
-            }
-            let len = remaining.min(chunk.len());
-            total.fetch_add(len as u64, Ordering::Relaxed);
-            let item = Ok::<Bytes, std::io::Error>(chunk.slice(..len));
-            Some((item, (remaining - len, chunk, total)))
-        },
-    );
-    Body::wrap_stream(stream)
+    Body::wrap_stream(upload_stream(total, payload_len))
+}
+
+fn upload_stream(
+    total: Arc<AtomicU64>,
+    payload_len: usize,
+) -> impl Stream<Item = std::io::Result<Bytes>> {
+    futures_util::stream::unfold((payload_len, total), |(remaining, total)| async move {
+        if remaining == 0 {
+            return None;
+        }
+        let len = remaining.min(UPLOAD_CHUNK.len());
+        total.fetch_add(len as u64, Ordering::Relaxed);
+        let item = Ok(Bytes::from_static(&UPLOAD_CHUNK[..len]));
+        Some((item, (remaining - len, total)))
+    })
 }
 
 #[cfg(test)]
@@ -249,3 +322,7 @@ mod response_tests {
         assert_eq!(total.load(Ordering::Relaxed), 64 * 1024);
     }
 }
+
+#[cfg(test)]
+#[path = "http_transfer_tests.rs"]
+mod transfer_tests;
