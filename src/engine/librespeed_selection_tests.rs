@@ -57,7 +57,10 @@ async fn an_empty_or_failed_registry_returns_the_existing_error() {
         let error = select_candidates(workers, Instant::now() + Duration::from_secs(2))
             .await
             .unwrap_err();
-        assert_eq!(error.to_string(), "no built-in LibreSpeed server was reachable");
+        assert_eq!(
+            error.to_string(),
+            "no built-in LibreSpeed server was reachable"
+        );
     }
 }
 
@@ -125,8 +128,8 @@ async fn loopback_selection_cancels_a_stalled_response_body() {
     let (url, healthy_peer) = crate::engine::test_support::measurement_peer().await;
     let healthy = resolve_custom_server(&url).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let stalled = resolve_custom_server(&format!("http://{}/", listener.local_addr().unwrap()))
-        .unwrap();
+    let stalled =
+        resolve_custom_server(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
     let stalled_peer = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut header = Vec::new();

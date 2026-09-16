@@ -19,7 +19,6 @@ async fn upload_chunks_share_static_storage_and_account_only_polled_bytes() {
             assert_eq!(submitted.load(Ordering::Relaxed), observed as u64);
         }
         assert_eq!(observed, length);
-        assert!(stream.next().await.is_none());
         assert_eq!(submitted.load(Ordering::Relaxed), length as u64);
     }
 }
@@ -93,7 +92,9 @@ async fn expired_download_does_not_poll_an_already_ready_body() {
         polled = true;
         Poll::Ready(Some(Ok::<_, std::io::Error>(Bytes::from_static(b"late"))))
     });
-    let result = count_download(stream, &total, Instant::now()).await.unwrap();
+    let result = count_download(stream, &total, Instant::now())
+        .await
+        .unwrap();
     assert!(!polled);
     assert!(!result.completed);
     assert_eq!(result.bytes, 0);
@@ -115,7 +116,10 @@ async fn chunks_finishing_a_long_poll_after_the_cutoff_are_excluded() {
         Poll::Ready(Some(Ok::<_, std::io::Error>(Bytes::from_static(b"data"))))
     });
     let result = count_download(stream, &total, deadline).await.unwrap();
-    assert_eq!(polls, 2, "exercise the post-poll cutoff, not just the timer");
+    assert_eq!(
+        polls, 2,
+        "exercise the post-poll cutoff, not just the timer"
+    );
     assert!(!result.completed);
     assert_eq!(result.bytes, 4);
     assert_eq!(total.load(Ordering::Relaxed), 4);

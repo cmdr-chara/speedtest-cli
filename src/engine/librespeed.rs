@@ -516,7 +516,10 @@ async fn measure_loaded_latency(
                 .get(url.clone())
                 .query(&[
                     ("cors", "true"),
-                    ("r", &format!("load-{index}-{}", Utc::now().timestamp_micros())),
+                    (
+                        "r",
+                        &format!("load-{index}-{}", Utc::now().timestamp_micros()),
+                    ),
                 ])
                 .header("cache-control", "no-store")
                 .send()
