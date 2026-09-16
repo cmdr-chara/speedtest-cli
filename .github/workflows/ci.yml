@@ -60,7 +60,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: verification-${{ runner.os }}
+          name: verification-${{ matrix.os }}
           path: |
             verification/
             Cargo.lock
