@@ -67,7 +67,8 @@ the outer operation retains the existing owned-JoinSet cancellation behavior.
 CI artifact names include the matrix runner, preventing the Apple Silicon and
 Intel macOS jobs from attempting to create the same artifact. All four platform
 lanes and all existing test, smoke, packaging, and lint checks remain enabled.
-No dependency or lockfile changes are required.
+There are no dependency-resolution changes; the release candidate updates the
+package version in both `Cargo.toml` and `Cargo.lock` to 0.6.2.
 
 ## Regression checks
 
