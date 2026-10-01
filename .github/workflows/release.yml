@@ -12,7 +12,7 @@ on:
       - "src/**"
   push:
     branches:
-      - determination
+      - main
   workflow_dispatch:
 
 permissions:

@@ -518,7 +518,7 @@ repository has already accepted or published them.
 ### Install from source
 
 ```bash
-cargo install --locked --git https://github.com/cmdr-chara/speedtest-cli --branch determination --force
+cargo install --locked --git https://github.com/cmdr-chara/speedtest-cli --branch main --force
 speedtest --version
 ```
 
