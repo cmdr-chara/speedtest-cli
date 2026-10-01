@@ -5,13 +5,14 @@ on:
     paths:
       - ".github/workflows/release.yml"
       - ".github/scripts/package_release.py"
+      - ".github/scripts/generate_package_manifests.py"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "src/**"
   push:
     branches:
-      - determination
+      - main
   workflow_dispatch:
 
 permissions:
@@ -147,6 +148,17 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Generate package-manager metadata
+        env:
+          GH_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          python3 .github/scripts/generate_package_manifests.py \
+            --version "${RELEASE_TAG#v}" \
+            --repository "${GH_REPOSITORY}" \
+            --dist dist
 
       - name: Publish release
         env:

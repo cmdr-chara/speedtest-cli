@@ -4,7 +4,10 @@ pub(crate) mod http;
 pub mod internet;
 pub mod librespeed;
 
-use std::time::Duration;
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    time::Duration,
+};
 
 use crate::model::{TestPhase, TestResult};
 
@@ -12,6 +15,35 @@ use crate::model::{TestPhase, TestResult};
 pub struct EngineConfig {
     pub streams: usize,
     pub phase_duration: Duration,
+    pub family: AddressFamily,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AddressFamily {
+    #[default]
+    Any,
+    Ipv4,
+    Ipv6,
+}
+
+impl AddressFamily {
+    /// An unspecified local address asks the socket stack to use only the
+    /// requested address family without guessing a machine-specific address.
+    pub const fn local_address(self) -> Option<IpAddr> {
+        match self {
+            Self::Any => None,
+            Self::Ipv4 => Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            Self::Ipv6 => Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,14 +109,16 @@ mod tests {
         for streams in [0, 17, usize::MAX] {
             assert!(EngineConfig {
                 streams,
-                phase_duration: Duration::from_secs(1)
+                phase_duration: Duration::from_secs(1),
+                family: AddressFamily::Any,
             }
             .validate()
             .is_err());
         }
         assert!(EngineConfig {
             streams: 1,
-            phase_duration: Duration::ZERO
+            phase_duration: Duration::ZERO,
+            family: AddressFamily::Any,
         }
         .validate()
         .is_err());

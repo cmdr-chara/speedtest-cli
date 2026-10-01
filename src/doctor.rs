@@ -1,9 +1,9 @@
-use std::{net::IpAddr, process::Command, time::Duration};
+use std::{net::IpAddr, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::{net::TcpStream, time::timeout};
+use tokio::{net::TcpStream, process::Command, time::timeout};
 
 use crate::{
     dns, dns_custom,
@@ -308,10 +308,7 @@ pub async fn run(interface: Option<&str>) -> Result<DoctorReport> {
     } else if let Some(gateway) = state.gateway {
         let gateway_scope = state.gateway_scope.clone();
         let gateway_label = scoped_gateway_target(gateway, gateway_scope.as_deref());
-        let ping =
-            tokio::task::spawn_blocking(move || gateway_ping(gateway, gateway_scope.as_deref()))
-                .await
-                .context("gateway ping task panicked")?;
+        let ping = gateway_ping(gateway, gateway_scope.as_deref()).await;
         match ping {
             Ok(Some(ms)) => checks.push(DoctorCheck {
                 name: "Gateway latency".to_string(),
@@ -573,42 +570,44 @@ fn scoped_gateway_target(gateway: IpAddr, scope: Option<&str>) -> String {
     }
 }
 
-fn gateway_ping(gateway: IpAddr, scope: Option<&str>) -> Result<Option<f64>> {
+async fn gateway_ping(gateway: IpAddr, scope: Option<&str>) -> Result<Option<f64>> {
     let target = scoped_gateway_target(gateway, scope);
 
     #[cfg(target_os = "windows")]
-    let output = {
+    let mut command = {
         let mut command = Command::new("ping");
         if gateway.is_ipv6() {
             command.arg("-6");
         }
+        command.args(["-n", "1", "-w", "1000", &target]);
         command
-            .args(["-n", "1", "-w", "1000", &target])
-            .output()
-            .context("failed to run ping")?
     };
 
     #[cfg(target_os = "macos")]
-    let output = Command::new(if gateway.is_ipv6() { "ping6" } else { "ping" })
-        .args(["-c", "1", "-W", "1000", &target])
-        .output()
-        .context("failed to run ping")?;
+    let mut command = {
+        let mut command = Command::new(if gateway.is_ipv6() { "ping6" } else { "ping" });
+        command.args(["-c", "1", "-W", "1000", &target]);
+        command
+    };
 
     #[cfg(all(unix, not(target_os = "macos")))]
-    let output = {
+    let mut command = {
         let mut command = Command::new("ping");
         if gateway.is_ipv6() {
             command.arg("-6");
         }
+        command.args(["-c", "1", "-W", "1", &target]);
         command
-            .args(["-c", "1", "-W", "1", &target])
-            .output()
-            .context("failed to run ping")?
     };
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
     return Ok(None);
 
+    command.kill_on_drop(true);
+    let output = timeout(Duration::from_secs(2), command.output())
+        .await
+        .context("gateway ping timed out")?
+        .context("failed to run ping")?;
     if !output.status.success() {
         return Ok(None);
     }

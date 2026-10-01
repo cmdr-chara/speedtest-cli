@@ -116,6 +116,7 @@ impl LibreSpeedEngine {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(25))
             .pool_max_idle_per_host(config.streams.saturating_add(4))
+            .local_address(config.family.local_address())
             .build()
             .context("failed to build LibreSpeed HTTP client")?;
         let server = custom_server.map(resolve_custom_server).transpose()?;
@@ -581,6 +582,7 @@ mod tests {
             config: EngineConfig {
                 streams: 1,
                 phase_duration: Duration::from_millis(150),
+                family: crate::engine::AddressFamily::Any,
             },
             server: None,
         };

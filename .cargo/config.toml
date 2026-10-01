@@ -1,0 +1,4 @@
+[build]
+# reqwest's HTTP/3 client is intentionally opt-in and marked unstable upstream.
+# Keep the opt-in in the repository so local, CI, and release builds agree.
+rustflags = ["--cfg", "reqwest_unstable"]

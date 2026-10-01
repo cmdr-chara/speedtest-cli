@@ -35,7 +35,7 @@ Most speed tests stop at download and upload. `speedtest-cli` helps answer the q
 - **Is the connection fast and responsive?** Measure download, upload, idle and loaded latency, jitter, bufferbloat, and a quality score with workload grades.
 - **Where is the bottleneck?** Compare Internet backends, inspect Wi-Fi, or test directly between two machines on your LAN.
 - **Did something change?** Save results locally, browse history, pin a baseline, compare runs, and use offline statistics and insights to spot trends.
-- **Is the network reliable?** Inspect DNS, benchmark UDP or DoH, monitor HTTP availability, and measure ICMP response loss separately.
+- **Is the network reliable?** Inspect DNS, benchmark UDP, DoH, DoT, or DoQ, monitor repeated runs, and measure ICMP response loss separately.
 - **Do I need a script?** Use plain text, JSON, or CSV output with stable field names and units.
 
 ## Install
@@ -92,6 +92,10 @@ speedtest
 
 See the [latest release](https://github.com/cmdr-chara/speedtest-cli/releases/latest) for all available files and checksums.
 
+Release assets also include generated Homebrew and WinGet metadata with the exact archive
+checksums. They are submission-ready artifacts for package maintainers; the project does not
+claim an official Homebrew tap or WinGet source until those external repositories accept them.
+
 </details>
 
 ### Build from source
@@ -145,15 +149,20 @@ For the interactive dashboard, use a terminal at least **80 × 24** characters:
 | Run a normal Internet test | `speedtest --run` |
 | Select the LibreSpeed backend | `speedtest --backend librespeed` |
 | Compare Internet backends | `speedtest verify` |
+| Force an IPv4 or IPv6 measurement | `speedtest --family ipv4 --run` |
+| Compare IPv4 and IPv6 paths | `speedtest verify --compare-families` |
 | Review saved runs | `speedtest history` |
 | See aggregate history statistics | `speedtest stats` |
 | Find trends and unusual results offline | `speedtest insights` |
 | Compare two saved results | `speedtest compare` |
 | Run network diagnostics | `speedtest doctor` |
+| Get guided connection recommendations | `speedtest diagnose --profile calls` |
+| Record repeated measurements | `speedtest monitor --count 4 --interval 15m --json --output monitor.jsonl` |
 | Inspect the Wi-Fi link | `speedtest wifi` |
 | Measure ICMP response loss | `speedtest loss --target 1.1.1.1 --count 50` |
 | Monitor HTTP availability | `speedtest stability --duration 5m` |
 | Benchmark DNS resolvers | `speedtest dns benchmark --protocol doh` |
+| Test encrypted DNS transports | `speedtest dns benchmark --protocol dot` or `--protocol doq` |
 | Test two machines on a trusted LAN | `speedtest serve --bind 192.168.1.50:9876`, then `speedtest lan 192.168.1.50:9876` |
 
 `speedtest insights`, history browsing, and the dashboard itself do not need a network connection. They read local data only.
@@ -219,6 +228,8 @@ Machine-readable output keeps canonical field names, units, command names, and p
 - **LAN mode:** the LAN server is unauthenticated and unencrypted. Bind it only on a trusted network; never expose it to the Internet.
 - **DNS changes:** inspection and benchmarks are read-only. Commands such as `dns set` and `dns optimize` change system settings—preview them with `--dry-run` first and read the [DNS guide](./docs/usage.md#dns-suite).
 - **Interpretation:** quality grades are local heuristics, not certifications. HTTP availability and ICMP loss measure different things.
+- **Guided diagnostics:** `diagnose` contacts the configured diagnostic, stability, speed-test, and handshake endpoints. It is explicit network work; use `--no-stability` or `--no-speedtest` to narrow the run.
+- **Protocol probes:** HTTP/2, HTTP/3, DoT, and DoQ results depend on endpoint support, firewall policy, routing, and local resolver behavior. An unavailable optional protocol is evidence about that path, not proof that every service is unavailable.
 - **Project status:** this is an independent project, not an official Cloudflare or LibreSpeed client.
 
 ## Languages and appearance

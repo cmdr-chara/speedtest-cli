@@ -57,6 +57,7 @@ impl CloudflareEngine {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(25))
             .pool_max_idle_per_host(config.streams.saturating_add(4))
+            .local_address(config.family.local_address())
             .build()
             .context("failed to build Cloudflare HTTP client")?;
         Ok(Self { client, config })

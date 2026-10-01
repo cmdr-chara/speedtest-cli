@@ -20,6 +20,7 @@ use tokio::{
 use self::wire::{build_query, validate_response};
 use crate::{
     analysis,
+    engine::AddressFamily,
     model::{LatencyDistribution, QualityGrade},
     storage,
 };
@@ -511,6 +512,14 @@ pub async fn test_current(queries: usize) -> Result<DnsProviderBenchmark> {
 }
 
 pub async fn benchmark(profile: BenchmarkProfile, queries: usize) -> Result<DnsBenchmarkResult> {
+    benchmark_with_family(profile, queries, AddressFamily::Any).await
+}
+
+pub async fn benchmark_with_family(
+    profile: BenchmarkProfile,
+    queries: usize,
+    family: AddressFamily,
+) -> Result<DnsBenchmarkResult> {
     let queries = queries.clamp(3, 100);
     let mut workers = JoinSet::new();
     let (ipv4_route, ipv6_route) = system::inspect(None)
@@ -519,7 +528,10 @@ pub async fn benchmark(profile: BenchmarkProfile, queries: usize) -> Result<DnsB
 
     for provider in providers_for_profile(profile) {
         workers.spawn(async move {
-            let addresses = provider.addresses_for_routes(ipv4_route, ipv6_route);
+            let addresses = provider.addresses_for_routes(
+                family != AddressFamily::Ipv6 && ipv4_route,
+                family != AddressFamily::Ipv4 && ipv6_route,
+            );
             benchmark_servers(
                 provider.id,
                 provider.provider,
@@ -547,7 +559,15 @@ pub async fn benchmark(profile: BenchmarkProfile, queries: usize) -> Result<DnsB
                         "Current / System DNS",
                         "active",
                         DnsCategory::Standard,
-                        state.servers,
+                        state
+                            .servers
+                            .into_iter()
+                            .filter(|address| match family {
+                                AddressFamily::Any => true,
+                                AddressFamily::Ipv4 => address.is_ipv4(),
+                                AddressFamily::Ipv6 => address.is_ipv6(),
+                            })
+                            .collect(),
                         queries,
                         true,
                     )

@@ -51,6 +51,48 @@ fn help_is_discoverable_uncolored_and_documents_units() {
 }
 
 #[test]
+fn health_commands_expose_family_backend_and_monitor_controls() {
+    for (command, expected) in [
+        ("diagnose", vec!["--backend", "--family", "--no-stability"]),
+        ("monitor", vec!["--backend", "--family", "--interval"]),
+        ("verify", vec!["--family", "--compare-families"]),
+        ("dns benchmark", vec!["--protocol", "dot", "doq"]),
+    ] {
+        let arguments = command
+            .split_whitespace()
+            .chain(["--help"])
+            .collect::<Vec<_>>();
+        let result = run(&arguments, None);
+        assert!(
+            result.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let help = String::from_utf8(result.stdout).unwrap();
+        for item in expected {
+            assert!(help.contains(item), "{command} missing {item}: {help}");
+        }
+    }
+}
+
+#[test]
+fn monitor_rejects_a_custom_server_without_the_librespeed_backend() {
+    let result = run(
+        &[
+            "monitor",
+            "--librespeed-server",
+            "http://127.0.0.1:1",
+            "--count",
+            "1",
+            "--no-save",
+        ],
+        None,
+    );
+    assert_eq!(result.status.code(), Some(2));
+    assert!(result.stdout.is_empty());
+}
+
+#[test]
 fn insights_is_offline_and_returns_a_versioned_empty_report() {
     let result = run(&["insights", "--json"], None);
     assert!(

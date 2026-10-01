@@ -18,6 +18,65 @@ pub enum InternetBackendArg {
     Librespeed,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum IpFamilyArg {
+    /// Let the operating system choose IPv4 or IPv6.
+    Any,
+    /// Force IPv4 sockets for active Internet probes.
+    Ipv4,
+    /// Force IPv6 sockets for active Internet probes.
+    Ipv6,
+}
+
+impl IpFamilyArg {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+        }
+    }
+
+    pub const fn engine_family(self) -> crate::engine::AddressFamily {
+        match self {
+            Self::Any => crate::engine::AddressFamily::Any,
+            Self::Ipv4 => crate::engine::AddressFamily::Ipv4,
+            Self::Ipv6 => crate::engine::AddressFamily::Ipv6,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MeasurementArgs {
+    /// Internet measurement backend.
+    #[arg(long, value_enum, default_value_t = InternetBackendArg::Cloudflare)]
+    pub backend: InternetBackendArg,
+
+    /// Address family for active Internet probes.
+    #[arg(long, value_enum, default_value_t = IpFamilyArg::Any)]
+    pub family: IpFamilyArg,
+
+    /// Custom LibreSpeed base URL; requires --backend librespeed.
+    #[arg(long, value_name = "URL")]
+    pub librespeed_server: Option<String>,
+
+    /// Duration of each throughput phase in seconds.
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u64).range(3..=30))]
+    pub duration: u64,
+
+    /// Number of concurrent transfer streams.
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=16))]
+    pub streams: u8,
+
+    /// Overall measurement deadline in seconds.
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..=600))]
+    pub timeout: u64,
+
+    /// Do not persist completed throughput results in the normal history.
+    #[arg(long)]
+    pub no_save: bool,
+}
+
 #[derive(Debug, Clone, Parser)]
 #[command(name = "speedtest")]
 #[command(version, about = "Measure network throughput, latency, and quality")]
@@ -47,6 +106,10 @@ pub struct Cli {
     /// Internet measurement backend.
     #[arg(long, value_enum, default_value_t = InternetBackendArg::Cloudflare)]
     pub backend: InternetBackendArg,
+
+    /// Address family for active Internet probes.
+    #[arg(long, value_enum, default_value_t = IpFamilyArg::Any)]
+    pub family: IpFamilyArg,
 
     /// Custom LibreSpeed base URL; requires --backend librespeed. Standard PHP paths are assumed.
     #[arg(long, value_name = "URL")]
@@ -107,6 +170,10 @@ pub enum Command {
     Compare(CompareArgs),
     /// Diagnose routing, DNS, IP connectivity, HTTPS, Wi-Fi, and optionally throughput.
     Doctor(DoctorArgs),
+    /// Run a guided connection-health assessment for a workload profile.
+    Diagnose(DiagnoseArgs),
+    /// Run repeated measurements and write a JSONL monitoring stream.
+    Monitor(MonitorArgs),
     /// Measure real ICMP echo response loss and RTT distribution.
     Loss(LossArgs),
     /// Inspect the active Wi-Fi link using native platform tooling.
@@ -279,6 +346,8 @@ pub enum DnsBenchmarkProfileArg {
 pub enum DnsProtocolArg {
     Udp,
     Doh,
+    Dot,
+    Doq,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -294,6 +363,10 @@ pub struct DnsBenchmarkArgs {
     /// Queries sent to each resolver profile.
     #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u16).range(3..=100))]
     pub queries: u16,
+
+    /// Address family for secure DNS endpoint connections.
+    #[arg(long, value_enum, default_value_t = IpFamilyArg::Any)]
+    pub family: IpFamilyArg,
 
     /// Print the full benchmark as JSON.
     #[arg(long)]
@@ -397,6 +470,82 @@ pub struct DoctorArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DiagnosisProfileArg {
+    /// Balance responsiveness, reliability, and throughput.
+    General,
+    /// Prioritize loaded latency, jitter, and loss.
+    Calls,
+    /// Prioritize loaded latency, jitter, and local responsiveness.
+    Gaming,
+    /// Prioritize sustained download capacity and reliability.
+    Streaming,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DiagnoseArgs {
+    #[command(flatten)]
+    pub measurement: MeasurementArgs,
+
+    /// Workload profile used to rank findings and recommendations.
+    #[arg(long, value_enum, default_value_t = DiagnosisProfileArg::General)]
+    pub profile: DiagnosisProfileArg,
+
+    /// Duration of each stability probe. Supports s, m, or h suffixes.
+    #[arg(long = "stability-duration", default_value = "30s", value_parser = parse_diagnosis_duration)]
+    pub stability_duration: u64,
+
+    /// Time between stability probes. Supports ms or s suffixes.
+    #[arg(
+        long = "stability-interval",
+        default_value = "1s",
+        value_parser = parse_diagnosis_interval
+    )]
+    pub stability_interval_ms: u64,
+
+    /// Skip the repeated stability probe and use lightweight checks plus speed data.
+    #[arg(long)]
+    pub no_stability: bool,
+
+    /// Skip the throughput/bufferbloat measurement.
+    #[arg(long)]
+    pub no_speedtest: bool,
+
+    /// Interface alias, network service, or device. Defaults to the active route.
+    #[arg(long)]
+    pub interface: Option<String>,
+
+    /// Print the complete guided assessment as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MonitorArgs {
+    #[command(flatten)]
+    pub measurement: MeasurementArgs,
+
+    /// Time between measurements. Supports s, m, or h suffixes.
+    #[arg(long = "interval", default_value = "15m", value_parser = parse_monitor_interval)]
+    pub interval_ms: u64,
+
+    /// Number of measurements. Omit to continue until Ctrl+C.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    pub count: Option<u32>,
+
+    /// Continue after a failed measurement and record the failure in JSONL.
+    #[arg(long)]
+    pub continue_on_error: bool,
+
+    /// Print one JSON record per completed attempt.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Append records to this JSONL file instead of the default local monitor history.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct LossArgs {
     /// ICMP echo target. Defaults to Cloudflare's public resolver address.
@@ -432,6 +581,14 @@ pub struct VerifyArgs {
     /// Concurrent streams per backend.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=8))]
     pub streams: u8,
+
+    /// Address family for both backend measurements.
+    #[arg(long, value_enum, default_value_t = IpFamilyArg::Any)]
+    pub family: IpFamilyArg,
+
+    /// Repeat verification on IPv4 and IPv6 and include an A/B comparison.
+    #[arg(long)]
+    pub compare_families: bool,
 
     /// Optional custom LibreSpeed base URL.
     #[arg(long, value_name = "URL")]
@@ -515,6 +672,8 @@ impl Cli {
             Some(Command::Insights(a)) => a.json,
             Some(Command::Compare(a)) => a.json,
             Some(Command::Doctor(a)) => a.json,
+            Some(Command::Diagnose(a)) => a.json,
+            Some(Command::Monitor(a)) => a.json,
             Some(Command::Loss(a)) => a.json,
             Some(Command::Wifi(a)) => a.json,
             Some(Command::Verify(a)) => a.json,
@@ -586,6 +745,30 @@ fn parse_probe_interval(value: &str) -> Result<u64, String> {
     Ok(milliseconds)
 }
 
+fn parse_diagnosis_duration(value: &str) -> Result<u64, String> {
+    let seconds = parse_time(value, 1_000)? / 1_000;
+    if !(10..=900).contains(&seconds) {
+        return Err("diagnosis stability duration must be between 10s and 15m".to_string());
+    }
+    Ok(seconds)
+}
+
+fn parse_diagnosis_interval(value: &str) -> Result<u64, String> {
+    let milliseconds = parse_time(value, 1)?;
+    if !(500..=10_000).contains(&milliseconds) {
+        return Err("diagnosis stability interval must be between 500ms and 10s".to_string());
+    }
+    Ok(milliseconds)
+}
+
+fn parse_monitor_interval(value: &str) -> Result<u64, String> {
+    let milliseconds = parse_time(value, 1_000)?;
+    if !(1_000..=86_400_000).contains(&milliseconds) {
+        return Err("monitor interval must be between 1s and 24h".to_string());
+    }
+    Ok(milliseconds)
+}
+
 fn parse_time(value: &str, bare_multiplier: u64) -> Result<u64, String> {
     let value = value.trim().to_ascii_lowercase();
     let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
@@ -621,5 +804,13 @@ mod tests {
     fn parses_probe_interval() {
         assert_eq!(parse_probe_interval("750ms").unwrap(), 750);
         assert_eq!(parse_probe_interval("2s").unwrap(), 2_000);
+    }
+
+    #[test]
+    fn parses_diagnosis_and_monitor_durations() {
+        assert_eq!(parse_diagnosis_duration("30s").unwrap(), 30);
+        assert_eq!(parse_diagnosis_interval("2s").unwrap(), 2_000);
+        assert_eq!(parse_monitor_interval("15m").unwrap(), 900_000);
+        assert!(parse_monitor_interval("500ms").is_err());
     }
 }
