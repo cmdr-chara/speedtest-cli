@@ -1,27 +1,25 @@
-<h1 align="center">speedtest-cli</h1>
+# speedtest-cli
 
-<p align="center">
-  <strong>Know your speed. Understand your connection.</strong><br>
-  A terminal network lab for throughput, latency, bufferbloat, DNS, and connection history.<br>
-  Built with Rust. Keyboard driven. Ready for scripts.
-</p>
+> **Know your speed. Understand your connection.**
+
+`speedtest-cli` is a terminal network lab for measuring the connection you actually use—not just a headline Mbps number. It shows throughput, latency under load, jitter, bufferbloat, DNS behavior, stability, and local network performance in one keyboard-friendly tool.
 
 <p align="center">
   <a href="https://github.com/cmdr-chara/speedtest-cli/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/cmdr-chara/speedtest-cli?style=for-the-badge&amp;color=36c9b0"></a>
-  <a href="https://github.com/cmdr-chara/speedtest-cli/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/cmdr-chara/speedtest-cli/ci.yml?style=for-the-badge&amp;label=CI"></a>
-  <a href="./LICENSE"><img alt="License: Source Available" src="https://img.shields.io/badge/license-Source_Available-80a5dc?style=for-the-badge"></a>
+  <a href="https://github.com/cmdr-chara/speedtest-cli/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/cmdr-chara/speedtest-cli/ci.yml?style=for-the-badge&amp;label=CI"></a>
+  <a href="./LICENSE"><img alt="Source Available License 1.0" src="https://img.shields.io/badge/license-Source_Available-80a5dc?style=for-the-badge"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/cmdr-chara/speedtest-cli/releases/latest"><strong>Download</strong></a>
+  <a href="#install">Install</a>
   &nbsp;•&nbsp;
-  <a href="#get-started">Get started</a>
+  <a href="#run-your-first-test">First test</a>
   &nbsp;•&nbsp;
-  <a href="#see-it-in-action">Screenshots</a>
+  <a href="#useful-commands">Commands</a>
+  &nbsp;•&nbsp;
+  <a href="#license-in-plain-english">License</a>
   &nbsp;•&nbsp;
   <a href="./docs/usage.md">User guide</a>
-  &nbsp;•&nbsp;
-  <a href="https://github.com/cmdr-chara/speedtest-cli/issues">Get help</a>
 </p>
 
 <p align="center">
@@ -30,36 +28,35 @@
 
 <p align="center"><sub>Current development UI, captured from the application's renderer with illustrative test data. These are not measured connection speeds; published releases may differ.</sub></p>
 
-## Why speedtest-cli?
+## Why use it?
 
-A fast connection can still struggle with calls or games. speedtest-cli puts throughput beside latency under load, explains the result, and lets you compare it with earlier runs.
+Most speed tests stop at download and upload. `speedtest-cli` helps answer the questions that matter when a video call stutters, a game lags, or Wi-Fi feels slow:
 
-- **See more than Mbps.** Measure download, upload, idle and loaded latency, jitter, and bufferbloat, with an explained quality score and workload grades.
-- **Find where performance changes.** Cross-check Cloudflare and LibreSpeed, inspect Wi-Fi, or test between two machines on your LAN.
-- **Keep a useful history.** Browse saved runs, spot trends, pin a baseline, and compare six metrics before and after a change.
-- **Investigate DNS and stability.** Inspect resolvers, benchmark UDP or DoH, monitor HTTP availability, and measure ICMP echo response loss separately.
-- **Use it your way.** An offline home dashboard, eight languages, four palettes, and plain text, JSON, and CSV for automation.
+- **Is the connection fast and responsive?** Measure download, upload, idle and loaded latency, jitter, bufferbloat, and a quality score with workload grades.
+- **Where is the bottleneck?** Compare Internet backends, inspect Wi-Fi, or test directly between two machines on your LAN.
+- **Did something change?** Save results locally, browse history, pin a baseline, compare runs, and use offline statistics and insights to spot trends.
+- **Is the network reliable?** Inspect DNS, benchmark UDP or DoH, monitor HTTP availability, and measure ICMP response loss separately.
+- **Do I need a script?** Use plain text, JSON, or CSV output with stable field names and units.
 
-## Download
+## Install
 
-Download a native archive from [GitHub Releases](https://github.com/cmdr-chara/speedtest-cli/releases/latest). **Rust is not required** to run a prebuilt binary.
+### Download a release
 
-| Your computer | Package |
+Prebuilt archives are the easiest option. **Rust is not required** to run one.
+
+| Platform | Download |
 | --- | --- |
 | Windows · Intel / AMD 64-bit | [speedtest-windows-x86_64.zip](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-windows-x86_64.zip) |
 | Linux · Intel / AMD 64-bit | [speedtest-linux-x86_64.tar.gz](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-linux-x86_64.tar.gz) |
 | macOS · Apple Silicon | [speedtest-macos-aarch64.tar.gz](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-macos-aarch64.tar.gz) |
 | macOS · Intel | [speedtest-macos-x86_64.tar.gz](https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-macos-x86_64.tar.gz) |
 
-Each archive has a matching `.sha256` file on the release page. Extract the archive and launch `speedtest` (`speedtest.exe` on Windows).
+Every release also includes a matching `.sha256` checksum. Extract the archive and run `speedtest` (`speedtest.exe` on Windows).
 
 <details>
-<summary><strong>Installation commands for Windows, Linux, and macOS</strong></summary>
+<summary><strong>Install commands</strong></summary>
 
-
-GitHub Releases are the recommended installation method; Rust is not required.
-
-#### Windows x86_64
+#### Windows (PowerShell)
 
 ```powershell
 Invoke-WebRequest -Uri "https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-windows-x86_64.zip" -OutFile speedtest.zip
@@ -67,7 +64,7 @@ Expand-Archive .\speedtest.zip -DestinationPath . -Force
 .\speedtest-windows-x86_64\speedtest.exe
 ```
 
-#### Linux x86_64
+#### Linux (x86_64)
 
 ```bash
 curl -L "https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-linux-x86_64.tar.gz" -o speedtest.tar.gz
@@ -90,44 +87,45 @@ esac
 curl -L "https://github.com/cmdr-chara/speedtest-cli/releases/latest/download/speedtest-macos-${ASSET}.tar.gz" -o speedtest.tar.gz
 tar -xzf speedtest.tar.gz
 sudo install -m 0755 "speedtest-macos-${ASSET}/speedtest" /usr/local/bin/speedtest
+speedtest
 ```
 
-Each packaged release includes SHA-256 checksum files.
-
+See the [latest release](https://github.com/cmdr-chara/speedtest-cli/releases/latest) for all available files and checksums.
 
 </details>
 
-<details>
-<summary><strong>Build the current checkout</strong></summary>
+### Build from source
 
-Requires the current stable Rust toolchain. From the repository directory:
+Building requires the current stable Rust toolchain:
 
 ```bash
+git clone https://github.com/cmdr-chara/speedtest-cli.git
+cd speedtest-cli
 cargo build --release --locked --bin speedtest
-cargo run --release --locked --bin speedtest
+./target/release/speedtest
 ```
 
-The executable is written to `target/release/speedtest` (`speedtest.exe` on Windows).
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and verification instructions.
 
-</details>
-
-## Get started
+## Run your first test
 
 ```bash
-speedtest                         # Open the dashboard
+speedtest                         # Open the interactive dashboard
 speedtest --run                   # Start a test immediately
-speedtest --backend librespeed    # Open with LibreSpeed selected
-speedtest --plain                 # Run with plain text output
-speedtest --json                  # Run with JSON output
+speedtest --plain                 # Human-readable terminal output
+speedtest --json --no-save         # JSON output without writing history
 ```
 
-1. Open `speedtest` in a terminal of at least **80 × 24** characters.
-2. Choose **Run Speed Test** and review the backend, duration, and streams.
-3. Start the test, then review throughput, latency, and connection quality.
-4. Open **History** to revisit a run or compare it with an earlier baseline.
+The dashboard is safe to open and browse offline. Network activity starts only when you explicitly start a test or diagnostic. Completed tests are saved locally by default; add `--no-save` when you do not want to write a result.
 
-Opening the interactive dashboard reads local history only. Network operations begin when you start them. Completed tests are saved locally unless you use `--no-save`.
+For the interactive dashboard, use a terminal at least **80 × 24** characters:
+
+1. Choose **Run Speed Test**.
+2. Review the backend, duration, and stream settings.
+3. Start the test and watch throughput and latency under load.
+4. Open **History** to revisit a result or compare it with a baseline.
+
+### Keyboard controls
 
 | Key | Action |
 | --- | --- |
@@ -140,17 +138,37 @@ Opening the interactive dashboard reads local history only. Network operations b
 
 [Full keyboard guide and cockpit behavior →](./docs/usage.md#network-cockpit)
 
-## See it in action
+## Useful commands
 
-### Watch the connection under load
+| If you want to… | Use |
+| --- | --- |
+| Run a normal Internet test | `speedtest --run` |
+| Select the LibreSpeed backend | `speedtest --backend librespeed` |
+| Compare Internet backends | `speedtest verify` |
+| Review saved runs | `speedtest history` |
+| See aggregate history statistics | `speedtest stats` |
+| Find trends and unusual results offline | `speedtest insights` |
+| Compare two saved results | `speedtest compare` |
+| Run network diagnostics | `speedtest doctor` |
+| Inspect the Wi-Fi link | `speedtest wifi` |
+| Measure ICMP response loss | `speedtest loss --target 1.1.1.1 --count 50` |
+| Monitor HTTP availability | `speedtest stability --duration 5m` |
+| Benchmark DNS resolvers | `speedtest dns benchmark --protocol doh` |
+| Test two machines on a trusted LAN | `speedtest serve --bind 192.168.1.50:9876`, then `speedtest lan 192.168.1.50:9876` |
 
-The live dial shows throughput alongside latency readings as the test progresses.
+`speedtest insights`, history browsing, and the dashboard itself do not need a network connection. They read local data only.
+
+### Screenshots and demos
+
+#### Watch a connection under load
+
+The live view shows throughput alongside latency as the test progresses.
 
 <p align="center">
   <img src="./docs/images/readme/live-demo.gif" width="960" alt="Animated speedtest-cli walkthrough from the dashboard into a live download measurement and back">
 </p>
 
-### Explore results and history
+#### Explore results and history
 
 Browse saved tests, pin a baseline, compare it with another run, and open the full result.
 
@@ -159,15 +177,11 @@ Browse saved tests, pin a baseline, compare it with another run, and open the fu
 </p>
 
 <details>
-<summary><strong>View static result and comparison screenshots</strong></summary>
-
-Review the exact numbers, quality grade, bufferbloat, and findings in one place.
+<summary><strong>View result, history, and comparison screenshots</strong></summary>
 
 <p align="center">
   <img src="./docs/images/readme/results.png" width="960" alt="Completed result showing download, upload, latency, jitter, quality, and diagnostic findings">
 </p>
-
-Select a saved run and press `b` to pin it. Select another run and press `c` to compare download, upload, latency, jitter, quality, and bufferbloat.
 
 <p align="center">
   <img src="./docs/images/readme/history.png" width="960" alt="Saved run history with throughput and quality columns and a preview of the selected result">
@@ -179,37 +193,9 @@ Select a saved run and press `b` to pin it. Select another run and press `c` to 
 
 </details>
 
-<details>
-<summary><strong>Choose your language and appearance</strong></summary>
-
-English, Italian, Spanish, French, German, Portuguese, Simplified Chinese, and Japanese are available in **Settings → Language**, or with `speedtest --language it`.
-
-Choose Terminal (adaptive), Graphite, Light, or Monochrome, and Comfortable or Compact layouts. Settings apply to the current session. Use your terminal's font-size controls to enlarge all text; the interface reflows with the window.
-
-[Language and readability guide →](./docs/usage.md#interface-language-and-text-size)
-
-</details>
-
 All gallery images use deterministic fixtures rendered by the current application. [Capture details →](./docs/images/readme/README.md)
 
-## A network lab in one command
-
-| What you want to learn | Command |
-| --- | --- |
-| Do two Internet backends agree? | `speedtest verify` |
-| Is the local network the bottleneck? | `speedtest serve --bind 192.168.1.50:9876` on one machine, then `speedtest lan 192.168.1.50:9876` on another |
-| What does the network diagnosis show? | `speedtest doctor` |
-| How is the Wi-Fi link configured? | `speedtest wifi` |
-| Are ICMP echo responses being lost? | `speedtest loss --target 1.1.1.1 --count 50` |
-| Does HTTP availability stay consistent? | `speedtest stability --duration 5m` |
-| Which DNS resolvers respond well? | `speedtest dns benchmark --protocol doh` |
-| How has the connection changed? | `speedtest history` / `speedtest stats` / `speedtest compare` |
-
-LAN mode is unauthenticated and unencrypted; bind only on a trusted network and do not expose it to the Internet. HTTP availability and ICMP loss describe different behavior. Quality grades are explained local heuristics, not certifications. [Measurement semantics and limitations →](./docs/usage.md#accuracy-notes)
-
-DNS inspection and benchmarks are read-only. Configuration commands such as `dns set` and `dns optimize` change system settings; preview with `--dry-run` and read the [DNS and recovery guide](./docs/usage.md#dns-suite) first.
-
-## Made for scripts, too
+## Automation
 
 Export a result, then check it offline against your own thresholds:
 
@@ -218,35 +204,49 @@ speedtest --json --no-save > result.json
 speedtest check result.json --min-download 100 --min-upload 20 --max-latency 30
 ```
 
-A passing check exits **0**; failed thresholds exit **3**. JSON uses stable field names and units across interface languages. CSV export is available with `--output result.csv --format csv`.
+A passing check exits **0**. A failed threshold exits **3**. CSV is also available:
 
-Read the [automation contract](./docs/usage.md#terminal-and-automation-behavior), [offline checks](./docs/usage.md#offline-checks-for-scripts), and [storage guarantees](./docs/usage.md#data-storage) for errors, cancellation, output streams, and concurrent jobs.
+```bash
+speedtest --output result.csv --format csv
+```
 
-## Documentation and contributing
+Machine-readable output keeps canonical field names, units, command names, and provider identifiers regardless of interface language. Read the [automation contract](./docs/usage.md#terminal-and-automation-behavior), [offline checks](./docs/usage.md#offline-checks-for-scripts), and [storage guarantees](./docs/usage.md#data-storage) for output streams, errors, cancellation, and concurrent jobs.
 
-- [User guide](./docs/usage.md) — commands, installation, keyboard controls, DNS, result semantics, and storage.
-- [Contributing](./CONTRIBUTING.md) — build, test, and verification workflow.
-- [Architecture](./docs/network-cockpit.md) — cockpit state, services, and rendering.
-- [Verification reports](./docs/verification.md) — recorded checks and remaining limitations.
+## Safety, privacy, and limitations
+
+- **Local history:** results are stored locally and can be disabled per run with `--no-save`.
+- **Explicit network work:** opening the dashboard, changing sections, reading history, and running insights do not contact a server.
+- **LAN mode:** the LAN server is unauthenticated and unencrypted. Bind it only on a trusted network; never expose it to the Internet.
+- **DNS changes:** inspection and benchmarks are read-only. Commands such as `dns set` and `dns optimize` change system settings—preview them with `--dry-run` first and read the [DNS guide](./docs/usage.md#dns-suite).
+- **Interpretation:** quality grades are local heuristics, not certifications. HTTP availability and ICMP loss measure different things.
+- **Project status:** this is an independent project, not an official Cloudflare or LibreSpeed client.
+
+## Languages and appearance
+
+The interface supports English, Italian, Spanish, French, German, Portuguese, Simplified Chinese, and Japanese. Choose a language in **Settings → Language** or start with, for example, `speedtest --language it`.
+
+Choose Terminal (adaptive), Graphite, Light, or Monochrome palettes, plus Comfortable or Compact layouts. The interface reflows with the terminal window; use your terminal's own font-size controls to enlarge text.
+
+[Language and readability guide →](./docs/usage.md#interface-language-and-text-size)
+
+## Documentation and help
+
+- [User guide](./docs/usage.md) — installation, commands, keyboard controls, DNS, result semantics, and storage.
+- [Network cockpit architecture](./docs/network-cockpit.md) — state, services, and rendering.
+- [Verification reports](./docs/verification.md) — recorded checks and known limitations.
+- [Contributing](./CONTRIBUTING.md) — build, test, and contribution workflow.
 - [Report an issue](https://github.com/cmdr-chara/speedtest-cli/issues) — include the command, platform, and relevant output.
 
-speedtest-cli is an independent project, not an official Cloudflare or LibreSpeed client.
+## License in plain English
 
-## License
+The current repository is distributed under the [speedtest-cli Source Available License 1.0](./LICENSE). Here is the short version:
 
-[speedtest-cli Source Available License 1.0](./LICENSE).
+- You may use, study, modify, and share the software without a fee.
+- Personal, educational, research, and internal business use are allowed.
+- If you distribute the software or a modified version, you must provide the complete corresponding source under the same terms and preserve the required notices.
+- If you run a modified version for people over a network, you must offer those users the corresponding source for free while that version is operated.
+- You may not sell it, bundle it into a paid product, or provide a paid remote diagnostic or measurement service using it without separate written permission.
+- Private, undistributed modifications do not require source disclosure.
+- Material that was previously released under MIT—including the published v0.6.0 release—keeps its MIT permissions. See the historical MIT notice in [LICENSE](./LICENSE).
 
-Personal use and internal business use are permitted. Redistribution must include
-corresponding source under the same terms. Modified versions operated for remote
-users must offer those users their corresponding source. Selling copies, bundling
-into paid products, or providing paid services based on the tool requires separate
-written permission. See LICENSE for the definitions and full conditions.
-
-This is a custom source-available license, not AGPL or an OSI-approved open-source
-license. It applies from the revision introducing it; it does not revoke MIT rights
-for previously published material. The existing v0.6.0 release and its downloads
-remain under MIT. The package version is still 0.6.0; identify the source revision
-as well as the version when checking licensing.
-
-Request commercial permission through [GitHub](https://github.com/cmdr-chara/speedtest-cli/issues).
-Do not include confidential or personal information in a public request.
+This is a **custom source-available license**. It is **not** the AGPL and is **not an OSI-approved open-source license**. The bullets above are only a convenience summary; the full [license text](./LICENSE) controls. For commercial permission, open an [issue](https://github.com/cmdr-chara/speedtest-cli/issues) without including confidential or personal information.

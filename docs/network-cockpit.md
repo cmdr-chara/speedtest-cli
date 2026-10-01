@@ -62,6 +62,12 @@ canonical metric deltas, including optional quality and bufferbloat evidence.
 Baseline and comparison snapshots remain local to the session and never save data
 or start network work.
 
+Statistics also computes an offline `InsightsReport` for each backend/server path. It
+keeps LAN and Internet populations separate, preserves missing evidence as unavailable,
+and adds interpolated distributions, direction-aware trends, and conservative UTC
+time-of-day comparisons. This analysis is derived from the already-loaded history; it
+does not probe a server, refresh DNS, or write a new result.
+
 ## Lifecycle and navigation
 
 The root Home page is never popped. Opening a child pushes a page; Back restores the

@@ -37,6 +37,31 @@ pub enum HistoryScope {
     Lan,
 }
 
+/// Read-only selection. Identifiers remain canonical, even in localized reports.
+#[derive(Debug, Clone, Default)]
+pub struct HistorySelection {
+    pub scope: Option<HistoryScope>,
+    pub backend: Option<String>,
+}
+
+impl HistorySelection {
+    pub fn matches(&self, result: &TestResult) -> bool {
+        self.scope.is_none_or(|scope| matches_scope(result, scope))
+            && self
+                .backend
+                .as_ref()
+                .is_none_or(|backend| result.backend.eq_ignore_ascii_case(backend))
+    }
+
+    pub fn select(&self, results: &[TestResult]) -> Vec<TestResult> {
+        results
+            .iter()
+            .filter(|result| self.matches(result))
+            .cloned()
+            .collect()
+    }
+}
+
 impl HistoryScope {
     pub const fn label(self) -> &'static str {
         match self {
@@ -145,38 +170,49 @@ pub fn summarize(results: &[TestResult], period_days: u64) -> Option<HistorySumm
 }
 
 pub fn latest_comparable_pair(results: &[TestResult]) -> Option<(TestResult, TestResult)> {
-    [false, true]
-        .into_iter()
-        .filter_map(|lan_scope| {
-            let mut scoped = results
-                .iter()
-                .rev()
-                .filter(|result| is_lan(result) == lan_scope);
-            let after = scoped.next()?;
-            let before = scoped.next()?;
-            Some((before.clone(), after.clone()))
-        })
-        .max_by_key(|(_, after)| after.timestamp)
+    for (after_index, after) in results.iter().enumerate().rev() {
+        let Some(before) = results[..after_index]
+            .iter()
+            .rev()
+            .find(|before| is_lan(before) == is_lan(after))
+        else {
+            continue;
+        };
+        return Some((before.clone(), after.clone()));
+    }
+    None
 }
 
-fn is_lan(result: &TestResult) -> bool {
+pub fn is_lan(result: &TestResult) -> bool {
     result.backend.eq_ignore_ascii_case("lan")
 }
 
-fn matches_scope(result: &TestResult, scope: HistoryScope) -> bool {
+pub fn matches_scope(result: &TestResult, scope: HistoryScope) -> bool {
     match scope {
         HistoryScope::Internet => !is_lan(result),
         HistoryScope::Lan => is_lan(result),
     }
 }
 
+/// A path is identified by its stable backend ID and server host. Display names
+/// are descriptive and may change between registry responses.
+pub fn same_path(left: &TestResult, right: &TestResult) -> bool {
+    left.backend.eq_ignore_ascii_case(&right.backend)
+        && left.server.host.eq_ignore_ascii_case(&right.server.host)
+}
+
 pub fn detect_latest_anomalies(results: &[TestResult]) -> Vec<HistoryAnomaly> {
     if results.len() < 6 {
         return Vec::new();
     }
-
     let latest = results.last().expect("history has at least one result");
-    let baseline = &results[..results.len() - 1];
+    let baseline: Vec<_> = results[..results.len() - 1]
+        .iter()
+        .filter(|result| same_path(result, latest))
+        .collect();
+    if baseline.len() < 5 {
+        return Vec::new();
+    }
     let baseline_download = median(
         &baseline
             .iter()
@@ -448,5 +484,43 @@ mod tests {
             latest_comparable_pair(&[first_wan.clone(), second_wan.clone(), lone_lan]).unwrap();
         assert_eq!(before.timestamp, first_wan.timestamp);
         assert_eq!(after.timestamp, second_wan.timestamp);
+    }
+
+    #[test]
+    fn implicit_compare_can_cross_backend_paths_without_crossing_lan_scope() {
+        let first = result(0, 100.0, 20.0, 10.0);
+        let mut different_backend = result(1, 900.0, 90.0, 5.0);
+        different_backend.backend = "librespeed".into();
+        let mut different_server = result(2, 800.0, 80.0, 6.0);
+        different_server.server.host = "other.example".into();
+        let mut matching_latest = result(3, 120.0, 25.0, 9.0);
+        matching_latest.server.name = "Renamed display name".into();
+
+        let (before, after) = latest_comparable_pair(&[
+            first.clone(),
+            different_backend,
+            different_server.clone(),
+            matching_latest.clone(),
+        ])
+        .unwrap();
+        assert_eq!(before.timestamp, different_server.timestamp);
+        assert_eq!(after.timestamp, matching_latest.timestamp);
+    }
+
+    #[test]
+    fn anomalies_do_not_compare_different_backend_or_server_paths() {
+        let mut results: Vec<_> = (0..4)
+            .map(|index| result(index, 800.0, 100.0, 10.0))
+            .collect();
+        let mut other_path = result(5, 800.0, 100.0, 10.0);
+        other_path.backend = "librespeed".into();
+        results.push(other_path);
+        let mut second_other_path = result(6, 800.0, 100.0, 10.0);
+        second_other_path.server.host = "other.example".into();
+        results.push(second_other_path);
+        let latest = result(7, 400.0, 100.0, 10.0);
+        results.push(latest);
+
+        assert!(detect_latest_anomalies(&results).is_empty());
     }
 }

@@ -6,6 +6,7 @@ pub mod dns_custom;
 pub mod doctor;
 pub mod engine;
 pub mod history;
+pub mod insights;
 pub mod lan;
 pub mod loss;
 pub mod model;

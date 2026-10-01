@@ -99,6 +99,8 @@ pub enum Command {
     History(HistoryArgs),
     /// Summarize saved runs and flag unusual recent performance.
     Stats(StatsArgs),
+    /// Analyze saved runs by comparable backend/server path and time of day.
+    Insights(InsightsArgs),
     /// Inspect, benchmark, optimize, and configure DNS resolvers.
     Dns(DnsArgs),
     /// Compare two saved results, or the two most recent history entries.
@@ -170,6 +172,35 @@ pub struct StatsArgs {
     pub days: u64,
 
     /// Print the history summary as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum InsightsScopeArg {
+    /// Include both Internet and LAN measurements.
+    All,
+    /// Include only Internet measurements.
+    Internet,
+    /// Include only self-hosted LAN measurements.
+    Lan,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct InsightsArgs {
+    /// Analyze results from the last N days.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3650))]
+    pub days: u64,
+
+    /// Restrict the report to one backend identifier, case-insensitively.
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
+
+    /// Separate Internet and LAN populations instead of comparing them.
+    #[arg(long, value_enum, default_value_t = InsightsScopeArg::All)]
+    pub scope: InsightsScopeArg,
+
+    /// Print the versioned report as JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -481,6 +512,7 @@ impl Cli {
             Some(Command::Stability(a)) => a.json,
             Some(Command::History(a)) => a.json,
             Some(Command::Stats(a)) => a.json,
+            Some(Command::Insights(a)) => a.json,
             Some(Command::Compare(a)) => a.json,
             Some(Command::Doctor(a)) => a.json,
             Some(Command::Loss(a)) => a.json,

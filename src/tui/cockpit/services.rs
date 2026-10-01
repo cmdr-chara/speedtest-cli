@@ -4,7 +4,10 @@ use std::{process::Stdio, time::Duration};
 use anyhow::{bail, Context, Result};
 use tokio::{io::AsyncReadExt, process::Command};
 
-use crate::{compare, history, model::TestResult, output, runtime, session::TestOptions, storage};
+use crate::{
+    compare, history, insights::InsightsReport, model::TestResult, output, runtime,
+    session::TestOptions, storage,
+};
 
 pub(super) const HISTORY_DAYS: u64 = 30;
 const REPORT_LIMIT: usize = 256 * 1024;
@@ -14,6 +17,7 @@ pub(super) struct Archive {
     pub results: Vec<TestResult>,
     pub summary: Option<history::HistorySummary>,
     pub comparison: Option<ComparedRuns>,
+    pub insights: InsightsReport,
 }
 
 /// A comparison keeps the source evidence alongside the existing domain analysis.
@@ -68,14 +72,14 @@ impl Archive {
 
     pub fn from_results(results: Vec<TestResult>) -> Self {
         let summary = history::summarize(&results, HISTORY_DAYS);
-        let comparison = results
-            .len()
-            .checked_sub(2)
-            .map(|index| ComparedRuns::new(&results[index], &results[index + 1]));
+        let comparison = history::latest_comparable_pair(&results)
+            .map(|(before, after)| ComparedRuns::new(&before, &after));
+        let insights = crate::insights::analyze(&results, HISTORY_DAYS);
         Self {
             results,
             summary,
             comparison,
+            insights,
         }
     }
 

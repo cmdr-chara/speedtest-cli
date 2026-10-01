@@ -380,9 +380,26 @@ speedtest history --json
 speedtest stats
 speedtest stats --days 90
 speedtest stats --json
+
+speedtest insights
+speedtest insights --days 90 --scope internet
+speedtest insights --backend cloudflare --json
 ```
 
 History/statistics include median/best throughput, latency statistics, quality context, S-tier counts, trend detection, a Unicode throughput sparkline, and latest-run anomaly detection against prior saved results.
+Anomaly detection requires at least five earlier runs on the same backend/server path;
+it does not flag a provider or server switch as a connection regression.
+
+`insights` is a deeper, offline report for saved history. It keeps each backend/server
+path in its own population, reports interpolated p10/median/p95/max distributions for
+download, upload, idle latency, jitter, loaded latency, and quality, and gives a
+direction-aware trend when at least six samples are available. `--scope internet` and
+`--scope lan` prevent unlike measurements from being compared; `--backend` is
+case-insensitive. The time-of-day comparison is intentionally conservative: each window
+needs at least three usable download samples spread across two distinct UTC dates.
+Missing analysis or partial loaded-latency samples remain unavailable rather than being
+treated as zero. JSON output has `schema_version: 1` and is intended for dashboards and
+automation; it never starts network activity or changes saved data.
 
 The cockpit comparison includes download, upload, latency, jitter, quality score,
 and bufferbloat, with before/after values, changes, and explicit better/worse labels.

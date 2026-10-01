@@ -42,11 +42,43 @@ fn help_is_discoverable_uncolored_and_documents_units() {
     assert!(result.status.success());
     let text = String::from_utf8(result.stdout).unwrap();
     assert!(text.contains("check"));
+    assert!(text.contains("insights"));
     assert!(text.contains("Examples:"));
     assert!(text.contains("--run"));
     assert!(text.contains("Mbps"));
     assert!(!text.contains('\x1b'));
     assert!(result.stderr.is_empty());
+}
+
+#[test]
+fn insights_is_offline_and_returns_a_versioned_empty_report() {
+    let result = run(&["insights", "--json"], None);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["period_days"], 30);
+    assert_eq!(report["runs"], 0);
+    assert_eq!(report["groups"], serde_json::json!([]));
+}
+
+#[test]
+fn insights_json_is_language_invariant() {
+    let mut baseline = None;
+    for language in speedtest_cli::i18n::Language::ALL {
+        let result = run(&["insights", "--json", "--language", language.code()], None);
+        assert!(result.status.success());
+        assert!(result.stderr.is_empty());
+        if let Some(expected) = &baseline {
+            assert_eq!(&result.stdout, expected);
+        } else {
+            baseline = Some(result.stdout);
+        }
+    }
 }
 
 #[test]

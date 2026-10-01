@@ -106,6 +106,9 @@ template slots. The same words used as server names remain data. Ping-change
 sentences have complete templates in all eight catalogs. Result quality labels and
 finding/anomaly titles are translated before being combined with their values or
 severity labels, so formatting does not prevent a catalog lookup.
+Offline history insights use the same bounded-template rule for path/time summaries:
+backend IDs, server hosts, timestamps, counts and numeric evidence are captured as data
+and never sent through translation lookup.
 Do not extend this into unconstrained string replacement over saved/user data.
 
 ```bash

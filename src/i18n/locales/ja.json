@@ -701,5 +701,32 @@
   "✓ dns returned to automatic configuration and passed post-change resolution.": "✓ DNS を自動設定に戻し、変更後の名前解決も確認しました。",
   "✓ previous dns snapshot restored and verified.": "✓ 以前の DNS 設定を復元し、確認しました。",
   "✓ resolver cache flushed and system dns verification passed.": "✓ DNS キャッシュを消去し、システムの DNS 検証に成功しました。",
-  "✓ {0} configured successfully.": "✓ {0} の設定に成功しました。"
+  "✓ {0} configured successfully.": "✓ {0} の設定に成功しました。",
+  "analyze saved runs by comparable backend/server path and time of day": "比較可能なバックエンド/サーバー経路と時間帯ごとに保存済みテストを分析します",
+  "include both internet and lan measurements.": "Internet と LAN の測定を含めます。",
+  "include only internet measurements.": "Internet の測定だけを含めます。",
+  "include only self-hosted lan measurements.": "セルフホスト LAN の測定だけを含めます。",
+  "restrict the report to one backend identifier, case-insensitively.": "大文字と小文字を区別しないバックエンド識別子でレポートを絞ります。",
+  "separate internet and lan populations instead of comparing them.": "比較せずに Internet と LAN の集団を分けます。",
+  "print the versioned report as json.": "バージョン付きレポートを JSON で出力します。",
+  "network insights": "ネットワーク分析",
+  "offline history analysis · {0} days · {1} runs": "オフライン履歴分析 · {0} 日間 · {1} 回",
+  "filter: {0} · backend: {1}": "フィルター: {0} · バックエンド: {1}",
+  "no matching saved runs. run a test and keep history enabled to build a baseline.": "一致する保存済みテストがありません。履歴を有効にしてテストを実行し、基準値を作成してください。",
+  "path {0} · {1} · {2} runs": "経路 {0} · {1} · {2} 回",
+  "{0} → {1} utc · {2} days sampled": "{0} → {1} UTC · {2} 日をサンプル",
+  "{0} median {1} {2} · p10 {3} · p95 {4} · {5}": "{0} 中央値 {1} {2} · p10 {3} · p95 {4} · {5}",
+  "time of day      {0}:00–{1}:00 utc is {2}% faster than {3}:00–{4}:00 (repeated days)": "時間帯      {0}:00–{1}:00 UTC は {3}:00–{4}:00 より {2}% 高速（複数日）",
+  "time of day      need at least 3 download samples across 2 days in two time windows.": "時間帯      2 日間の 2 つの時間帯で、少なくとも 3 件のダウンロードサンプルが必要です。",
+  "percentiles are interpolated. paths, servers, and lan/internet populations are never pooled.": "パーセンタイルは補間値です。経路、サーバー、LAN/Internet の集団は混在させません。",
+  "comparable paths": "比較可能な経路",
+  "each backend/server path has its own baseline; lan is never pooled with internet.": "各バックエンド/サーバー経路には固有の基準値があり、LAN と Internet は混在させません。"
+  ,"restrict the report to one backend identifier, case-insensitively": "大文字と小文字を区別しないバックエンド識別子でレポートを絞ります"
+  ,"separate internet and lan populations instead of comparing them": "比較せずに Internet と LAN の集団を分けます"
+  ,"print the versioned report as json": "バージョン付きレポートを JSON で出力します"
+  ,"include both internet and lan measurements": "Internet と LAN の測定を含めます"
+  ,"include only internet measurements": "Internet の測定だけを含めます"
+  ,"include only self-hosted lan measurements": "セルフホスト LAN の測定だけを含めます"
+  ,"{0} · {1} · {2} runs / {3} days": "{0} · {1} · {2} 回 / {3} 日"
+  ,"time effect: {0}:00–{1}:00 utc is {2}% faster than {3}:00–{4}:00": "時間帯の影響: {0}:00–{1}:00 UTC は {3}:00–{4}:00 より {2}% 高速"
 }

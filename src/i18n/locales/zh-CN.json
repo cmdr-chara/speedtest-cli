@@ -701,5 +701,32 @@
   "✓ dns returned to automatic configuration and passed post-change resolution.": "✓ DNS 已恢复自动配置，并通过修改后的解析验证。",
   "✓ previous dns snapshot restored and verified.": "✓ 先前 DNS 快照已恢复并验证。",
   "✓ resolver cache flushed and system dns verification passed.": "✓ 解析器缓存已清除，系统 DNS 验证通过。",
-  "✓ {0} configured successfully.": "✓ {0} 配置成功。"
+  "✓ {0} configured successfully.": "✓ {0} 配置成功。",
+  "analyze saved runs by comparable backend/server path and time of day": "按可比较的后端/服务器路径和时间段分析已保存的测试",
+  "include both internet and lan measurements.": "包含 Internet 和 LAN 测量。",
+  "include only internet measurements.": "仅包含 Internet 测量。",
+  "include only self-hosted lan measurements.": "仅包含自托管 LAN 测量。",
+  "restrict the report to one backend identifier, case-insensitively.": "按不区分大小写的后端标识符限制报告。",
+  "separate internet and lan populations instead of comparing them.": "分开 Internet 和 LAN 数据群体，而不是将它们比较。",
+  "print the versioned report as json.": "以 JSON 输出带版本报告。",
+  "network insights": "网络洞察",
+  "offline history analysis · {0} days · {1} runs": "离线历史分析 · {0} 天 · {1} 次测试",
+  "filter: {0} · backend: {1}": "筛选：{0} · 后端：{1}",
+  "no matching saved runs. run a test and keep history enabled to build a baseline.": "没有匹配的已保存测试。运行测试并保持历史记录，以建立基线。",
+  "path {0} · {1} · {2} runs": "路径 {0} · {1} · {2} 次测试",
+  "{0} → {1} utc · {2} days sampled": "{0} → {1} UTC · 已采样 {2} 天",
+  "{0} median {1} {2} · p10 {3} · p95 {4} · {5}": "{0} 中位数 {1} {2} · p10 {3} · p95 {4} · {5}",
+  "time of day      {0}:00–{1}:00 utc is {2}% faster than {3}:00–{4}:00 (repeated days)": "时间段      {0}:00–{1}:00 UTC 比 {3}:00–{4}:00 快 {2}%（重复日期）",
+  "time of day      need at least 3 download samples across 2 days in two time windows.": "时间段      需要在 2 天的两个时间窗口中至少有 3 个下载样本。",
+  "percentiles are interpolated. paths, servers, and lan/internet populations are never pooled.": "百分位数使用插值。路径、服务器以及 LAN/Internet 数据群体永不混合。",
+  "comparable paths": "可比较路径",
+  "each backend/server path has its own baseline; lan is never pooled with internet.": "每个后端/服务器路径都有自己的基线；LAN 永不与 Internet 混合。"
+  ,"restrict the report to one backend identifier, case-insensitively": "按不区分大小写的后端标识符限制报告"
+  ,"separate internet and lan populations instead of comparing them": "分开 Internet 和 LAN 数据群体，而不是将它们比较"
+  ,"print the versioned report as json": "以 JSON 输出带版本报告"
+  ,"include both internet and lan measurements": "包含 Internet 和 LAN 测量"
+  ,"include only internet measurements": "仅包含 Internet 测量"
+  ,"include only self-hosted lan measurements": "仅包含自托管 LAN 测量"
+  ,"{0} · {1} · {2} runs / {3} days": "{0} · {1} · {2} 次测试 / {3} 天"
+  ,"time effect: {0}:00–{1}:00 utc is {2}% faster than {3}:00–{4}:00": "时间影响：{0}:00–{1}:00 UTC 比 {3}:00–{4}:00 快 {2}%"
 }

@@ -701,5 +701,32 @@
   "✓ dns returned to automatic configuration and passed post-change resolution.": "✓ DNS returned to automatic configuration and passed post-change resolution.",
   "✓ previous dns snapshot restored and verified.": "✓ Previous DNS snapshot restored and verified.",
   "✓ resolver cache flushed and system dns verification passed.": "✓ Resolver cache flushed and system DNS verification passed.",
-  "✓ {0} configured successfully.": "✓ {0} configured successfully."
+  "✓ {0} configured successfully.": "✓ {0} configured successfully.",
+  "analyze saved runs by comparable backend/server path and time of day": "Analyze saved runs by comparable backend/server path and time of day",
+  "include both internet and lan measurements.": "Include both Internet and LAN measurements.",
+  "include only internet measurements.": "Include only Internet measurements.",
+  "include only self-hosted lan measurements.": "Include only self-hosted LAN measurements.",
+  "restrict the report to one backend identifier, case-insensitively.": "Restrict the report to one backend identifier, case-insensitively.",
+  "separate internet and lan populations instead of comparing them.": "Separate Internet and LAN populations instead of comparing them.",
+  "print the versioned report as json.": "Print the versioned report as JSON.",
+  "network insights": "NETWORK INSIGHTS",
+  "offline history analysis · {0} days · {1} runs": "OFFLINE HISTORY ANALYSIS · {0} DAYS · {1} RUNS",
+  "filter: {0} · backend: {1}": "FILTER: {0} · BACKEND: {1}",
+  "no matching saved runs. run a test and keep history enabled to build a baseline.": "No matching saved runs. Run a test and keep history enabled to build a baseline.",
+  "path {0} · {1} · {2} runs": "PATH {0} · {1} · {2} RUNS",
+  "{0} → {1} utc · {2} days sampled": "{0} → {1} UTC · {2} DAYS SAMPLED",
+  "{0} median {1} {2} · p10 {3} · p95 {4} · {5}": "{0} median {1} {2} · p10 {3} · p95 {4} · {5}",
+  "time of day      {0}:00–{1}:00 utc is {2}% faster than {3}:00–{4}:00 (repeated days)": "TIME OF DAY      {0}:00–{1}:00 UTC is {2}% faster than {3}:00–{4}:00 (repeated days)",
+  "time of day      need at least 3 download samples across 2 days in two time windows.": "TIME OF DAY      Need at least 3 download samples across 2 days in two time windows.",
+  "percentiles are interpolated. paths, servers, and lan/internet populations are never pooled.": "Percentiles are interpolated. Paths, servers, and LAN/Internet populations are never pooled.",
+  "comparable paths": "COMPARABLE PATHS",
+  "each backend/server path has its own baseline; lan is never pooled with internet.": "Each backend/server path has its own baseline; LAN is never pooled with Internet."
+  ,"restrict the report to one backend identifier, case-insensitively": "Restrict the report to one backend identifier, case-insensitively"
+  ,"separate internet and lan populations instead of comparing them": "Separate Internet and LAN populations instead of comparing them"
+  ,"print the versioned report as json": "Print the versioned report as JSON"
+  ,"include both internet and lan measurements": "Include both Internet and LAN measurements"
+  ,"include only internet measurements": "Include only Internet measurements"
+  ,"include only self-hosted lan measurements": "Include only self-hosted LAN measurements"
+  ,"{0} · {1} · {2} runs / {3} days": "{0} · {1} · {2} runs / {3} days"
+  ,"time effect: {0}:00–{1}:00 utc is {2}% faster than {3}:00–{4}:00": "Time effect: {0}:00–{1}:00 UTC is {2}% faster than {3}:00–{4}:00"
 }

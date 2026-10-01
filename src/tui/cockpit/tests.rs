@@ -1058,7 +1058,7 @@ fn comfortable_metrics_are_large_and_compact_values_remain_exact() {
     let mut app = app();
     app.result = Some(result());
     app.push(Screen::Results);
-    let text = render(&mut app, 120, 38).0;
+    let text = render(&mut app, 214, 52).0;
     assert!(
         text.contains("███"),
         "five-row metric digits must be visible"
@@ -1161,6 +1161,31 @@ fn short_summaries_keep_controls_nearby_and_long_results_remain_scrollable() {
     assert!(text.contains("400.0 Mbps"));
     assert!(app.page().scroll > 0);
     assert!(text.lines().nth(50).unwrap().contains("quit"));
+}
+
+#[test]
+fn statistics_explains_comparable_paths_without_pooling_lan_samples() {
+    let mut app = app();
+    let mut internet = result();
+    internet.backend = "cloudflare".into();
+    internet.server.host = "speed.cloudflare.com".into();
+    internet.download.mbps = 100.0;
+    let mut later = internet.clone();
+    later.timestamp += chrono::Duration::days(1);
+    later.download.mbps = 120.0;
+    let mut lan = internet.clone();
+    lan.backend = "lan".into();
+    lan.download.mbps = 20_000.0;
+    app.set_history(Ok(Archive::from_results(vec![internet, later, lan])));
+    app.push(Screen::Statistics);
+
+    let text = render(&mut app, 120, 38).0;
+    assert!(text.contains("COMPARABLE PATHS"), "{text}");
+    assert!(text.contains("speed.cloudflare.com"), "{text}");
+    assert!(
+        !text.contains("20000.0"),
+        "LAN sample leaked into Internet stats: {text}"
+    );
 }
 
 #[test]

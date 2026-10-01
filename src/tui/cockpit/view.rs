@@ -1148,6 +1148,7 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
         let data: Vec<_> = archive
             .results
             .iter()
+            .filter(|result| crate::history::matches_scope(result, summary.scope))
             .rev()
             .take(60)
             .collect::<Vec<_>>()
@@ -1244,6 +1245,63 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
             ),
             t.base().fg(t.warning),
         ));
+    }
+    let comparable_paths: Vec<_> = archive
+        .insights
+        .groups
+        .iter()
+        .filter(|group| group.scope == summary.scope)
+        .collect();
+    if !comparable_paths.is_empty() {
+        lines.extend([
+            Line::default(),
+            Line::styled(ui("COMPARABLE PATHS"), t.strong()),
+            Line::styled(
+                ui("Each backend/server path has its own baseline; LAN is never pooled with Internet."),
+                t.muted(),
+            ),
+        ]);
+        for group in comparable_paths.iter().take(6) {
+            lines.push(Line::styled(
+                ui(format!(
+                    "{} · {} · {} runs / {} days",
+                    single(&group.backend),
+                    single(&group.server_host),
+                    group.runs,
+                    group.sampled_days
+                )),
+                t.focus(),
+            ));
+            let metrics: Vec<_> = group
+                .metrics
+                .iter()
+                .filter_map(|metric| {
+                    metric.distribution.as_ref().map(|distribution| {
+                        format!(
+                            "{} {:.1} {} (p95 {:.1})",
+                            ui(metric.metric.label()),
+                            distribution.median,
+                            metric.unit,
+                            distribution.p95
+                        )
+                    })
+                })
+                .take(4)
+                .collect();
+            if !metrics.is_empty() {
+                lines.push(Line::from(ui(metrics.join(" · "))));
+            }
+            if let Some(time) = &group.time_of_day_comparison {
+                lines.push(Line::from(ui(format!(
+                    "Time effect: {:02}:00–{:02}:00 UTC is {:.1}% faster than {:02}:00–{:02}:00",
+                    time.fastest_start_hour_utc,
+                    time.fastest_start_hour_utc + 6,
+                    time.download_gap_percent,
+                    time.slowest_start_hour_utc,
+                    time.slowest_start_hour_utc + 6
+                ))));
+            }
+        }
     }
     let used = scroll(frame, app, t, parts[1], lines);
     parts[1].y - top + used.saturating_add(1).min(parts[1].height)

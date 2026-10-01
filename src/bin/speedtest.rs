@@ -11,8 +11,8 @@ use speedtest_cli::{
         CheckArgs, Cli, ColorMode, Command, CompareArgs, DnsArgs, DnsBenchmarkArgs,
         DnsBenchmarkProfileArg, DnsCommand, DnsListArgs, DnsOptimizeArgs, DnsProtocolArg,
         DnsResetArgs, DnsRollbackArgs, DnsSetArgs, DnsShowArgs, DnsTestArgs, DoctorArgs,
-        HistoryArgs, InternetBackendArg, LanArgs, LossArgs, ServeArgs, StabilityArgs, StatsArgs,
-        VerifyArgs, WifiArgs,
+        HistoryArgs, InsightsArgs, InsightsScopeArg, InternetBackendArg, LanArgs, LossArgs,
+        ServeArgs, StabilityArgs, StatsArgs, VerifyArgs, WifiArgs,
     },
     compare::{self, CompareResult},
     dns::{self, BenchmarkProfile, DnsBenchmarkResult, DnsProviderBenchmark},
@@ -20,7 +20,9 @@ use speedtest_cli::{
     doctor::{self, DoctorReport},
     engine::{cloudflare::CloudflareEngine, internet::InternetEngine, EngineConfig, EngineEvent},
     history::{self, HistorySummary},
-    i18n, lan, loss,
+    i18n,
+    insights::{self, InsightsReport},
+    lan, loss,
     model::TestResult,
     output, runtime,
     session::TestOptions,
@@ -162,6 +164,7 @@ async fn dispatch(mut cli: Cli) -> Result<()> {
         }
         Some(Command::History(args)) => run_history(args),
         Some(Command::Stats(args)) => run_stats(args),
+        Some(Command::Insights(args)) => run_insights(args),
         Some(Command::Dns(args)) => run_dns(args).await,
         Some(Command::Compare(args)) => run_compare(args),
         Some(Command::Doctor(args)) => run_doctor(args).await,
@@ -324,6 +327,145 @@ fn run_stats(args: StatsArgs) -> Result<()> {
         print_stats(&summary)?;
     }
     Ok(())
+}
+
+fn run_insights(args: InsightsArgs) -> Result<()> {
+    let history = storage::load_history_since(args.days)?;
+    let selection = history::HistorySelection {
+        scope: match args.scope {
+            InsightsScopeArg::All => None,
+            InsightsScopeArg::Internet => Some(history::HistoryScope::Internet),
+            InsightsScopeArg::Lan => Some(history::HistoryScope::Lan),
+        },
+        backend: args.backend.clone(),
+    };
+    let selected = selection.select(&history);
+    let report = insights::analyze(&selected, args.days);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_insights(&report, args.scope, args.backend.as_deref())?;
+    }
+    Ok(())
+}
+
+fn print_insights(
+    report: &InsightsReport,
+    scope: InsightsScopeArg,
+    backend: Option<&str>,
+) -> Result<()> {
+    println!("{}", tr("NETWORK INSIGHTS"));
+    println!(
+        "{}",
+        msg(
+            "OFFLINE HISTORY ANALYSIS · {0} DAYS · {1} RUNS",
+            &[report.period_days.to_string(), report.runs.to_string()]
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "FILTER: {0} · BACKEND: {1}",
+            &[
+                match scope {
+                    InsightsScopeArg::All => "all".to_string(),
+                    InsightsScopeArg::Internet => "internet".to_string(),
+                    InsightsScopeArg::Lan => "lan".to_string(),
+                },
+                backend.unwrap_or("all").to_string(),
+            ],
+        )
+    );
+    if report.groups.is_empty() {
+        println!();
+        println!(
+            "{}",
+            tr("No matching saved runs. Run a test and keep history enabled to build a baseline.")
+        );
+        return Ok(());
+    }
+    for group in &report.groups {
+        println!();
+        println!(
+            "{}",
+            msg(
+                "PATH {0} · {1} · {2} RUNS",
+                &[
+                    group.backend.clone(),
+                    group.server_host.clone(),
+                    group.runs.to_string(),
+                ],
+            )
+        );
+        println!(
+            "{}",
+            msg(
+                "  {0} → {1} UTC · {2} DAYS SAMPLED",
+                &[
+                    group.first_timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                    group.last_timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                    group.sampled_days.to_string(),
+                ],
+            )
+        );
+        for metric in &group.metrics {
+            let Some(distribution) = &metric.distribution else {
+                continue;
+            };
+            let trend = metric.recent_change_percent.map_or_else(
+                || "insufficient data".to_string(),
+                |change| format!("{} {:+.1}%", tr(metric.trend.label()), change),
+            );
+            println!(
+                "{}",
+                msg(
+                    "  {0} median {1} {2} · p10 {3} · p95 {4} · {5}",
+                    &[
+                        format!("{:<16}", tr(metric.metric.label())),
+                        format!("{:>8}", format_value(distribution.median)),
+                        format!("{:<4}", metric.unit),
+                        format!("{:>8}", format_value(distribution.p10)),
+                        format!("{:>8}", format_value(distribution.p95)),
+                        trend,
+                    ],
+                )
+            );
+        }
+        if let Some(comparison) = &group.time_of_day_comparison {
+            println!(
+                "{}",
+                msg(
+                    "  TIME OF DAY      {0}:00–{1}:00 UTC is {2}% faster than {3}:00–{4}:00 (repeated days)",
+                    &[
+                        format!("{:02}", comparison.fastest_start_hour_utc),
+                        format!("{:02}", comparison.fastest_start_hour_utc + 6),
+                        format!("{:.1}", comparison.download_gap_percent),
+                        format!("{:02}", comparison.slowest_start_hour_utc),
+                        format!("{:02}", comparison.slowest_start_hour_utc + 6),
+                    ],
+                )
+            );
+        } else {
+            println!(
+                "{}",
+                tr("  TIME OF DAY      Need at least 3 download samples across 2 days in two time windows.")
+            );
+        }
+    }
+    println!();
+    println!(
+        "{}",
+        tr("  Percentiles are interpolated. Paths, servers, and LAN/Internet populations are never pooled.")
+    );
+    Ok(())
+}
+
+fn format_value(value: f64) -> String {
+    if value >= 1_000.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
 }
 
 async fn run_dns(args: DnsArgs) -> Result<()> {
@@ -810,13 +952,10 @@ fn run_compare(args: CompareArgs) -> Result<()> {
         }
         (None, None) => {
             let history = storage::load_history()?;
-            if history.len() < 2 {
+            let Some((before, after)) = history::latest_comparable_pair(&history) else {
                 bail!("compare requires two saved results or explicit BEFORE and AFTER JSON files");
-            }
-            (
-                history[history.len() - 2].clone(),
-                history[history.len() - 1].clone(),
-            )
+            };
+            (before, after)
         }
         _ => bail!("supply both BEFORE and AFTER JSON files, or omit both"),
     };
