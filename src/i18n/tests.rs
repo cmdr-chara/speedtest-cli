@@ -198,6 +198,33 @@ fn recognized_narrative_templates_preserve_numeric_evidence() {
 }
 
 #[test]
+fn insights_narrative_templates_translate_owned_words_without_translating_paths() {
+    for language in Language::ALL
+        .into_iter()
+        .filter(|language| *language != Language::En)
+    {
+        let path = narrative(language, "cloudflare · speed.example · 2 runs / 3 days");
+        assert!(path.contains("cloudflare"));
+        assert!(path.contains("speed.example"));
+        assert!(path.contains("2"));
+        assert!(path.contains("3"));
+        assert_ne!(path, "cloudflare · speed.example · 2 runs / 3 days");
+
+        let time = narrative(
+            language,
+            "Time effect: 06:00–12:00 UTC is 25.0% faster than 18:00–24:00",
+        );
+        for value in ["06", "12", "25.0", "18", "24"] {
+            assert!(time.contains(value), "{}: {time}", language.code());
+        }
+        assert_ne!(
+            time,
+            "Time effect: 06:00–12:00 UTC is 25.0% faster than 18:00–24:00"
+        );
+    }
+}
+
+#[test]
 fn render_scope_is_nested_thread_local_and_does_not_change_cli_language() {
     let before = cli_language();
     let _outer = scope(Language::It);

@@ -701,5 +701,32 @@
   "✓ dns returned to automatic configuration and passed post-change resolution.": "✓ DNS rétabli en mode automatique ; résolution vérifiée.",
   "✓ previous dns snapshot restored and verified.": "✓ Sauvegarde DNS précédente restaurée et vérifiée.",
   "✓ resolver cache flushed and system dns verification passed.": "✓ Cache DNS vidé ; vérification du DNS système réussie.",
-  "✓ {0} configured successfully.": "✓ {0} configuré avec succès."
+  "✓ {0} configured successfully.": "✓ {0} configuré avec succès.",
+  "analyze saved runs by comparable backend/server path and time of day": "Analysez les mesures enregistrées par chemin backend/serveur comparable et heure de la journée",
+  "include both internet and lan measurements.": "Inclure les mesures Internet et LAN.",
+  "include only internet measurements.": "Inclure uniquement les mesures Internet.",
+  "include only self-hosted lan measurements.": "Inclure uniquement les mesures LAN auto-hébergées.",
+  "restrict the report to one backend identifier, case-insensitively.": "Limiter le rapport à un identifiant backend, sans distinguer les majuscules.",
+  "separate internet and lan populations instead of comparing them.": "Séparer les populations Internet et LAN au lieu de les comparer.",
+  "print the versioned report as json.": "Afficher le rapport versionné en JSON.",
+  "network insights": "ANALYSE RÉSEAU",
+  "offline history analysis · {0} days · {1} runs": "ANALYSE HORS LIGNE DE L’HISTORIQUE · {0} JOURS · {1} MESURES",
+  "filter: {0} · backend: {1}": "FILTRE : {0} · BACKEND : {1}",
+  "no matching saved runs. run a test and keep history enabled to build a baseline.": "Aucune mesure enregistrée correspondante. Lancez un test en gardant l’historique actif pour créer une référence.",
+  "path {0} · {1} · {2} runs": "CHEMIN {0} · {1} · {2} MESURES",
+  "{0} → {1} utc · {2} days sampled": "{0} → {1} UTC · {2} JOURS ÉCHANTILLONNÉS",
+  "{0} median {1} {2} · p10 {3} · p95 {4} · {5}": "{0} médiane {1} {2} · p10 {3} · p95 {4} · {5}",
+  "time of day      {0}:00–{1}:00 utc is {2}% faster than {3}:00–{4}:00 (repeated days)": "HEURE DE LA JOURNÉE      {0}:00–{1}:00 UTC est {2}% plus rapide que {3}:00–{4}:00 (jours répétés)",
+  "time of day      need at least 3 download samples across 2 days in two time windows.": "HEURE DE LA JOURNÉE      Il faut au moins 3 échantillons de téléchargement sur 2 jours et deux créneaux.",
+  "percentiles are interpolated. paths, servers, and lan/internet populations are never pooled.": "Les percentiles sont interpolés. Les chemins, serveurs et populations LAN/Internet ne sont jamais mélangés.",
+  "comparable paths": "CHEMINS COMPARABLES",
+  "each backend/server path has its own baseline; lan is never pooled with internet.": "Chaque chemin backend/serveur a sa propre référence ; le LAN n’est jamais mélangé à Internet."
+  ,"restrict the report to one backend identifier, case-insensitively": "Limiter le rapport à un identifiant backend, sans distinguer les majuscules"
+  ,"separate internet and lan populations instead of comparing them": "Séparer les populations Internet et LAN au lieu de les comparer"
+  ,"print the versioned report as json": "Afficher le rapport versionné en JSON"
+  ,"include both internet and lan measurements": "Inclure les mesures Internet et LAN"
+  ,"include only internet measurements": "Inclure uniquement les mesures Internet"
+  ,"include only self-hosted lan measurements": "Inclure uniquement les mesures LAN auto-hébergées"
+  ,"{0} · {1} · {2} runs / {3} days": "{0} · {1} · {2} mesures / {3} jours"
+  ,"time effect: {0}:00–{1}:00 utc is {2}% faster than {3}:00–{4}:00": "Effet horaire : {0}:00–{1}:00 UTC est {2}% plus rapide que {3}:00–{4}:00"
 }
