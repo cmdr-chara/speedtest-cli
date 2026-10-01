@@ -8,7 +8,7 @@ use tokio::{
     time::{timeout, Instant},
 };
 
-use crate::analysis;
+use crate::{analysis, engine::AddressFamily};
 
 use super::{
     finalize_score, grade_for_score, median_or_inf, percent, providers_for_profile,
@@ -17,12 +17,21 @@ use super::{
 };
 
 pub async fn benchmark(profile: BenchmarkProfile, queries: usize) -> Result<DnsBenchmarkResult> {
+    benchmark_with_family(profile, queries, AddressFamily::Any).await
+}
+
+pub async fn benchmark_with_family(
+    profile: BenchmarkProfile,
+    queries: usize,
+    family: AddressFamily,
+) -> Result<DnsBenchmarkResult> {
     let queries = queries.clamp(3, 100);
     let client = Client::builder()
         .user_agent(concat!("speedtest-cli/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(4))
         .timeout(Duration::from_secs(6))
         .pool_max_idle_per_host(2)
+        .local_address(family.local_address())
         .build()
         .context("failed to build DoH client")?;
     let mut workers = JoinSet::new();
@@ -32,7 +41,7 @@ pub async fn benchmark(profile: BenchmarkProfile, queries: usize) -> Result<DnsB
         .filter(|provider| provider.doh.is_some())
     {
         let client = client.clone();
-        workers.spawn(async move { benchmark_provider(&client, provider, queries).await });
+        workers.spawn(async move { benchmark_provider(&client, provider, queries, family).await });
     }
 
     let mut raw_entries = Vec::new();
@@ -76,6 +85,7 @@ async fn benchmark_provider(
     client: &Client,
     provider: &'static DnsProvider,
     queries: usize,
+    family: AddressFamily,
 ) -> RawBenchmark {
     let endpoint = provider.doh.expect("DoH provider filtered before worker");
     let _ = query_doh(client, endpoint, TEST_DOMAINS[0]).await;
@@ -93,7 +103,8 @@ async fn benchmark_provider(
         provider_name: provider.provider.to_string(),
         profile_name: provider.profile.to_string(),
         category: provider.category,
-        servers: provider.addresses(false),
+        servers: provider
+            .addresses_for_routes(family != AddressFamily::Ipv6, family != AddressFamily::Ipv4),
         queries,
         successes: samples.len(),
         samples,

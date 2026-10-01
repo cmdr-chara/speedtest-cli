@@ -15,12 +15,17 @@ A fast, polished terminal network quality analyzer written in Rust.
 - Rare `◆ S-TIER` distinction for exceptional high-confidence runs
 - Bufferbloat and workload analysis for gaming, calls, streaming, and cloud gaming
 - Long-running stability mode
+- Guided connection diagnosis with workload-specific recommendations
+- Repeated JSONL monitoring with bounded intervals and explicit failure records
 - History, trends, sparklines, and anomaly detection
 - DNS inspection, health testing, benchmarking, configuration, rollback, and optimization
 - 20 built-in DNS resolver profiles across multiple providers
 - DNS-over-UDP and real DNS-over-HTTPS benchmarking
+- DNS-over-TLS and DNS-over-QUIC benchmarking where providers advertise support
 - Cloudflare and LibreSpeed Internet backends
 - Backend cross-checking with `speedtest verify`
+- Explicit IPv4/IPv6 selection and backend A/B comparison
+- TCP/TLS decomposition plus HTTP/2 and HTTP/3 capability probes
 - Real ICMP echo response-loss measurement with `speedtest loss`
 - Native Wi-Fi diagnostics on Windows, macOS, and Linux
 - Built-in self-hosted LAN speed-test server/client
@@ -89,8 +94,8 @@ when an operation starts, not while browsing the menu.
 DNS and diagnostic tools have a separate **Ready to start** screen. They run the
 existing read-only commands and show their reports in scrollable panels, with bounded
 output, timeout, cancellation, and retry. Available tools include DNS configuration
-inspection/catalog/testing/UDP and DoH benchmarks, Network Doctor, Wi-Fi, ICMP loss,
-stability monitoring, and backend verification. They do **not** change DNS settings;
+inspection/catalog/testing/UDP, DoH, DoT, and DoQ benchmarks, Network Doctor, guided
+diagnosis, Wi-Fi, ICMP loss, stability monitoring, and backend verification. They do **not** change DNS settings;
 configuration/rollback and all specialized options remain available through the
 unchanged CLI subcommands. Stability in the menu runs for 60 seconds without saving.
 
@@ -209,9 +214,14 @@ Use both Internet engines to check whether a result is strongly backend/path dep
 speedtest verify
 speedtest verify --duration 8 --streams 2
 speedtest verify --json
+speedtest verify --family ipv4
+speedtest verify --compare-families --json
 ```
 
 `verify` compares Cloudflare and LibreSpeed results rather than assuming a single public endpoint is ground truth.
+Use `--family ipv4` or `--family ipv6` to constrain both backend runs. `--compare-families`
+runs an additional IPv4/IPv6 A/B pass and records unavailable families explicitly; it can
+take substantially longer than a normal verification.
 
 ### Real ICMP response loss
 
@@ -300,6 +310,19 @@ speedtest dns benchmark --profile privacy --protocol doh
 
 DoH benchmarking performs connection warm-up separately so the measured query distribution is not simply the first TCP/TLS handshake time.
 
+Benchmark encrypted stream transports when the provider registry advertises them:
+
+```bash
+speedtest dns benchmark --protocol dot
+speedtest dns benchmark --protocol doq
+speedtest dns benchmark --protocol dot --family ipv6 --json
+```
+
+DoT validates the TLS certificate and sends length-prefixed DNS messages over TCP.
+DoQ uses a QUIC bidirectional stream with the `doq` ALPN and validates the DNS response
+length and contents. These probes are opt-in network operations; a resolver that does not
+advertise the selected transport is omitted rather than treated as a failed UDP resolver.
+
 UDP, DoH, and explicit-resolver probes share the same response validation. A success
 requires a complete answer to the requested A/IN question, with matching transaction
 ID and name and a usable address either directly or through a valid CNAME chain.
@@ -342,6 +365,46 @@ speedtest doctor --json
 ```
 
 The lightweight doctor checks route/interface state, gateway latency where available, IPv4/IPv6 reachability, DNS health, HTTPS, and platform network context. `--full` also runs throughput/bufferbloat analysis.
+
+### Guided connection diagnosis
+
+Use `diagnose` when you want an ordered assessment rather than a single raw measurement:
+
+```bash
+speedtest diagnose
+speedtest diagnose --profile calls
+speedtest diagnose --profile gaming --family ipv4 --no-stability --json
+speedtest diagnose --backend librespeed --librespeed-server https://speed.example.test
+```
+
+The command combines the read-only Doctor checks with an optional stability run, a normal
+throughput result, VPN/interface hints, path-MTU probing, DNS/TCP/HTTPS timing, and explicit
+HTTP/2/HTTP/3 probes. `--no-stability` and `--no-speedtest` are useful for a narrower pass.
+It never changes DNS configuration. Throughput uses the normal history/export policy, while
+the aggregate diagnosis is printed or serialized as its own versioned report.
+
+### Repeated monitoring
+
+`monitor` runs the normal Internet engine at a controlled cadence and writes one versioned
+JSON object per attempt:
+
+```bash
+speedtest monitor --count 4 --interval 15m --json --output monitor.jsonl --no-save
+speedtest monitor --backend librespeed --family ipv6 --continue-on-error
+```
+
+Without `--count`, monitoring continues until Ctrl+C. A failed attempt is recorded with
+`ok: false` and an `error` field; `--continue-on-error` keeps the schedule running but the
+command still exits nonzero after a bounded run if any attempt failed. The monitor file is
+append-only and uses the same locking guarantees as history.
+
+### Path and transport interpretation
+
+The guided report's VPN hint is interface-name evidence, not a claim that traffic is or is
+not encrypted. MTU probing uses platform `ping` flags and can be unavailable when ICMP is
+blocked or the native utility is missing. HTTP/2 and HTTP/3 are tested against a fixed
+Cloudflare endpoint with certificate verification enabled; failure can reflect endpoint,
+firewall, proxy, or QUIC policy rather than a general connection outage.
 
 Compare the two latest saved runs:
 
@@ -448,6 +511,10 @@ sudo install -m 0755 "speedtest-macos-${ASSET}/speedtest" /usr/local/bin/speedte
 
 Each packaged release includes SHA-256 checksum files.
 
+Release jobs also generate a Homebrew formula and WinGet manifests from the published archive
+checksums. These are reviewable submission artifacts, not a claim that an external package
+repository has already accepted or published them.
+
 ### Install from source
 
 ```bash
@@ -476,6 +543,7 @@ Main options:
 ```text
 --run                        bypass the menu and start immediately
 --backend <BACKEND>          cloudflare or librespeed
+--family <FAMILY>            any, ipv4, or ipv6
 --librespeed-server <URL>    custom LibreSpeed base URL
 --streams <N>                concurrent transfer streams (default: 2)
 --duration <SEC>             seconds for each throughput phase (default: 8)
@@ -504,7 +572,7 @@ speedtest --plain --progress always --no-save > result.txt 2> progress.log
 speedtest --color never
 ```
 
-`--timeout` bounds the default Internet measurement, including server selection. Ctrl+C cancels default, stability, verify, LAN, server, and loss operations; owned network work is dropped and terminal state is restored. Configuration-changing DNS operations retain their existing rollback lifecycle rather than being interrupted halfway through a write. DNS confirmation without a terminal fails with guidance to use `--dry-run` or an explicit `--yes`.
+`--timeout` bounds the default Internet measurement, including server selection. Ctrl+C cancels default, stability, verify, diagnose, monitor, LAN, server, and loss operations; owned network work is dropped and terminal state is restored. Configuration-changing DNS operations retain their existing rollback lifecycle rather than being interrupted halfway through a write. DNS confirmation without a terminal fails with guidance to use `--dry-run` or an explicit `--yes`.
 
 | Exit | Meaning |
 | --- | --- |
@@ -517,7 +585,7 @@ speedtest --color never
 
 In JSON mode, runtime failures emit `{"error":{"code":1,"message":"..."}}` on **stderr**, without a success result on stdout. Usage errors remain human-readable on stderr. In immediate CLI runs, explicit file exports and automatic persistence must succeed before a completed default/stability result is printed. The menu instead retains the completed result on screen and labels a save/export failure explicitly. A broken pipe is handled without a panic/backtrace; it does not roll back already completed persistence.
 
-Color/progress flags are global. Measurement flags are command-specific: use `speedtest verify --duration 5`, not `speedtest --duration 5 verify`. Options that would otherwise be silently ignored before a subcommand are rejected. `--format` requires `--output`, and `--librespeed-server` requires `--backend librespeed`; these mistakes fail before any measurement starts.
+Color/progress flags are global. Measurement flags are command-specific: use `speedtest verify --duration 5`, `speedtest diagnose --family ipv4`, or `speedtest monitor --interval 15m`, not `speedtest --duration 5 verify`. Options that would otherwise be silently ignored before a subcommand are rejected. `--format` requires `--output`, and `--librespeed-server` requires `--backend librespeed`; these mistakes fail before any measurement starts.
 
 ## Offline checks for scripts
 
@@ -608,9 +676,11 @@ speedtest/
 ├── results/
 ├── dns/
 │   └── last-backup.json
-└── stability/
-    ├── history.jsonl
-    └── results/
+├── stability/
+│   ├── history.jsonl
+│   └── results/
+└── monitor/
+    └── history.jsonl
 ```
 
 ## Architecture
@@ -622,6 +692,7 @@ src/
 │   └── speedtest.rs
 ├── dns/
 │   ├── doh.rs
+│   ├── secure.rs
 │   ├── mod.rs
 │   └── system.rs
 ├── engine/
@@ -630,17 +701,21 @@ src/
 │   ├── librespeed.rs
 │   └── mod.rs
 ├── compare.rs
+├── diagnose.rs
 ├── doctor.rs
 ├── history.rs
 ├── lan.rs
 ├── loss.rs
 ├── model/
+├── monitor.rs
+├── network.rs
 ├── stability.rs
 ├── storage/
 ├── tui/
 │   ├── cockpit/            # reducer, runtime, views, theme, read-only adapters
 │   └── speedometer/        # shared live gauge and physics
 ├── verify.rs
+├── transport.rs
 ├── wifi.rs
 └── lib.rs
 ```
@@ -661,16 +736,11 @@ See [the assessment, competitive research, prioritized plan, and remaining risks
 
 ## Roadmap
 
-- deeper IPv4 vs IPv6 A/B workflow
-- VPN on/off comparison workflow
-- MTU and fragmentation diagnostics
-- TCP/TLS handshake decomposition
-- HTTP/2 vs HTTP/3 / QUIC diagnostics
-- DoT and DoQ active benchmarks
+- VPN on/off comparison workflow (the guided report provides interface hints; controlled on/off automation remains future work)
 - additional Internet measurement backends and server discovery
 - configurable but restrained TUI themes
-- Homebrew and WinGet packages
+- upstream acceptance of the generated Homebrew and WinGet submission metadata
 
 ## License
 
-MIT
+See the [Source Available License 1.0](../LICENSE) and the [plain-English summary](../README.md#license-in-plain-english). The summary is explanatory only; the full license controls.

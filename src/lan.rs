@@ -75,6 +75,7 @@ pub async fn run(server: SocketAddr, config: LanConfig) -> Result<TestResult> {
     crate::engine::EngineConfig {
         streams: config.streams,
         phase_duration: config.phase_duration,
+        family: crate::engine::AddressFamily::Any,
     }
     .validate()?;
     let mut idle_samples = Vec::with_capacity(IDLE_SAMPLES);

@@ -173,6 +173,7 @@ async fn an_expired_sampler_emits_no_throughput() {
         config: EngineConfig {
             streams: 1,
             phase_duration: Duration::from_secs(1),
+            family: crate::engine::AddressFamily::Any,
         },
         server: None,
     };

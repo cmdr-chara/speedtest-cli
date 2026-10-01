@@ -4,17 +4,20 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::Utc;
 use clap::{CommandFactory, FromArgMatches};
 use speedtest_cli::{
     check,
     cli::{
-        CheckArgs, Cli, ColorMode, Command, CompareArgs, DnsArgs, DnsBenchmarkArgs,
-        DnsBenchmarkProfileArg, DnsCommand, DnsListArgs, DnsOptimizeArgs, DnsProtocolArg,
-        DnsResetArgs, DnsRollbackArgs, DnsSetArgs, DnsShowArgs, DnsTestArgs, DoctorArgs,
-        HistoryArgs, InsightsArgs, InsightsScopeArg, InternetBackendArg, LanArgs, LossArgs,
-        ServeArgs, StabilityArgs, StatsArgs, VerifyArgs, WifiArgs,
+        CheckArgs, Cli, ColorMode, Command, CompareArgs, DiagnoseArgs, DiagnosisProfileArg,
+        DnsArgs, DnsBenchmarkArgs, DnsBenchmarkProfileArg, DnsCommand, DnsListArgs,
+        DnsOptimizeArgs, DnsProtocolArg, DnsResetArgs, DnsRollbackArgs, DnsSetArgs, DnsShowArgs,
+        DnsTestArgs, DoctorArgs, HistoryArgs, InsightsArgs, InsightsScopeArg, InternetBackendArg,
+        LanArgs, LossArgs, MeasurementArgs, MonitorArgs, ServeArgs, StabilityArgs, StatsArgs,
+        VerifyArgs, WifiArgs,
     },
     compare::{self, CompareResult},
+    diagnose::{self, DiagnosisProfile},
     dns::{self, BenchmarkProfile, DnsBenchmarkResult, DnsProviderBenchmark},
     dns_custom,
     doctor::{self, DoctorReport},
@@ -24,6 +27,7 @@ use speedtest_cli::{
     insights::{self, InsightsReport},
     lan, loss,
     model::TestResult,
+    monitor::MonitorRecord,
     output, runtime,
     session::TestOptions,
     stability::{self, StabilityResult},
@@ -84,6 +88,7 @@ async fn main() -> std::process::ExitCode {
             "run",
             "timeout",
             "backend",
+            "family",
             "librespeed_server",
             "streams",
             "duration",
@@ -101,6 +106,27 @@ async fn main() -> std::process::ExitCode {
         }
     }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let invalid_measurement_server = match &cli.command {
+        Some(Command::Diagnose(args)) => args
+            .measurement
+            .librespeed_server
+            .as_ref()
+            .is_some_and(|_| !matches!(args.measurement.backend, InternetBackendArg::Librespeed)),
+        Some(Command::Monitor(args)) => args
+            .measurement
+            .librespeed_server
+            .as_ref()
+            .is_some_and(|_| !matches!(args.measurement.backend, InternetBackendArg::Librespeed)),
+        _ => false,
+    };
+    if invalid_measurement_server {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--librespeed-server requires --backend librespeed; no measurement was started",
+            )
+            .exit();
+    }
     if cli.command.is_none()
         && cli.librespeed_server.is_some()
         && !matches!(cli.backend, InternetBackendArg::Librespeed)
@@ -120,6 +146,8 @@ async fn main() -> std::process::ExitCode {
         None | Some(Command::Stability(_))
             | Some(Command::Loss(_))
             | Some(Command::Verify(_))
+            | Some(Command::Diagnose(_))
+            | Some(Command::Monitor(_))
             | Some(Command::Lan(_))
             | Some(Command::Serve(_))
     );
@@ -168,6 +196,8 @@ async fn dispatch(mut cli: Cli) -> Result<()> {
         Some(Command::Dns(args)) => run_dns(args).await,
         Some(Command::Compare(args)) => run_compare(args),
         Some(Command::Doctor(args)) => run_doctor(args).await,
+        Some(Command::Diagnose(args)) => run_diagnose(args, cli.clone()).await,
+        Some(Command::Monitor(args)) => run_monitor(args, cli).await,
         Some(Command::Loss(args)) => run_loss(args).await,
         Some(Command::Wifi(args)) => run_wifi(args),
         Some(Command::Verify(args)) => run_verify(args).await,
@@ -614,14 +644,52 @@ async fn run_dns_test(args: DnsTestArgs) -> Result<()> {
 
 async fn run_dns_benchmark(args: DnsBenchmarkArgs) -> Result<()> {
     let profile = dns_profile(args.profile);
-    let result = match args.protocol {
-        DnsProtocolArg::Udp => dns::benchmark(profile, usize::from(args.queries)).await?,
-        DnsProtocolArg::Doh => dns::doh::benchmark(profile, usize::from(args.queries)).await?,
-    };
-    if args.json {
-        println!("{}", result.pretty_json()?);
-    } else {
-        print_dns_benchmark(&result)?;
+    match args.protocol {
+        DnsProtocolArg::Udp => {
+            let result = dns::benchmark_with_family(
+                profile,
+                usize::from(args.queries),
+                args.family.engine_family(),
+            )
+            .await?;
+            if args.json {
+                println!("{}", result.pretty_json()?);
+            } else {
+                print_dns_benchmark(&result)?;
+            }
+        }
+        DnsProtocolArg::Doh => {
+            let result = dns::doh::benchmark_with_family(
+                profile,
+                usize::from(args.queries),
+                args.family.engine_family(),
+            )
+            .await?;
+            if args.json {
+                println!("{}", result.pretty_json()?);
+            } else {
+                print_dns_benchmark(&result)?;
+            }
+        }
+        DnsProtocolArg::Dot | DnsProtocolArg::Doq => {
+            let protocol = if matches!(args.protocol, DnsProtocolArg::Dot) {
+                dns::secure::SecureProtocol::Dot
+            } else {
+                dns::secure::SecureProtocol::Doq
+            };
+            let result = dns::secure::benchmark(
+                profile,
+                usize::from(args.queries),
+                protocol,
+                args.family.engine_family(),
+            )
+            .await?;
+            if args.json {
+                println!("{}", result.pretty_json()?);
+            } else {
+                print_secure_dns_benchmark(&result)?;
+            }
+        }
     }
     Ok(())
 }
@@ -974,6 +1042,7 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
         let engine = InternetEngine::Cloudflare(CloudflareEngine::new(EngineConfig {
             streams: 2,
             phase_duration: Duration::from_secs(8),
+            family: speedtest_cli::engine::AddressFamily::Any,
         })?);
         let result = run_non_interactive(&engine, Duration::from_secs(120), false)
             .await
@@ -984,6 +1053,315 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
         println!("{}", report.pretty_json()?);
     } else {
         print_doctor(&report)?;
+    }
+    Ok(())
+}
+
+async fn run_diagnose(args: DiagnoseArgs, cli: Cli) -> Result<()> {
+    let measurement_cli = cli_with_measurement(&cli, &args.measurement);
+    let mut doctor = doctor::run(args.interface.as_deref()).await?;
+    let mut assessment_error = None;
+    let advanced = Some(
+        speedtest_cli::network::run(
+            args.measurement.family.engine_family(),
+            args.interface.as_deref(),
+        )
+        .await,
+    );
+
+    let stability = if args.no_stability {
+        None
+    } else {
+        match stability::run(
+            Duration::from_secs(args.stability_duration),
+            Duration::from_millis(args.stability_interval_ms),
+            None,
+        )
+        .await
+        {
+            Ok(result) => Some(result),
+            Err(error) => {
+                assessment_error = Some(format!("stability assessment failed: {error:#}"));
+                None
+            }
+        }
+    };
+
+    let speedtest = if args.no_speedtest {
+        None
+    } else {
+        let options = TestOptions::from(&measurement_cli);
+        match options.engine() {
+            Ok(engine) => match run_non_interactive(
+                &engine,
+                Duration::from_secs(options.timeout),
+                cli.progress.enabled_for(args.json),
+            )
+            .await
+            {
+                Ok(result) => {
+                    options.finish(&result)?;
+                    Some(result)
+                }
+                Err(error) => {
+                    doctor.attach_speedtest_failure(&error);
+                    assessment_error = Some(format!("speed assessment failed: {error:#}"));
+                    None
+                }
+            },
+            Err(error) => {
+                doctor.attach_speedtest_failure(&error);
+                assessment_error = Some(format!("speed assessment setup failed: {error:#}"));
+                None
+            }
+        }
+    };
+
+    let report = diagnose::build(
+        match args.profile {
+            DiagnosisProfileArg::General => DiagnosisProfile::General,
+            DiagnosisProfileArg::Calls => DiagnosisProfile::Calls,
+            DiagnosisProfileArg::Gaming => DiagnosisProfile::Gaming,
+            DiagnosisProfileArg::Streaming => DiagnosisProfile::Streaming,
+        },
+        doctor,
+        stability,
+        speedtest,
+        advanced,
+    );
+    if args.json {
+        println!("{}", report.pretty_json()?);
+    } else {
+        print_diagnosis(&report)?;
+    }
+    if let Some(error) = assessment_error {
+        bail!(error);
+    }
+    Ok(())
+}
+
+async fn run_monitor(args: MonitorArgs, cli: Cli) -> Result<()> {
+    let measurement_cli = cli_with_measurement(&cli, &args.measurement);
+    let mut options = TestOptions::from(&measurement_cli);
+    options.output = None;
+    let engine = options.engine()?;
+    let interval = Duration::from_millis(args.interval_ms);
+    let mut next_run = tokio::time::Instant::now();
+    let mut sequence = 0_u32;
+    let mut failures = 0_u32;
+
+    loop {
+        tokio::time::sleep_until(next_run).await;
+        sequence = sequence.saturating_add(1);
+        let started_at = Utc::now();
+        let outcome = run_non_interactive(
+            &engine,
+            Duration::from_secs(options.timeout),
+            cli.progress.enabled_for(args.json),
+        )
+        .await;
+        let completed_at = Utc::now();
+        let record = match outcome {
+            Ok(result) => {
+                options.finish(&result)?;
+                MonitorRecord::success(sequence, started_at, completed_at, result)
+            }
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                MonitorRecord::failure(sequence, started_at, completed_at, format!("{error:#}"))
+            }
+        };
+        persist_monitor_record(&args, &record)?;
+        if args.json {
+            println!("{}", serde_json::to_string(&record)?);
+        } else if record.ok {
+            let result = record
+                .result
+                .as_ref()
+                .expect("successful monitor records contain a result");
+            println!(
+                "{}",
+                msg(
+                    "monitor #{0}: {1} Mbps down / {2} Mbps up / {3} ms idle",
+                    &[
+                        sequence.to_string(),
+                        format!("{:.1}", result.download.mbps),
+                        format!("{:.1}", result.upload.mbps),
+                        format!("{:.1}", result.latency.idle_ms),
+                    ],
+                )
+            );
+        } else {
+            println!(
+                "{}",
+                msg(
+                    "monitor #{0}: failed: {1}",
+                    &[
+                        sequence.to_string(),
+                        record
+                            .error
+                            .as_deref()
+                            .unwrap_or("unknown error")
+                            .to_string(),
+                    ],
+                )
+            );
+        }
+
+        if !record.ok && !args.continue_on_error {
+            bail!(record
+                .error
+                .unwrap_or_else(|| "monitor measurement failed".to_string()));
+        }
+        if args.count.is_some_and(|count| sequence >= count) {
+            break;
+        }
+        next_run += interval;
+        while next_run <= tokio::time::Instant::now() {
+            next_run += interval;
+        }
+    }
+
+    if failures > 0 {
+        bail!("monitor completed with {failures} failed measurement(s)");
+    }
+    Ok(())
+}
+
+fn cli_with_measurement(cli: &Cli, measurement: &MeasurementArgs) -> Cli {
+    let mut cli = cli.clone();
+    cli.backend = measurement.backend;
+    cli.family = measurement.family;
+    cli.librespeed_server = measurement.librespeed_server.clone();
+    cli.duration = measurement.duration;
+    cli.streams = measurement.streams;
+    cli.timeout = measurement.timeout;
+    cli.no_save = measurement.no_save;
+    cli
+}
+
+fn persist_monitor_record(args: &MonitorArgs, record: &MonitorRecord) -> Result<()> {
+    if let Some(path) = &args.output {
+        return storage::append_monitor(path, record);
+    }
+    if !args.measurement.no_save {
+        storage::persist_monitor(record)?;
+    }
+    Ok(())
+}
+
+fn print_diagnosis(report: &diagnose::DiagnosisReport) -> Result<()> {
+    println!("{}", tr("CONNECTION DIAGNOSIS"));
+    println!(
+        "  {}",
+        msg("profile: {0}", &[report.profile.label().to_string()])
+    );
+    println!(
+        "  {}",
+        msg("confidence: {0}", std::slice::from_ref(&report.confidence))
+    );
+    println!(
+        "  {}",
+        msg("diagnosis: {0}", &[narr(&report.diagnosis).to_string()])
+    );
+    if !report.findings.is_empty() {
+        println!();
+        println!("  {}", tr("FINDINGS"));
+        for finding in &report.findings {
+            println!(
+                "  {} [{}] {} — {}",
+                finding.severity.label(),
+                finding.area,
+                narr(&finding.title),
+                narr(&finding.evidence)
+            );
+        }
+    }
+    if !report.recommendations.is_empty() {
+        println!();
+        println!("  {}", tr("NEXT STEPS"));
+        for recommendation in &report.recommendations {
+            println!("  • {}", narr(recommendation));
+        }
+    }
+    if let Some(advanced) = &report.advanced {
+        println!();
+        println!("  {}", tr("PATH DETAILS"));
+        println!(
+            "  {}",
+            msg(
+                "vpn hint: {0}{1}",
+                &[
+                    if advanced.vpn.likely {
+                        tr("likely")
+                    } else {
+                        tr("not detected")
+                    },
+                    advanced
+                        .vpn
+                        .interface
+                        .as_deref()
+                        .map_or(String::new(), |interface| format!(" on {interface}")),
+                ],
+            )
+        );
+        if let Some(handshake) = &advanced.handshake {
+            println!(
+                "  {}",
+                msg(
+                    "handshake: dns {0} ms · tcp {1} ms · https {2} ms · {3}",
+                    &[
+                        format!("{:.1}", handshake.dns_ms),
+                        format!("{:.1}", handshake.tcp_ms),
+                        format!("{:.1}", handshake.https_ms),
+                        handshake.http_version.clone(),
+                    ],
+                )
+            );
+        }
+        if let Some(mtu) = &advanced.mtu {
+            println!(
+                "  {}",
+                msg(
+                    "path mtu: {0} bytes (payload {1}, {2})",
+                    &[
+                        mtu.path_mtu_bytes.to_string(),
+                        mtu.payload_bytes.to_string(),
+                        mtu.method.clone(),
+                    ],
+                )
+            );
+        }
+        for probe in &advanced.transport {
+            if probe.ok {
+                println!(
+                    "  {:<12} {:.1} ms ({})",
+                    probe.protocol.label(),
+                    probe.elapsed_ms.unwrap_or_default(),
+                    probe.negotiated_version.as_deref().unwrap_or("unknown")
+                );
+            } else {
+                println!(
+                    "  {:<12} {}",
+                    probe.protocol.label(),
+                    msg(
+                        "unavailable: {0}",
+                        &[probe
+                            .error
+                            .as_deref()
+                            .unwrap_or("unknown error")
+                            .to_string()],
+                    )
+                );
+            }
+        }
+    }
+    if report.speedtest.is_some() {
+        println!();
+        println!(
+            "  {}",
+            tr("A full throughput result was included and saved using the normal history policy.")
+        );
     }
     Ok(())
 }
@@ -1009,14 +1387,33 @@ fn run_wifi(args: WifiArgs) -> Result<()> {
 }
 
 async fn run_verify(args: VerifyArgs) -> Result<()> {
+    let family = args.family.engine_family();
     let report = verify::run(
         EngineConfig {
             streams: usize::from(args.streams),
             phase_duration: Duration::from_secs(args.duration),
+            family,
         },
         args.librespeed_server.as_deref(),
     )
     .await?;
+    let family_comparison = if args.compare_families {
+        Some(
+            verify::run_family_comparison(
+                EngineConfig {
+                    streams: usize::from(args.streams),
+                    phase_duration: Duration::from_secs(args.duration),
+                    family,
+                },
+                args.librespeed_server.as_deref(),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let mut report = report;
+    report.family_comparison = family_comparison;
     if args.json {
         println!("{}", report.pretty_json()?);
     } else {
@@ -1581,6 +1978,46 @@ fn print_dns_benchmark(result: &DnsBenchmarkResult) -> Result<()> {
     Ok(())
 }
 
+fn print_secure_dns_benchmark(result: &dns::secure::SecureDnsBenchmarkResult) -> Result<()> {
+    println!(
+        "{}",
+        msg(
+            "DNS {0} BENCHMARK · {1}",
+            &[
+                result.protocol.label().to_ascii_uppercase(),
+                result.profile.to_ascii_uppercase(),
+            ],
+        )
+    );
+    println!();
+    println!(
+        "{}",
+        tr("  #  RESOLVER                         MEDIAN   SUCCESS   ENDPOINT")
+    );
+    println!("  ─  ───────────────────────────────  ───────  ───────  ───────────────");
+    for (index, entry) in result.entries.iter().enumerate() {
+        let median = entry.latency.as_ref().map_or_else(
+            || "—".to_string(),
+            |latency| format!("{:.1}ms", latency.median_ms),
+        );
+        println!(
+            "  {:>2} {:<31} {:>7}  {:>6.0}%  {}",
+            index + 1,
+            truncate(&entry.provider_name, 31),
+            median,
+            entry.success_rate_percent,
+            entry.endpoint
+        );
+        if let Some(error) = &entry.error {
+            println!(
+                "     {}",
+                msg("last error: {0}", std::slice::from_ref(error))
+            );
+        }
+    }
+    Ok(())
+}
+
 fn print_dns_change(
     state: &dns::system::DnsSystemState,
     label: &str,
@@ -1926,6 +2363,35 @@ fn print_verify(report: &verify::VerifyReport) -> Result<()> {
             &[narr(&report.comparison.highlight).to_string()]
         )
     );
+    if let Some(families) = &report.family_comparison {
+        println!();
+        println!("  {}", tr("ADDRESS-FAMILY COMPARISON"));
+        print_family_measurement(&families.ipv4)?;
+        print_family_measurement(&families.ipv6)?;
+        println!("  {}", narr(&families.verdict));
+    }
+    Ok(())
+}
+
+fn print_family_measurement(measurement: &verify::FamilyMeasurement) -> Result<()> {
+    match (&measurement.cloudflare, &measurement.librespeed) {
+        (Some(cloudflare), Some(librespeed)) => println!(
+            "  {:<5}  down {:>8.1} / {:>8.1} Mbps  idle {:>6.1} / {:>6.1} ms",
+            measurement.family,
+            cloudflare.download.mbps,
+            librespeed.download.mbps,
+            cloudflare.latency.idle_ms,
+            librespeed.latency.idle_ms
+        ),
+        _ => println!(
+            "  {:<5}  unavailable: {}",
+            measurement.family,
+            measurement
+                .error
+                .as_deref()
+                .unwrap_or("no comparable result")
+        ),
+    }
     Ok(())
 }
 

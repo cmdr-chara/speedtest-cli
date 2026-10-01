@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
 use tempfile::NamedTempFile;
 
-use crate::{model::TestResult, stability::StabilityResult};
+use crate::{model::TestResult, monitor::MonitorRecord, stability::StabilityResult};
 
 pub fn data_root() -> Result<PathBuf> {
     data_dir().context("could not determine a platform data directory")
@@ -23,6 +23,16 @@ pub fn persist_default(result: &TestResult) -> Result<(PathBuf, PathBuf)> {
 
 pub fn persist_stability(result: &StabilityResult) -> Result<(PathBuf, PathBuf)> {
     persist_at(&data_root()?.join("stability"), result.timestamp, result)
+}
+
+pub fn persist_monitor(record: &MonitorRecord) -> Result<PathBuf> {
+    let path = data_root()?.join("monitor").join("history.jsonl");
+    append_monitor(&path, record)?;
+    Ok(path)
+}
+
+pub fn append_monitor(path: &Path, record: &MonitorRecord) -> Result<()> {
+    append_jsonl_value(path, record)
 }
 
 fn persist_at<T: Serialize>(
@@ -457,6 +467,20 @@ mod tests {
         let loaded = load_history_path(&path).unwrap();
         assert_eq!(loaded.len(), 2);
         assert!(loaded[0].timestamp <= loaded[1].timestamp);
+    }
+
+    #[test]
+    fn monitor_records_use_the_locked_jsonl_append_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("monitor").join("history.jsonl");
+        let record = MonitorRecord::failure(1, Utc::now(), Utc::now(), "fixture failure");
+        append_monitor(&path, &record).unwrap();
+        let line = fs::read_to_string(path).unwrap();
+        let decoded: MonitorRecord = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(decoded.schema_version, crate::monitor::SCHEMA_VERSION);
+        assert_eq!(decoded.sequence, 1);
+        assert!(!decoded.ok);
+        assert_eq!(decoded.error.as_deref(), Some("fixture failure"));
     }
 
     #[test]

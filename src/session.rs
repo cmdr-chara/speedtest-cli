@@ -17,6 +17,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct TestOptions {
     pub backend: InternetBackendArg,
+    pub family: crate::engine::AddressFamily,
     pub librespeed_server: Option<String>,
     pub duration: u64,
     pub streams: u8,
@@ -31,6 +32,7 @@ impl From<&Cli> for TestOptions {
     fn from(cli: &Cli) -> Self {
         Self {
             backend: cli.backend,
+            family: cli.family.engine_family(),
             librespeed_server: cli.librespeed_server.clone(),
             duration: cli.duration,
             streams: cli.streams,
@@ -48,6 +50,7 @@ impl TestOptions {
         let config = EngineConfig {
             streams: usize::from(self.streams),
             phase_duration: Duration::from_secs(self.duration),
+            family: self.family,
         };
         match self.backend {
             InternetBackendArg::Cloudflare => {
