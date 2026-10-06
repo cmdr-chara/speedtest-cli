@@ -174,8 +174,11 @@ async fn an_expired_sampler_emits_no_throughput() {
             streams: 1,
             phase_duration: Duration::from_secs(1),
             family: crate::engine::AddressFamily::Any,
+            source_ip: None,
         },
         server: None,
+        server_id: None,
+        excluded_server_ids: Vec::new(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     engine
@@ -187,4 +190,14 @@ async fn an_expired_sampler_emits_no_throughput() {
         )
         .await;
     assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn public_server_ids_are_stable_and_unknown_ids_fail_closed() {
+    assert_eq!(
+        resolve_public_server(1).unwrap().name,
+        PUBLIC_SERVERS[0].name
+    );
+    let error = resolve_public_server(999).unwrap_err().to_string();
+    assert!(error.contains("unknown LibreSpeed server ID"));
 }

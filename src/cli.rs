@@ -60,6 +60,22 @@ pub struct MeasurementArgs {
     #[arg(long, value_name = "URL")]
     pub librespeed_server: Option<String>,
 
+    /// Pin LibreSpeed to one of the built-in server IDs shown by `speedtest servers`.
+    #[arg(long, value_name = "ID", conflicts_with = "librespeed_server")]
+    pub server_id: Option<u16>,
+
+    /// Exclude a built-in LibreSpeed server ID from automatic selection. May be repeated.
+    #[arg(
+        long = "exclude-server-id",
+        value_name = "ID",
+        conflicts_with = "librespeed_server"
+    )]
+    pub exclude_server_ids: Vec<u16>,
+
+    /// Local source address for active Internet sockets, useful on multi-WAN or VPN hosts.
+    #[arg(long, value_name = "IP")]
+    pub source_ip: Option<IpAddr>,
+
     /// Duration of each throughput phase in seconds.
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u64).range(3..=30))]
     pub duration: u64,
@@ -115,6 +131,22 @@ pub struct Cli {
     #[arg(long, value_name = "URL")]
     pub librespeed_server: Option<String>,
 
+    /// Pin LibreSpeed to one of the built-in server IDs shown by `speedtest servers`.
+    #[arg(long, value_name = "ID", conflicts_with = "librespeed_server")]
+    pub server_id: Option<u16>,
+
+    /// Exclude a built-in LibreSpeed server ID from automatic selection. May be repeated.
+    #[arg(
+        long = "exclude-server-id",
+        value_name = "ID",
+        conflicts_with = "librespeed_server"
+    )]
+    pub exclude_server_ids: Vec<u16>,
+
+    /// Local source address for active Internet sockets, useful on multi-WAN or VPN hosts.
+    #[arg(long, value_name = "IP")]
+    pub source_ip: Option<IpAddr>,
+
     /// Number of concurrent transfer streams.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=16))]
     pub streams: u8,
@@ -139,6 +171,10 @@ pub struct Cli {
     #[arg(long, conflicts_with = "plain")]
     pub json: bool,
 
+    /// Emit newline-delimited JSON phase, progress, and final-result events.
+    #[arg(long, conflicts_with_all = ["json", "plain"])]
+    pub jsonl: bool,
+
     /// Also write the completed result to this path.
     #[arg(long, value_name = "PATH")]
     pub output: Option<PathBuf>,
@@ -154,6 +190,8 @@ pub struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    /// List built-in LibreSpeed servers, optionally probing their latency.
+    Servers(ServersArgs),
     /// Check a saved JSON result against explicit thresholds, without network traffic.
     Check(CheckArgs),
     /// Continuously probe latency to expose spikes and short disruptions.
@@ -525,6 +563,14 @@ pub struct MonitorArgs {
     #[command(flatten)]
     pub measurement: MeasurementArgs,
 
+    /// Read an existing JSONL stream and print an offline reliability report.
+    #[arg(long)]
+    pub report: bool,
+
+    /// JSONL stream to report. Defaults to the local monitor history.
+    #[arg(long, value_name = "PATH", requires = "report")]
+    pub input: Option<PathBuf>,
+
     /// Time between measurements. Supports s, m, or h suffixes.
     #[arg(long = "interval", default_value = "15m", value_parser = parse_monitor_interval)]
     pub interval_ms: u64,
@@ -544,6 +590,29 @@ pub struct MonitorArgs {
     /// Append records to this JSONL file instead of the default local monitor history.
     #[arg(long, value_name = "PATH")]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ServersArgs {
+    /// Probe each built-in server instead of only printing the offline catalog.
+    #[arg(long)]
+    pub probe: bool,
+
+    /// Address family for optional server probes.
+    #[arg(long, value_enum, default_value_t = IpFamilyArg::Any)]
+    pub family: IpFamilyArg,
+
+    /// Local source address for optional server probes.
+    #[arg(long, value_name = "IP")]
+    pub source_ip: Option<IpAddr>,
+
+    /// Per-server probe timeout in seconds.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=30))]
+    pub timeout: u64,
+
+    /// Print the catalog or probe results as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -664,7 +733,7 @@ impl ProgressMode {
 impl Cli {
     pub fn json_requested(&self) -> bool {
         match &self.command {
-            None => self.json,
+            None => self.json || self.jsonl,
             Some(Command::Check(a)) => a.json,
             Some(Command::Stability(a)) => a.json,
             Some(Command::History(a)) => a.json,
@@ -678,6 +747,7 @@ impl Cli {
             Some(Command::Wifi(a)) => a.json,
             Some(Command::Verify(a)) => a.json,
             Some(Command::Lan(a)) => a.json,
+            Some(Command::Servers(a)) => a.json,
             Some(Command::Serve(_)) => false,
             Some(Command::Dns(a)) => match &a.command {
                 DnsCommand::List(a) => a.json,

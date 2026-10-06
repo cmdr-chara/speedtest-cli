@@ -134,7 +134,7 @@ async fn handshake_probe(family: AddressFamily) -> Result<HandshakeProbe> {
         .user_agent(concat!("speedtest-cli/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(5))
-        .local_address(family.local_address())
+        .local_address(family.local_address(None))
         .build()
         .context("failed to build handshake client")?;
     let https_started = Instant::now();

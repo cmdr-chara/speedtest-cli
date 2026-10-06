@@ -25,6 +25,8 @@ A fast, polished terminal network quality analyzer written in Rust.
 - Cloudflare and LibreSpeed Internet backends
 - Backend cross-checking with `speedtest verify`
 - Explicit IPv4/IPv6 selection and backend A/B comparison
+- Offline LibreSpeed server catalog with optional latency probes, pinning, and exclusions
+- Source-address binding for multi-WAN and VPN hosts
 - TCP/TLS decomposition plus HTTP/2 and HTTP/3 capability probes
 - Real ICMP echo response-loss measurement with `speedtest loss`
 - Native Wi-Fi diagnostics on Windows, macOS, and Linux
@@ -47,6 +49,7 @@ speedtest                 # Open the dashboard; no automatic network traffic
 speedtest --run           # Bypass the menu; start the existing live speedometer
 speedtest --plain         # Run immediately, with noninteractive text output
 speedtest --json          # Run immediately, with the existing canonical JSON output
+speedtest --jsonl         # Stream versioned phase/progress/result events as JSONL
 ```
 
 The main flow is **Home → Run Speed Test → configuration → Start test → live gauge →
@@ -205,6 +208,45 @@ speedtest --backend librespeed --librespeed-server https://speed.example.com
 ```
 
 The custom URL is treated as the LibreSpeed base URL and standard `garbage.php` / `empty.php` endpoints are assumed.
+
+#### Server discovery and path control
+
+List the built-in LibreSpeed catalog without contacting the network:
+
+```bash
+speedtest servers
+speedtest servers --json
+```
+
+Add `--probe` when you want a bounded latency probe for every catalog entry:
+
+```bash
+speedtest servers --probe
+speedtest servers --probe --family ipv4 --json
+```
+
+The catalog assigns stable IDs for the current built-in registry. Pin a run to one
+server or keep specific servers out of automatic selection:
+
+```bash
+speedtest --backend librespeed --server-id 7 --no-save
+speedtest --backend librespeed --exclude-server-id 1 --exclude-server-id 2
+```
+
+`--server-id` and `--exclude-server-id` apply to the built-in LibreSpeed registry;
+they cannot be combined with `--librespeed-server`. The default remains latency-based
+automatic selection. The catalog command is offline unless `--probe` is supplied.
+
+For machines with multiple WAN links, VPN routes, or policy-based routing, bind the
+HTTP measurement sockets to a local source address:
+
+```bash
+speedtest --source-ip 192.0.2.10 --family ipv4 --no-save
+```
+
+The source address must match `--family` when a family is forced. This is an address
+binding control, not an interface-name resolver; use the address assigned to the route
+you want to test.
 
 ### Backend verification
 
@@ -398,6 +440,35 @@ Without `--count`, monitoring continues until Ctrl+C. A failed attempt is record
 command still exits nonzero after a bounded run if any attempt failed. The monitor file is
 append-only and uses the same locking guarantees as history.
 
+Review the saved stream later without starting a probe:
+
+```bash
+speedtest monitor --report
+speedtest monitor --report --input monitor.jsonl --json
+```
+
+The report has its own versioned JSON schema and summarizes attempts, success rate,
+failure streaks, recent failure messages, and distributions for successful download,
+upload, idle latency, jitter, and quality scores. A missing monitor file is an empty
+report; malformed or oversized records fail with a line-specific error. `--report` is
+offline and cannot be combined with measurement scheduling flags such as `--count` or
+`--output`.
+
+### Live JSONL measurement events
+
+The one-shot measurement can stream progress without contaminating stdout with human
+text:
+
+```bash
+speedtest --backend librespeed --librespeed-server https://speed.example.com --jsonl --no-save
+```
+
+Each line has `schema_version: 1` and a `type` such as `phase`, `idle_latency`,
+`throughput_sample`, `loaded_latency`, or `result`. The final `result` event contains
+the same canonical `TestResult` object emitted by `--json`. Progress and errors remain
+separate from the event stream, making the mode suitable for dashboards and CI
+consumers. `--jsonl` is mutually exclusive with `--json` and `--plain`.
+
 ### Path and transport interpretation
 
 The guided report's VPN hint is interface-name evidence, not a claim that traffic is or is
@@ -545,11 +616,15 @@ Main options:
 --backend <BACKEND>          cloudflare or librespeed
 --family <FAMILY>            any, ipv4, or ipv6
 --librespeed-server <URL>    custom LibreSpeed base URL
+--server-id <ID>             pin a built-in LibreSpeed server
+--exclude-server-id <ID>     exclude a built-in server; may be repeated
+--source-ip <IP>             bind active Internet sockets to a local address
 --streams <N>                concurrent transfer streams (default: 2)
 --duration <SEC>             seconds for each throughput phase (default: 8)
 --fps <N>                    interactive render cap, 30–240 FPS
 --plain                      disable interactive TUI
 --json                       print canonical JSON
+--jsonl                      stream versioned live JSON events
 --output <PATH>              also write completed result
 --format <FORMAT>            json or csv
 --no-save                    disable automatic history/result persistence

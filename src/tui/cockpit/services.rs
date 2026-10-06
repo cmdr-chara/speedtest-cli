@@ -125,10 +125,13 @@ pub(super) enum Tool {
     DnsTest,
     DnsUdp,
     DnsDoh,
+    DnsDot,
+    DnsDoq,
     Doctor,
     Wifi,
     Loss,
     Stability,
+    MonitorReport,
     Verify,
 }
 
@@ -139,12 +142,15 @@ impl Tool {
         Self::DnsTest,
         Self::DnsUdp,
         Self::DnsDoh,
+        Self::DnsDot,
+        Self::DnsDoq,
     ];
     pub const DIAGNOSTICS: &'static [Self] = &[
         Self::Doctor,
         Self::Wifi,
         Self::Loss,
         Self::Stability,
+        Self::MonitorReport,
         Self::Verify,
     ];
 
@@ -155,10 +161,13 @@ impl Tool {
             Self::DnsTest => "Test active resolver",
             Self::DnsUdp => "Benchmark DNS / UDP",
             Self::DnsDoh => "Benchmark DNS / HTTPS",
+            Self::DnsDot => "Benchmark DNS / TLS",
+            Self::DnsDoq => "Benchmark DNS / QUIC",
             Self::Doctor => "Network Doctor",
             Self::Wifi => "Wi-Fi inspection",
             Self::Loss => "ICMP response loss",
             Self::Stability => "Stability monitor",
+            Self::MonitorReport => "Monitor report",
             Self::Verify => "Cross-backend verification",
         }
     }
@@ -170,16 +179,22 @@ impl Tool {
             Self::DnsTest => "Send 12 DNS queries through the current resolver. This does not change DNS settings.",
             Self::DnsUdp => "Compare the fastest resolver league with 12 UDP queries per provider. Read-only.",
             Self::DnsDoh => "Compare the fastest resolver league using real DNS-over-HTTPS queries. Read-only.",
+            Self::DnsDot => "Compare the fastest resolver league using real DNS-over-TLS queries. Read-only.",
+            Self::DnsDoq => "Compare the fastest resolver league using real DNS-over-QUIC queries. Read-only.",
             Self::Doctor => "Check routing, gateway, DNS, IPv4/IPv6 and HTTPS. Does not saturate the connection.",
             Self::Wifi => "Read native Wi-Fi link details. Availability depends on your OS, permissions and driver.",
             Self::Loss => "Send 20 ICMP echoes to 1.1.1.1. Echo loss is not proof of application packet loss.",
             Self::Stability => "Probe HTTP latency for 60 seconds. No saturation test; HTTP availability is not packet loss. Results are not saved.",
+            Self::MonitorReport => "Summarize saved monitoring attempts and failures offline. No network activity.",
             Self::Verify => "Run both Internet backends with 5-second phases and 2 streams. May consume substantial data.",
         }
     }
 
     pub const fn network(self) -> bool {
-        !matches!(self, Self::DnsShow | Self::DnsList | Self::Wifi)
+        !matches!(
+            self,
+            Self::DnsShow | Self::DnsList | Self::Wifi | Self::MonitorReport
+        )
     }
 
     pub fn arguments(self, options: &TestOptions) -> Vec<String> {
@@ -189,10 +204,13 @@ impl Tool {
             Self::DnsTest => &["dns", "test", "--queries", "12"],
             Self::DnsUdp => &["dns", "benchmark", "--protocol", "udp", "--queries", "12"],
             Self::DnsDoh => &["dns", "benchmark", "--protocol", "doh", "--queries", "12"],
+            Self::DnsDot => &["dns", "benchmark", "--protocol", "dot", "--queries", "12"],
+            Self::DnsDoq => &["dns", "benchmark", "--protocol", "doq", "--queries", "12"],
             Self::Doctor => &["doctor"],
             Self::Wifi => &["wifi"],
             Self::Loss => &["loss", "--count", "20", "--target", "1.1.1.1"],
             Self::Stability => &["stability", "--duration", "60s", "--plain", "--no-save"],
+            Self::MonitorReport => &["monitor", "--report", "--json"],
             Self::Verify => &["verify", "--duration", "5", "--streams", "2"],
         };
         let mut arguments: Vec<String> = ["--color", "never", "--progress", "never"]
@@ -293,6 +311,15 @@ mod tests {
             assert!(args.len() >= 5);
         }
         assert!(!Tool::DnsList.network());
+        assert!(!Tool::MonitorReport.network());
+        assert!(Tool::DnsDot
+            .arguments(&options)
+            .windows(2)
+            .any(|window| window.iter().map(String::as_str).eq(["--protocol", "dot"])));
+        assert!(Tool::DnsDoq
+            .arguments(&options)
+            .windows(2)
+            .any(|window| window.iter().map(String::as_str).eq(["--protocol", "doq"])));
         assert!(Tool::Doctor.network());
     }
 

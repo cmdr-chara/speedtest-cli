@@ -4,6 +4,9 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
+use chrono::Utc;
+use speedtest_cli::monitor::MonitorRecord;
+
 fn run(arguments: &[&str], input: Option<&str>) -> Output {
     let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_speedtest"))
@@ -76,6 +79,106 @@ fn health_commands_expose_family_backend_and_monitor_controls() {
 }
 
 #[test]
+fn server_catalog_is_offline_and_versioned() {
+    let result = run(&["servers", "--json"], None);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["backend"], "librespeed");
+    assert_eq!(report["probed"], false);
+    assert_eq!(report["servers"].as_array().unwrap().len(), 7);
+    assert_eq!(report["servers"][0]["id"], 1);
+}
+
+#[test]
+fn new_automation_and_server_controls_are_discoverable() {
+    let help = run(&["--help"], None);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    for flag in [
+        "--jsonl",
+        "--server-id",
+        "--exclude-server-id",
+        "--source-ip",
+    ] {
+        assert!(help.contains(flag), "missing {flag}: {help}");
+    }
+    let server_help = run(&["servers", "--help"], None);
+    assert!(server_help.status.success());
+    assert!(String::from_utf8(server_help.stdout)
+        .unwrap()
+        .contains("--probe"));
+}
+
+#[test]
+fn server_controls_fail_closed_before_network_work() {
+    let backend_mismatch = run(
+        &[
+            "--backend",
+            "cloudflare",
+            "--server-id",
+            "1",
+            "--plain",
+            "--no-save",
+        ],
+        None,
+    );
+    assert_eq!(backend_mismatch.status.code(), Some(2));
+    assert!(backend_mismatch.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&backend_mismatch.stderr).contains("require --backend librespeed")
+    );
+
+    let unknown = run(
+        &[
+            "--backend",
+            "librespeed",
+            "--server-id",
+            "999",
+            "--plain",
+            "--no-save",
+        ],
+        None,
+    );
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(unknown.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("unknown LibreSpeed server ID"));
+
+    let excluded = run(
+        &[
+            "--backend",
+            "librespeed",
+            "--exclude-server-id",
+            "1",
+            "--exclude-server-id",
+            "2",
+            "--exclude-server-id",
+            "3",
+            "--exclude-server-id",
+            "4",
+            "--exclude-server-id",
+            "5",
+            "--exclude-server-id",
+            "6",
+            "--exclude-server-id",
+            "7",
+            "--plain",
+            "--no-save",
+        ],
+        None,
+    );
+    assert_eq!(excluded.status.code(), Some(1));
+    assert!(excluded.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&excluded.stderr)
+        .contains("all built-in LibreSpeed servers were excluded"));
+}
+
+#[test]
 fn monitor_rejects_a_custom_server_without_the_librespeed_backend() {
     let result = run(
         &[
@@ -121,6 +224,68 @@ fn insights_json_is_language_invariant() {
             baseline = Some(result.stdout);
         }
     }
+}
+
+#[test]
+fn monitor_report_is_offline_versioned_and_accepts_custom_jsonl() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("monitor.jsonl");
+    let result: speedtest_cli::model::TestResult =
+        serde_json::from_str(include_str!("fixtures/result.json")).unwrap();
+    let first = MonitorRecord::success(1, Utc::now(), Utc::now(), result);
+    let second = MonitorRecord::failure(2, Utc::now(), Utc::now(), "fixture timeout");
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let result = run(
+        &[
+            "monitor",
+            "--report",
+            "--input",
+            path.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["attempts"], 2);
+    assert_eq!(report["successes"], 1);
+    assert_eq!(report["failures"], 1);
+    assert_eq!(report["recent_failures"][0], "fixture timeout");
+}
+
+#[test]
+fn monitor_report_rejects_malformed_records_without_success_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("broken.jsonl");
+    std::fs::write(&path, "not json\n").unwrap();
+    let result = run(
+        &[
+            "monitor",
+            "--report",
+            "--input",
+            path.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("invalid monitor record"));
 }
 
 #[test]

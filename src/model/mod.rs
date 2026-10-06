@@ -193,6 +193,101 @@ impl TestResult {
     pub fn pretty_json(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
     }
+
+    /// Validate values at persistence and automation boundaries. Serde checks
+    /// shape, but it cannot express the physical invariants of a measurement;
+    /// without this guard a hand-edited result could enter history and skew
+    /// every offline statistic.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.backend.trim().is_empty(), "result backend is empty");
+        anyhow::ensure!(
+            !self.server.host.trim().is_empty(),
+            "result server host is empty"
+        );
+        anyhow::ensure!(
+            !self.server.name.trim().is_empty(),
+            "result server name is empty"
+        );
+        validate_nonnegative("idle latency", self.latency.idle_ms)?;
+        validate_nonnegative("jitter", self.latency.jitter_ms)?;
+        for (name, value) in [
+            ("download loaded latency", self.latency.download_loaded_ms),
+            ("upload loaded latency", self.latency.upload_loaded_ms),
+        ] {
+            if let Some(value) = value {
+                validate_nonnegative(name, value)?;
+            }
+        }
+        if let Some(loss) = self.latency.packet_loss_percent {
+            anyhow::ensure!(
+                loss.is_finite() && (0.0..=100.0).contains(&loss),
+                "packet loss must be between 0 and 100 percent"
+            );
+        }
+        validate_throughput("download", &self.download)?;
+        validate_throughput("upload", &self.upload)?;
+        if let Some(analysis) = &self.analysis {
+            validate_distribution("idle latency distribution", &analysis.latency.idle)?;
+            for (name, distribution) in [
+                ("jitter distribution", analysis.latency.jitter.as_ref()),
+                (
+                    "download loaded latency distribution",
+                    analysis.latency.download_loaded.as_ref(),
+                ),
+                (
+                    "upload loaded latency distribution",
+                    analysis.latency.upload_loaded.as_ref(),
+                ),
+            ] {
+                if let Some(distribution) = distribution {
+                    validate_distribution(name, distribution)?;
+                }
+            }
+            anyhow::ensure!(
+                analysis.quality.score <= 100,
+                "quality score must be between 0 and 100"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn validate_nonnegative(name: &str, value: f64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        value.is_finite() && value >= 0.0,
+        "{name} must be finite and non-negative"
+    );
+    Ok(())
+}
+
+fn validate_throughput(name: &str, value: &ThroughputResult) -> anyhow::Result<()> {
+    validate_nonnegative(&format!("{name} throughput"), value.mbps)?;
+    anyhow::ensure!(
+        value.seconds.is_finite() && value.seconds > 0.0,
+        "{name} duration must be finite and positive"
+    );
+    Ok(())
+}
+
+fn validate_distribution(name: &str, value: &LatencyDistribution) -> anyhow::Result<()> {
+    anyhow::ensure!(value.samples > 0, "{name} has no samples");
+    for (label, number) in [
+        ("min", value.min_ms),
+        ("median", value.median_ms),
+        ("p95", value.p95_ms),
+        ("p99", value.p99_ms),
+        ("max", value.max_ms),
+    ] {
+        validate_nonnegative(&format!("{name} {label}"), number)?;
+    }
+    anyhow::ensure!(
+        value.min_ms <= value.median_ms
+            && value.median_ms <= value.p95_ms
+            && value.p95_ms <= value.p99_ms
+            && value.p99_ms <= value.max_ms,
+        "{name} percentiles are not ordered"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -230,5 +325,20 @@ mod tests {
             quality(99, QualityConfidence::High).tier_label(),
             Some("S-TIER")
         );
+    }
+
+    #[test]
+    fn validates_physical_measurement_invariants() {
+        let mut result: TestResult =
+            serde_json::from_str(include_str!("../../tests/fixtures/result.json")).unwrap();
+        result.validate().unwrap();
+        result.download.mbps = -1.0;
+        assert!(result.validate().is_err());
+        result.download.mbps = 100.0;
+        result.download.seconds = 0.0;
+        assert!(result.validate().is_err());
+        result.download.seconds = 1.0;
+        result.latency.packet_loss_percent = Some(101.0);
+        assert!(result.validate().is_err());
     }
 }

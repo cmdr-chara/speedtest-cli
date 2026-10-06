@@ -118,6 +118,7 @@ speedtest                         # Open the interactive dashboard
 speedtest --run                   # Start a test immediately
 speedtest --plain                 # Human-readable terminal output
 speedtest --json --no-save         # JSON output without writing history
+speedtest --jsonl --no-save        # Live newline-delimited JSON events
 ```
 
 The dashboard is safe to open and browse offline. Network activity starts only when you explicitly start a test or diagnostic. Completed tests are saved locally by default; add `--no-save` when you do not want to write a result.
@@ -148,6 +149,9 @@ For the interactive dashboard, use a terminal at least **80 × 24** characters:
 | --- | --- |
 | Run a normal Internet test | `speedtest --run` |
 | Select the LibreSpeed backend | `speedtest --backend librespeed` |
+| List built-in LibreSpeed servers offline | `speedtest servers --json` |
+| Probe and compare LibreSpeed server latency | `speedtest servers --probe --json` |
+| Pin or exclude a LibreSpeed path | `speedtest --backend librespeed --server-id 7` or `--exclude-server-id 1` |
 | Compare Internet backends | `speedtest verify` |
 | Force an IPv4 or IPv6 measurement | `speedtest --family ipv4 --run` |
 | Compare IPv4 and IPv6 paths | `speedtest verify --compare-families` |
@@ -158,6 +162,8 @@ For the interactive dashboard, use a terminal at least **80 × 24** characters:
 | Run network diagnostics | `speedtest doctor` |
 | Get guided connection recommendations | `speedtest diagnose --profile calls` |
 | Record repeated measurements | `speedtest monitor --count 4 --interval 15m --json --output monitor.jsonl` |
+| Stream live machine-readable events | `speedtest --jsonl --no-save` |
+| Summarize monitor reliability offline | `speedtest monitor --report --json` |
 | Inspect the Wi-Fi link | `speedtest wifi` |
 | Measure ICMP response loss | `speedtest loss --target 1.1.1.1 --count 50` |
 | Monitor HTTP availability | `speedtest stability --duration 5m` |
@@ -165,7 +171,7 @@ For the interactive dashboard, use a terminal at least **80 × 24** characters:
 | Test encrypted DNS transports | `speedtest dns benchmark --protocol dot` or `--protocol doq` |
 | Test two machines on a trusted LAN | `speedtest serve --bind 192.168.1.50:9876`, then `speedtest lan 192.168.1.50:9876` |
 
-`speedtest insights`, history browsing, and the dashboard itself do not need a network connection. They read local data only.
+`speedtest insights`, history browsing, monitor reports, and the dashboard itself do not need a network connection. They read local data only.
 
 ### Screenshots and demos
 
