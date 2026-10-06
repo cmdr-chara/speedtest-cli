@@ -158,6 +158,7 @@ For the interactive dashboard, use a terminal at least **80 × 24** characters:
 | Run network diagnostics | `speedtest doctor` |
 | Get guided connection recommendations | `speedtest diagnose --profile calls` |
 | Record repeated measurements | `speedtest monitor --count 4 --interval 15m --json --output monitor.jsonl` |
+| Summarize monitor reliability offline | `speedtest monitor --report --json` |
 | Inspect the Wi-Fi link | `speedtest wifi` |
 | Measure ICMP response loss | `speedtest loss --target 1.1.1.1 --count 50` |
 | Monitor HTTP availability | `speedtest stability --duration 5m` |
@@ -165,7 +166,7 @@ For the interactive dashboard, use a terminal at least **80 × 24** characters:
 | Test encrypted DNS transports | `speedtest dns benchmark --protocol dot` or `--protocol doq` |
 | Test two machines on a trusted LAN | `speedtest serve --bind 192.168.1.50:9876`, then `speedtest lan 192.168.1.50:9876` |
 
-`speedtest insights`, history browsing, and the dashboard itself do not need a network connection. They read local data only.
+`speedtest insights`, history browsing, monitor reports, and the dashboard itself do not need a network connection. They read local data only.
 
 ### Screenshots and demos
 

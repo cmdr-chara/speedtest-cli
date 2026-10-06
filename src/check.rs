@@ -46,7 +46,12 @@ pub fn read_result(reader: impl Read) -> Result<TestResult> {
     if bytes.len() as u64 > MAX_RESULT_BYTES {
         bail!("result exceeds the 4 MiB input limit");
     }
-    serde_json::from_slice(&bytes).context("expected one canonical speedtest JSON result")
+    let result: TestResult =
+        serde_json::from_slice(&bytes).context("expected one canonical speedtest JSON result")?;
+    result
+        .validate()
+        .context("invalid canonical speedtest result")?;
+    Ok(result)
 }
 
 pub fn evaluate(
@@ -54,6 +59,9 @@ pub fn evaluate(
     limits: &Thresholds,
     now: DateTime<Utc>,
 ) -> Result<CheckReport> {
+    result
+        .validate()
+        .context("invalid canonical speedtest result")?;
     let mut checks = Vec::new();
     let candidates = [
         (

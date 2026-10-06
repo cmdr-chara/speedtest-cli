@@ -27,7 +27,7 @@ use speedtest_cli::{
     insights::{self, InsightsReport},
     lan, loss,
     model::TestResult,
-    monitor::MonitorRecord,
+    monitor::{self, MonitorRecord, MonitorReport},
     output, runtime,
     session::TestOptions,
     stability::{self, StabilityResult},
@@ -1141,6 +1141,9 @@ async fn run_diagnose(args: DiagnoseArgs, cli: Cli) -> Result<()> {
 }
 
 async fn run_monitor(args: MonitorArgs, cli: Cli) -> Result<()> {
+    if args.report {
+        return run_monitor_report(&args);
+    }
     let measurement_cli = cli_with_measurement(&cli, &args.measurement);
     let mut options = TestOptions::from(&measurement_cli);
     options.output = None;
@@ -1224,6 +1227,96 @@ async fn run_monitor(args: MonitorArgs, cli: Cli) -> Result<()> {
 
     if failures > 0 {
         bail!("monitor completed with {failures} failed measurement(s)");
+    }
+    Ok(())
+}
+
+fn run_monitor_report(args: &MonitorArgs) -> Result<()> {
+    if args.count.is_some() || args.continue_on_error || args.output.is_some() {
+        bail!("--report cannot be combined with --count, --continue-on-error, or --output");
+    }
+    let path = args
+        .input
+        .clone()
+        .unwrap_or(storage::data_root()?.join("monitor").join("history.jsonl"));
+    let records = storage::load_monitor(&path)
+        .with_context(|| format!("failed to read monitor report input {}", path.display()))?;
+    let report = monitor::summarize(&records);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_monitor_report(&report, &path)?;
+    }
+    Ok(())
+}
+
+fn print_monitor_report(report: &MonitorReport, path: &std::path::Path) -> Result<()> {
+    println!("{}", tr("MONITOR REPORT"));
+    println!("  {}", path.display());
+    if report.attempts == 0 {
+        println!();
+        println!("{}", tr("No monitor records found."));
+        return Ok(());
+    }
+    println!(
+        "{}",
+        msg(
+            "  Attempts: {0} · Successes: {1} · Failures: {2}",
+            &[
+                report.attempts.to_string(),
+                report.successes.to_string(),
+                report.failures.to_string(),
+            ],
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Success rate: {0}% · Window: {1}s",
+            &[
+                format!("{:.1}", report.success_rate_percent),
+                format!("{:.1}", report.duration_seconds),
+            ],
+        )
+    );
+    println!(
+        "{}",
+        msg(
+            "  Failure streak: {0} current / {1} max",
+            &[
+                report.current_failure_streak.to_string(),
+                report.max_failure_streak.to_string(),
+            ],
+        )
+    );
+    for (label, metric, unit) in [
+        ("Download", report.download_mbps.as_ref(), "Mbps"),
+        ("Upload", report.upload_mbps.as_ref(), "Mbps"),
+        ("Idle latency", report.idle_latency_ms.as_ref(), "ms"),
+        ("Jitter", report.jitter_ms.as_ref(), "ms"),
+        ("Quality score", report.quality_score.as_ref(), "points"),
+    ] {
+        if let Some(metric) = metric {
+            println!(
+                "{}",
+                msg(
+                    "  {0}: {1} samples · median {2} {3} · p95 {4} {3}",
+                    &[
+                        label.to_string(),
+                        metric.samples.to_string(),
+                        format!("{:.1}", metric.median),
+                        unit.to_string(),
+                        format!("{:.1}", metric.p95),
+                    ],
+                )
+            );
+        }
+    }
+    for failure in &report.recent_failures {
+        println!(
+            "{}",
+            msg("  Recent failure: {0}", std::slice::from_ref(failure))
+        );
     }
     Ok(())
 }

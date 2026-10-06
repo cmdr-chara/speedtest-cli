@@ -4,6 +4,9 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
+use chrono::Utc;
+use speedtest_cli::monitor::MonitorRecord;
+
 fn run(arguments: &[&str], input: Option<&str>) -> Output {
     let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_speedtest"))
@@ -121,6 +124,68 @@ fn insights_json_is_language_invariant() {
             baseline = Some(result.stdout);
         }
     }
+}
+
+#[test]
+fn monitor_report_is_offline_versioned_and_accepts_custom_jsonl() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("monitor.jsonl");
+    let result: speedtest_cli::model::TestResult =
+        serde_json::from_str(include_str!("fixtures/result.json")).unwrap();
+    let first = MonitorRecord::success(1, Utc::now(), Utc::now(), result);
+    let second = MonitorRecord::failure(2, Utc::now(), Utc::now(), "fixture timeout");
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let result = run(
+        &[
+            "monitor",
+            "--report",
+            "--input",
+            path.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["attempts"], 2);
+    assert_eq!(report["successes"], 1);
+    assert_eq!(report["failures"], 1);
+    assert_eq!(report["recent_failures"][0], "fixture timeout");
+}
+
+#[test]
+fn monitor_report_rejects_malformed_records_without_success_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("broken.jsonl");
+    std::fs::write(&path, "not json\n").unwrap();
+    let result = run(
+        &[
+            "monitor",
+            "--report",
+            "--input",
+            path.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("invalid monitor record"));
 }
 
 #[test]

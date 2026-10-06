@@ -32,7 +32,54 @@ pub fn persist_monitor(record: &MonitorRecord) -> Result<PathBuf> {
 }
 
 pub fn append_monitor(path: &Path, record: &MonitorRecord) -> Result<()> {
+    record.validate().context("invalid monitor record")?;
     append_jsonl_value(path, record)
+}
+
+/// Read a monitor JSONL stream while holding a shared lock. Records are
+/// bounded individually just like speed-test history, so a corrupt or
+/// accidentally huge line cannot turn an offline report into an allocation
+/// sink. The reader accepts the v1 stream produced by every released monitor.
+pub fn load_monitor(path: &Path) -> Result<Vec<MonitorRecord>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to open {}", path.display()))
+        }
+    };
+    file.lock_shared()
+        .context("failed to lock monitor history for reading")?;
+    let mut reader = BufReader::new(file);
+    let mut records = Vec::new();
+    let mut line = Vec::new();
+    let mut index = 0_u64;
+    loop {
+        line.clear();
+        index += 1;
+        let length = reader
+            .by_ref()
+            .take(crate::check::MAX_RESULT_BYTES + 1)
+            .read_until(b'\n', &mut line)
+            .with_context(|| format!("failed reading monitor record {index}"))?;
+        if length == 0 {
+            break;
+        }
+        if length as u64 > crate::check::MAX_RESULT_BYTES {
+            bail!("monitor record on line {index} exceeds the 4 MiB input limit");
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let record = serde_json::from_slice::<MonitorRecord>(&line)
+            .with_context(|| format!("invalid monitor record on line {index}"))?;
+        record
+            .validate()
+            .with_context(|| format!("invalid monitor record on line {index}"))?;
+        records.push(record);
+    }
+    records.sort_by_key(|record| (record.started_at, record.sequence));
+    Ok(records)
 }
 
 fn persist_at<T: Serialize>(
@@ -265,6 +312,9 @@ fn load_history_path_since(path: &Path, cutoff: DateTime<Utc>) -> Result<Vec<Tes
         }
         let result = serde_json::from_slice::<TestResult>(&line)
             .with_context(|| format!("invalid history record on line {index}"))?;
+        result
+            .validate()
+            .with_context(|| format!("invalid history record on line {index}"))?;
         if result.timestamp >= cutoff {
             results.push(result);
         }
@@ -481,6 +531,35 @@ mod tests {
         assert_eq!(decoded.sequence, 1);
         assert!(!decoded.ok);
         assert_eq!(decoded.error.as_deref(), Some("fixture failure"));
+    }
+
+    #[test]
+    fn loads_monitor_records_in_schedule_order_and_rejects_invalid_states() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("monitor.jsonl");
+        let now = Utc::now();
+        let later = MonitorRecord::failure(
+            2,
+            now + ChronoDuration::seconds(2),
+            now + ChronoDuration::seconds(3),
+            "later",
+        );
+        let earlier = MonitorRecord::failure(1, now, now + ChronoDuration::seconds(1), "earlier");
+        append_monitor(&path, &later).unwrap();
+        append_monitor(&path, &earlier).unwrap();
+        let records = load_monitor(&path).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        std::fs::write(&path, r#"{"schema_version":1,"sequence":3,"started_at":"2026-01-01T00:00:01Z","completed_at":"2026-01-01T00:00:00Z","ok":false,"error":"bad"}
+"#).unwrap();
+        let error = load_monitor(&path).unwrap_err();
+        assert!(format!("{error:#}").contains("completed before it started"));
     }
 
     #[test]

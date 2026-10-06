@@ -121,6 +121,12 @@ concurrently, limited to 256 KiB each, sanitized, and rendered in a scrollable p
 Forced plain/no-color flags prevent nested TUIs. Reports remain the same reports as
 the corresponding CLI commands; errors include stderr and allow retry.
 
+The DNS section includes configuration inspection, the resolver catalog, active
+resolver tests, and UDP, DoH, DoT, and DoQ benchmarks. Diagnostics includes Doctor,
+guided diagnosis, Wi-Fi, ICMP loss, stability, cross-backend verification, and an
+offline monitor report. The monitor report reads the existing JSONL stream only; it
+does not schedule or start a new measurement.
+
 The parent diagnostic command is killed on cancellation, timeout, or output overflow.
 Native helper descendants retain the lifecycle of their existing CLI implementation;
 this does not introduce a cross-platform process-tree supervisor. Native Wi-Fi,

@@ -231,24 +231,62 @@ fn add_profile_finding(
     findings: &mut Vec<DiagnosisFinding>,
     recommendations: &mut Vec<String>,
 ) {
-    let loaded = [
+    let loaded_values: Vec<f64> = [
         result.latency.download_loaded_ms,
         result.latency.upload_loaded_ms,
     ]
     .into_iter()
     .flatten()
-    .fold(0.0, f64::max);
+    .collect();
+    let loaded = loaded_values.iter().copied().fold(0.0, f64::max);
     let jitter = result.latency.jitter_ms;
-    let packet_loss = result.latency.packet_loss_percent.unwrap_or(0.0);
+    let packet_loss = result.latency.packet_loss_percent;
+    if matches!(profile, DiagnosisProfile::Calls | DiagnosisProfile::Gaming)
+        && (loaded_values.is_empty() || packet_loss.is_none())
+    {
+        let mut missing = Vec::new();
+        if loaded_values.is_empty() {
+            missing.push("loaded latency");
+        }
+        if packet_loss.is_none() {
+            missing.push("packet loss");
+        }
+        let severity = if loaded_values.is_empty() {
+            FindingSeverity::Warning
+        } else {
+            FindingSeverity::Info
+        };
+        let title = "Real-time profile evidence is incomplete";
+        let recommendation = "Repeat with a backend that provides loaded-latency coverage and run `speedtest loss` separately when packet-loss evidence matters.";
+        push_finding(
+            findings,
+            DiagnosisFinding {
+                severity,
+                area: "profile".to_string(),
+                title: title.to_string(),
+                evidence: format!("Unavailable evidence: {}.", missing.join(", ")),
+                recommendation: Some(recommendation.to_string()),
+            },
+        );
+        push_recommendation(recommendations, recommendation.to_string());
+    }
     let (title, evidence, recommendation) = match profile {
-        DiagnosisProfile::Calls if loaded > 100.0 || jitter > 30.0 || packet_loss > 1.0 => (
+        DiagnosisProfile::Calls
+            if loaded > 100.0
+                || jitter > 30.0
+                || packet_loss.is_some_and(|loss| loss > 1.0) =>
+        (
             "Real-time calls may be affected",
-            format!("loaded latency {loaded:.1} ms, jitter {jitter:.1} ms, packet loss {packet_loss:.1}%"),
+            format!("loaded latency {loaded:.1} ms, jitter {jitter:.1} ms, packet loss {}", format_optional_percent(packet_loss)),
             "Check competing uploads, Wi-Fi airtime, and bufferbloat before changing the video-call application.",
         ),
-        DiagnosisProfile::Gaming if loaded > 60.0 || jitter > 20.0 || packet_loss > 0.5 => (
+        DiagnosisProfile::Gaming
+            if loaded > 60.0
+                || jitter > 20.0
+                || packet_loss.is_some_and(|loss| loss > 0.5) =>
+        (
             "Interactive gaming may be affected",
-            format!("loaded latency {loaded:.1} ms, jitter {jitter:.1} ms, packet loss {packet_loss:.1}%"),
+            format!("loaded latency {loaded:.1} ms, jitter {jitter:.1} ms, packet loss {}", format_optional_percent(packet_loss)),
             "Compare a wired path and enable SQM/CAKE if the router supports it.",
         ),
         DiagnosisProfile::Streaming if result.download.mbps < 25.0 => (
@@ -267,6 +305,10 @@ fn add_profile_finding(
     };
     push_finding(findings, finding);
     push_recommendation(recommendations, recommendation.to_string());
+}
+
+fn format_optional_percent(value: Option<f64>) -> String {
+    value.map_or_else(|| "unavailable".to_string(), |value| format!("{value:.1}%"))
 }
 
 fn push_finding(findings: &mut Vec<DiagnosisFinding>, finding: DiagnosisFinding) {
@@ -356,5 +398,22 @@ mod tests {
             .iter()
             .any(|finding| finding.title == "Real-time calls may be affected"));
         assert_eq!(report.confidence, "moderate");
+    }
+
+    #[test]
+    fn missing_realtime_evidence_is_reported_instead_of_looking_healthy() {
+        let mut result = speedtest();
+        result.latency.download_loaded_ms = None;
+        result.latency.upload_loaded_ms = None;
+        result.latency.packet_loss_percent = None;
+        let report = build(DiagnosisProfile::Gaming, doctor(), None, Some(result), None);
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.title == "Real-time profile evidence is incomplete")
+            .unwrap();
+        assert_eq!(finding.severity, FindingSeverity::Warning);
+        assert!(finding.evidence.contains("loaded latency"));
+        assert!(finding.evidence.contains("packet loss"));
     }
 }

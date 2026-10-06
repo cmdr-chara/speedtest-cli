@@ -11,6 +11,7 @@ use tokio::{
 
 use crate::{
     analysis,
+    engine::http,
     model::{LatencyDistribution, QualityGrade},
 };
 
@@ -72,6 +73,7 @@ pub async fn run(
 ) -> Result<StabilityResult> {
     let client = Client::builder()
         .user_agent(concat!("speedtest-cli/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(5))
         .build()
@@ -126,17 +128,15 @@ pub async fn run(
 
 async fn latency_probe(client: &Client) -> Result<f64> {
     let started = Instant::now();
+    let nonce = Utc::now().timestamp_micros().unsigned_abs().to_string();
     let response = client
         .get(LATENCY_URL)
-        .query(&[("bytes", "0"), ("mode", "stability")])
-        .header("cache-control", "no-cache")
+        .query(&[("bytes", "0"), ("mode", "stability"), ("r", nonce.as_str())])
+        .header("cache-control", "no-store")
         .send()
         .await
-        .context("stability latency probe failed")?
-        .error_for_status()
-        .context("stability latency endpoint returned an error")?;
-    let _ = response
-        .bytes()
+        .context("stability latency probe failed")?;
+    http::drain(response, 64 * 1024)
         .await
         .context("stability latency response failed")?;
     Ok(started.elapsed().as_secs_f64() * 1000.0)

@@ -525,6 +525,14 @@ pub struct MonitorArgs {
     #[command(flatten)]
     pub measurement: MeasurementArgs,
 
+    /// Read an existing JSONL stream and print an offline reliability report.
+    #[arg(long)]
+    pub report: bool,
+
+    /// JSONL stream to report. Defaults to the local monitor history.
+    #[arg(long, value_name = "PATH", requires = "report")]
+    pub input: Option<PathBuf>,
+
     /// Time between measurements. Supports s, m, or h suffixes.
     #[arg(long = "interval", default_value = "15m", value_parser = parse_monitor_interval)]
     pub interval_ms: u64,

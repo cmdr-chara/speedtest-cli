@@ -398,6 +398,20 @@ Without `--count`, monitoring continues until Ctrl+C. A failed attempt is record
 command still exits nonzero after a bounded run if any attempt failed. The monitor file is
 append-only and uses the same locking guarantees as history.
 
+Review the saved stream later without starting a probe:
+
+```bash
+speedtest monitor --report
+speedtest monitor --report --input monitor.jsonl --json
+```
+
+The report has its own versioned JSON schema and summarizes attempts, success rate,
+failure streaks, recent failure messages, and distributions for successful download,
+upload, idle latency, jitter, and quality scores. A missing monitor file is an empty
+report; malformed or oversized records fail with a line-specific error. `--report` is
+offline and cannot be combined with measurement scheduling flags such as `--count` or
+`--output`.
+
 ### Path and transport interpretation
 
 The guided report's VPN hint is interface-name evidence, not a claim that traffic is or is
