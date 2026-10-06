@@ -16,6 +16,7 @@ pub struct EngineConfig {
     pub streams: usize,
     pub phase_duration: Duration,
     pub family: AddressFamily,
+    pub source_ip: Option<IpAddr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -29,7 +30,10 @@ pub enum AddressFamily {
 impl AddressFamily {
     /// An unspecified local address asks the socket stack to use only the
     /// requested address family without guessing a machine-specific address.
-    pub const fn local_address(self) -> Option<IpAddr> {
+    pub const fn local_address(self, source_ip: Option<IpAddr>) -> Option<IpAddr> {
+        if let Some(source_ip) = source_ip {
+            return Some(source_ip);
+        }
         match self {
             Self::Any => None,
             Self::Ipv4 => Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
@@ -66,6 +70,18 @@ impl EngineConfig {
             !self.phase_duration.is_zero() && self.phase_duration <= Duration::from_secs(30),
             "phase duration must be positive and at most 30 seconds"
         );
+        if let Some(source_ip) = self.source_ip {
+            anyhow::ensure!(
+                matches!(
+                    (self.family, source_ip),
+                    (AddressFamily::Any, IpAddr::V4(_))
+                        | (AddressFamily::Any, IpAddr::V6(_))
+                        | (AddressFamily::Ipv4, IpAddr::V4(_))
+                        | (AddressFamily::Ipv6, IpAddr::V6(_))
+                ),
+                "source IP address family does not match --family"
+            );
+        }
         Ok(())
     }
 }
@@ -111,6 +127,7 @@ mod tests {
                 streams,
                 phase_duration: Duration::from_secs(1),
                 family: AddressFamily::Any,
+                source_ip: None,
             }
             .validate()
             .is_err());
@@ -119,9 +136,27 @@ mod tests {
             streams: 1,
             phase_duration: Duration::ZERO,
             family: AddressFamily::Any,
+            source_ip: None,
         }
         .validate()
         .is_err());
+
+        assert!(EngineConfig {
+            streams: 1,
+            phase_duration: Duration::from_secs(1),
+            family: AddressFamily::Ipv6,
+            source_ip: Some("192.0.2.10".parse().unwrap()),
+        }
+        .validate()
+        .is_err());
+        assert!(EngineConfig {
+            streams: 1,
+            phase_duration: Duration::from_secs(1),
+            family: AddressFamily::Ipv4,
+            source_ip: Some("192.0.2.10".parse().unwrap()),
+        }
+        .validate()
+        .is_ok());
     }
 
     #[tokio::test]

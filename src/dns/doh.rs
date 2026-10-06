@@ -31,7 +31,7 @@ pub async fn benchmark_with_family(
         .connect_timeout(Duration::from_secs(4))
         .timeout(Duration::from_secs(6))
         .pool_max_idle_per_host(2)
-        .local_address(family.local_address())
+        .local_address(family.local_address(None))
         .build()
         .context("failed to build DoH client")?;
     let mut workers = JoinSet::new();

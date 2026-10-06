@@ -43,7 +43,7 @@ pub async fn probe(family: AddressFamily, protocol: TransportProtocol) -> Transp
         .user_agent(concat!("speedtest-cli/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(4))
         .timeout(Duration::from_secs(8))
-        .local_address(family.local_address());
+        .local_address(family.local_address(None));
     let client = match protocol {
         TransportProtocol::Http2 => builder.http2_prior_knowledge().build(),
         TransportProtocol::Http3 => builder.http3_prior_knowledge().build(),

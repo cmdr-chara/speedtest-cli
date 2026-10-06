@@ -99,6 +99,12 @@ def main():
                 assert abs(actual["mbps"] - expected) < 1e-8, phase
             assert json.loads(result_file.read_bytes()) == result
             assert not list(Path(scratch).rglob("history.jsonl")), "--no-save wrote history"
+            streamed = run("newline-delimited live JSON events", [*options, "--jsonl"])
+            events = [json.loads(line) for line in streamed.stdout.decode().splitlines()]
+            assert events and all(event["schema_version"] == 1 for event in events)
+            assert events[0]["type"] == "phase"
+            assert [event["type"] for event in events].count("result") == 1
+            assert events[-1]["type"] == "result"
             run("offline threshold pass", ["check", str(result_file), "--min-download", "0", "--json"])
             failed = run("offline threshold failure", ["check", str(result_file), "--min-download", "1000000000", "--json"], 3)
             assert not json.loads(failed.stdout)["passed"] and not failed.stderr

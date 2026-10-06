@@ -7,6 +7,7 @@ use crate::{
 };
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum InternetEngine {
     Cloudflare(CloudflareEngine),
     LibreSpeed(LibreSpeedEngine),

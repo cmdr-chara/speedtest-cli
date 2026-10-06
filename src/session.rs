@@ -19,6 +19,9 @@ pub struct TestOptions {
     pub backend: InternetBackendArg,
     pub family: crate::engine::AddressFamily,
     pub librespeed_server: Option<String>,
+    pub server_id: Option<u16>,
+    pub exclude_server_ids: Vec<u16>,
+    pub source_ip: Option<std::net::IpAddr>,
     pub duration: u64,
     pub streams: u8,
     pub fps: u16,
@@ -34,6 +37,9 @@ impl From<&Cli> for TestOptions {
             backend: cli.backend,
             family: cli.family.engine_family(),
             librespeed_server: cli.librespeed_server.clone(),
+            server_id: cli.server_id,
+            exclude_server_ids: cli.exclude_server_ids.clone(),
+            source_ip: cli.source_ip,
             duration: cli.duration,
             streams: cli.streams,
             fps: cli.fps,
@@ -51,13 +57,19 @@ impl TestOptions {
             streams: usize::from(self.streams),
             phase_duration: Duration::from_secs(self.duration),
             family: self.family,
+            source_ip: self.source_ip,
         };
         match self.backend {
             InternetBackendArg::Cloudflare => {
                 Ok(InternetEngine::Cloudflare(CloudflareEngine::new(config)?))
             }
             InternetBackendArg::Librespeed => Ok(InternetEngine::LibreSpeed(
-                LibreSpeedEngine::new(config, self.librespeed_server.as_deref())?,
+                LibreSpeedEngine::new_with_selection(
+                    config,
+                    self.librespeed_server.as_deref(),
+                    self.server_id,
+                    &self.exclude_server_ids,
+                )?,
             )),
         }
     }

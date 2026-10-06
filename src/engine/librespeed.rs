@@ -9,6 +9,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use reqwest::{Client, StatusCode, Url};
+use serde::Serialize;
 use tokio::{
     sync::mpsc::UnboundedSender,
     task::JoinSet,
@@ -32,6 +33,7 @@ const LOADED_LATENCY_INTERVAL: Duration = Duration::from_millis(400);
 
 #[derive(Debug, Clone, Copy)]
 pub struct LibreSpeedServer {
+    pub id: u16,
     pub name: &'static str,
     pub base: &'static str,
     pub download_path: &'static str,
@@ -41,6 +43,7 @@ pub struct LibreSpeedServer {
 
 pub const PUBLIC_SERVERS: &[LibreSpeedServer] = &[
     LibreSpeedServer {
+        id: 1,
         name: "Nuremberg, Germany (LibreSpeed)",
         base: "https://de4.backend.librespeed.org/",
         download_path: "garbage.php",
@@ -48,6 +51,7 @@ pub const PUBLIC_SERVERS: &[LibreSpeedServer] = &[
         ping_path: "empty.php",
     },
     LibreSpeedServer {
+        id: 2,
         name: "Nuremberg, Germany (LibreSpeed 2)",
         base: "https://de3.backend.librespeed.org/",
         download_path: "garbage.php",
@@ -55,6 +59,7 @@ pub const PUBLIC_SERVERS: &[LibreSpeedServer] = &[
         ping_path: "empty.php",
     },
     LibreSpeedServer {
+        id: 3,
         name: "Nottingham, UK (LibreSpeed)",
         base: "https://uk1.backend.librespeed.org/",
         download_path: "garbage.php",
@@ -62,6 +67,7 @@ pub const PUBLIC_SERVERS: &[LibreSpeedServer] = &[
         ping_path: "empty.php",
     },
     LibreSpeedServer {
+        id: 4,
         name: "Vilnius, Lithuania (LibreSpeed)",
         base: "https://lt1.backend.librespeed.org/",
         download_path: "garbage.php",
@@ -69,6 +75,7 @@ pub const PUBLIC_SERVERS: &[LibreSpeedServer] = &[
         ping_path: "empty.php",
     },
     LibreSpeedServer {
+        id: 5,
         name: "Bangalore, India (LibreSpeed)",
         base: "https://in1.backend.librespeed.org/",
         download_path: "garbage.php",
@@ -76,6 +83,7 @@ pub const PUBLIC_SERVERS: &[LibreSpeedServer] = &[
         ping_path: "empty.php",
     },
     LibreSpeedServer {
+        id: 6,
         name: "Johannesburg, South Africa (LibreSpeed)",
         base: "https://za1.backend.librespeed.org/",
         download_path: "garbage.php",
@@ -83,6 +91,7 @@ pub const PUBLIC_SERVERS: &[LibreSpeedServer] = &[
         ping_path: "empty.php",
     },
     LibreSpeedServer {
+        id: 7,
         name: "Rome, Italy (GARR)",
         base: "https://st-be-rm2.infra.garr.it/",
         download_path: "garbage.php",
@@ -96,6 +105,8 @@ pub struct LibreSpeedEngine {
     client: Client,
     config: EngineConfig,
     server: Option<ResolvedServer>,
+    server_id: Option<u16>,
+    excluded_server_ids: Vec<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,16 +118,135 @@ struct ResolvedServer {
     ping_path: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerCatalogEntry {
+    pub id: u16,
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerProbe {
+    pub id: u16,
+    pub name: String,
+    pub url: String,
+    pub reachable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median_latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub fn server_catalog() -> Vec<ServerCatalogEntry> {
+    PUBLIC_SERVERS
+        .iter()
+        .map(|server| ServerCatalogEntry {
+            id: server.id,
+            name: server.name.to_string(),
+            url: server.base.to_string(),
+        })
+        .collect()
+}
+
+pub async fn probe_public_servers(
+    family: crate::engine::AddressFamily,
+    source_ip: Option<std::net::IpAddr>,
+    timeout: Duration,
+) -> Result<Vec<ServerProbe>> {
+    if let Some(source_ip) = source_ip {
+        anyhow::ensure!(
+            matches!(
+                (family, source_ip),
+                (crate::engine::AddressFamily::Any, std::net::IpAddr::V4(_))
+                    | (crate::engine::AddressFamily::Any, std::net::IpAddr::V6(_))
+                    | (crate::engine::AddressFamily::Ipv4, std::net::IpAddr::V4(_))
+                    | (crate::engine::AddressFamily::Ipv6, std::net::IpAddr::V6(_))
+            ),
+            "source IP address family does not match --family"
+        );
+    }
+    let client = Client::builder()
+        .user_agent(concat!("speedtest-cli/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(timeout.min(Duration::from_secs(5)))
+        .timeout(timeout)
+        .local_address(family.local_address(source_ip))
+        .build()
+        .context("failed to build LibreSpeed server probe client")?;
+    let mut workers = JoinSet::new();
+    for server in PUBLIC_SERVERS.iter().copied() {
+        let client = client.clone();
+        workers.spawn(async move {
+            let resolved = resolve_builtin(server)?;
+            let result =
+                tokio::time::timeout(timeout, measure_latency(&client, &resolved, 3)).await;
+            let probe = match result {
+                Ok(Ok(samples)) => ServerProbe {
+                    id: server.id,
+                    name: server.name.to_string(),
+                    url: server.base.to_string(),
+                    reachable: true,
+                    median_latency_ms: analysis::distribution(&samples)
+                        .map(|stats| stats.median_ms),
+                    error: None,
+                },
+                Ok(Err(error)) => ServerProbe {
+                    id: server.id,
+                    name: server.name.to_string(),
+                    url: server.base.to_string(),
+                    reachable: false,
+                    median_latency_ms: None,
+                    error: Some(format!("{error:#}")),
+                },
+                Err(_) => ServerProbe {
+                    id: server.id,
+                    name: server.name.to_string(),
+                    url: server.base.to_string(),
+                    reachable: false,
+                    median_latency_ms: None,
+                    error: Some(format!("probe exceeded {} second(s)", timeout.as_secs())),
+                },
+            };
+            Ok::<_, anyhow::Error>(probe)
+        });
+    }
+    let mut probes = Vec::with_capacity(PUBLIC_SERVERS.len());
+    while let Some(result) = workers.join_next().await {
+        probes.push(result.context("server probe task failed")??);
+    }
+    probes.sort_by_key(|probe| probe.id);
+    Ok(probes)
+}
+
 impl LibreSpeedEngine {
     pub fn new(config: EngineConfig, custom_server: Option<&str>) -> Result<Self> {
+        Self::new_with_selection(config, custom_server, None, &[])
+    }
+
+    pub fn new_with_selection(
+        config: EngineConfig,
+        custom_server: Option<&str>,
+        server_id: Option<u16>,
+        excluded_server_ids: &[u16],
+    ) -> Result<Self> {
         config.validate()?;
+        anyhow::ensure!(
+            !(custom_server.is_some() && (server_id.is_some() || !excluded_server_ids.is_empty())),
+            "custom LibreSpeed servers cannot be combined with --server-id or --exclude-server-id"
+        );
+        if let Some(server_id) = server_id {
+            anyhow::ensure!(
+                !excluded_server_ids.contains(&server_id),
+                "LibreSpeed server ID {server_id} cannot be both selected and excluded"
+            );
+        }
         let client = Client::builder()
             .user_agent(concat!("speedtest-cli/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(25))
             .pool_max_idle_per_host(config.streams.saturating_add(4))
-            .local_address(config.family.local_address())
+            .local_address(config.family.local_address(config.source_ip))
             .build()
             .context("failed to build LibreSpeed HTTP client")?;
         let server = custom_server.map(resolve_custom_server).transpose()?;
@@ -124,6 +254,8 @@ impl LibreSpeedEngine {
             client,
             config,
             server,
+            server_id,
+            excluded_server_ids: excluded_server_ids.to_vec(),
         })
     }
 
@@ -131,7 +263,13 @@ impl LibreSpeedEngine {
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Preparing));
         let server = match &self.server {
             Some(server) => server.clone(),
-            None => select_public_server(&self.client).await?,
+            None => {
+                if let Some(server_id) = self.server_id {
+                    resolve_public_server(server_id)?
+                } else {
+                    select_public_server(&self.client, &self.excluded_server_ids).await?
+                }
+            }
         };
 
         self.emit(&tx, EngineEvent::PhaseChanged(TestPhase::Latency));
@@ -318,12 +456,26 @@ fn resolve_builtin(server: LibreSpeedServer) -> Result<ResolvedServer> {
     })
 }
 
-async fn select_public_server(client: &Client) -> Result<ResolvedServer> {
+fn resolve_public_server(id: u16) -> Result<ResolvedServer> {
+    PUBLIC_SERVERS
+        .iter()
+        .copied()
+        .find(|server| server.id == id)
+        .map(resolve_builtin)
+        .transpose()?
+        .ok_or_else(|| anyhow!("unknown LibreSpeed server ID {id}; run `speedtest servers`"))
+}
+
+async fn select_public_server(client: &Client, excluded_ids: &[u16]) -> Result<ResolvedServer> {
     let servers = PUBLIC_SERVERS
         .iter()
         .copied()
+        .filter(|server| !excluded_ids.contains(&server.id))
         .map(resolve_builtin)
         .collect::<Result<Vec<_>>>()?;
+    if servers.is_empty() {
+        return Err(anyhow!("all built-in LibreSpeed servers were excluded"));
+    }
     select_server(client, servers, Instant::now() + SERVER_SELECTION_TIMEOUT).await
 }
 
@@ -583,8 +735,11 @@ mod tests {
                 streams: 1,
                 phase_duration: Duration::from_millis(150),
                 family: crate::engine::AddressFamily::Any,
+                source_ip: None,
             },
             server: None,
+            server_id: None,
+            excluded_server_ids: Vec::new(),
         };
         let server = resolve_custom_server(&url).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

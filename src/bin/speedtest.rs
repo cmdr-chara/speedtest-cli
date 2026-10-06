@@ -13,8 +13,8 @@ use speedtest_cli::{
         DnsArgs, DnsBenchmarkArgs, DnsBenchmarkProfileArg, DnsCommand, DnsListArgs,
         DnsOptimizeArgs, DnsProtocolArg, DnsResetArgs, DnsRollbackArgs, DnsSetArgs, DnsShowArgs,
         DnsTestArgs, DoctorArgs, HistoryArgs, InsightsArgs, InsightsScopeArg, InternetBackendArg,
-        LanArgs, LossArgs, MeasurementArgs, MonitorArgs, ServeArgs, StabilityArgs, StatsArgs,
-        VerifyArgs, WifiArgs,
+        LanArgs, LossArgs, MeasurementArgs, MonitorArgs, ServeArgs, ServersArgs, StabilityArgs,
+        StatsArgs, VerifyArgs, WifiArgs,
     },
     compare::{self, CompareResult},
     diagnose::{self, DiagnosisProfile},
@@ -90,11 +90,15 @@ async fn main() -> std::process::ExitCode {
             "backend",
             "family",
             "librespeed_server",
+            "server_id",
+            "exclude_server_ids",
+            "source_ip",
             "streams",
             "duration",
             "fps",
             "plain",
             "json",
+            "jsonl",
             "output",
             "format",
             "no_save",
@@ -106,6 +110,31 @@ async fn main() -> std::process::ExitCode {
         }
     }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let invalid_backend_server_controls = match &cli.command {
+        None => {
+            !matches!(cli.backend, InternetBackendArg::Librespeed)
+                && (cli.server_id.is_some() || !cli.exclude_server_ids.is_empty())
+        }
+        Some(Command::Diagnose(args)) => {
+            !matches!(args.measurement.backend, InternetBackendArg::Librespeed)
+                && (args.measurement.server_id.is_some()
+                    || !args.measurement.exclude_server_ids.is_empty())
+        }
+        Some(Command::Monitor(args)) => {
+            !matches!(args.measurement.backend, InternetBackendArg::Librespeed)
+                && (args.measurement.server_id.is_some()
+                    || !args.measurement.exclude_server_ids.is_empty())
+        }
+        _ => false,
+    };
+    if invalid_backend_server_controls {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--server-id and --exclude-server-id require --backend librespeed; no measurement was started",
+            )
+            .exit();
+    }
     let invalid_measurement_server = match &cli.command {
         Some(Command::Diagnose(args)) => args
             .measurement
@@ -143,7 +172,8 @@ async fn main() -> std::process::ExitCode {
     // a configuration transaction halfway through because a generic select fired.
     let interruptible = matches!(
         cli.command,
-        None | Some(Command::Stability(_))
+        None | Some(Command::Servers(_))
+            | Some(Command::Stability(_))
             | Some(Command::Loss(_))
             | Some(Command::Verify(_))
             | Some(Command::Diagnose(_))
@@ -179,10 +209,11 @@ async fn dispatch(mut cli: Cli) -> Result<()> {
         && io::stdout().is_terminal()
         && cli.color.allows_tui()
         && !matches!(cli.progress, speedtest_cli::cli::ProgressMode::Never);
-    if !can_interact && !cli.json {
+    if !can_interact && !cli.json && !cli.jsonl {
         cli.plain = true;
     }
     match cli.command.clone() {
+        Some(Command::Servers(args)) => run_servers(args).await,
         Some(Command::Check(args)) => run_check(args),
         Some(Command::Stability(mut args)) => {
             if !can_interact && !args.json {
@@ -203,7 +234,7 @@ async fn dispatch(mut cli: Cli) -> Result<()> {
         Some(Command::Verify(args)) => run_verify(args).await,
         Some(Command::Serve(args)) => run_serve(args).await,
         Some(Command::Lan(args)) => run_lan(args).await,
-        None if can_interact && !cli.plain && !cli.json && !cli.run => {
+        None if can_interact && !cli.plain && !cli.json && !cli.jsonl && !cli.run => {
             tui::run_cockpit(TestOptions::from(&cli)).await
         }
         None => run_speedtest(cli).await,
@@ -214,11 +245,13 @@ async fn run_speedtest(cli: Cli) -> Result<()> {
     let options = TestOptions::from(&cli);
     let engine = options.engine()?;
 
-    let result = if cli.plain || cli.json {
+    let machine_output = cli.json || cli.jsonl;
+    let result = if cli.plain || machine_output {
         run_non_interactive(
             &engine,
             Duration::from_secs(cli.timeout),
-            cli.progress.enabled_for(cli.json),
+            cli.progress.enabled_for(machine_output),
+            cli.jsonl,
         )
         .await?
     } else {
@@ -228,10 +261,72 @@ async fn run_speedtest(cli: Cli) -> Result<()> {
     options.finish(&result)?;
     if cli.json {
         println!("{}", result.pretty_json()?);
-    } else {
+    } else if !cli.jsonl {
         print_result(&result)?;
+    } else {
+        print_jsonl_event(&EngineEvent::Complete(result))?;
     }
 
+    Ok(())
+}
+
+async fn run_servers(args: ServersArgs) -> Result<()> {
+    if !args.probe {
+        let servers = speedtest_cli::engine::librespeed::server_catalog();
+        if args.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": 1,
+                    "backend": "librespeed",
+                    "probed": false,
+                    "servers": servers,
+                })
+            );
+        } else {
+            println!("LIBRESPEED SERVERS");
+            println!("  ID  NAME                                  URL");
+            for server in servers {
+                println!("  {:>2}  {:<36} {}", server.id, server.name, server.url);
+            }
+            println!();
+            println!("Use `--server-id ID` with `--backend librespeed` to pin a measurement.");
+        }
+        return Ok(());
+    }
+
+    let probes = speedtest_cli::engine::librespeed::probe_public_servers(
+        args.family.engine_family(),
+        args.source_ip,
+        Duration::from_secs(args.timeout),
+    )
+    .await?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema_version": 1,
+                "backend": "librespeed",
+                "probed": true,
+                "family": args.family.label(),
+                "servers": probes,
+            })
+        );
+    } else {
+        println!("LIBRESPEED SERVER PROBES · {}", args.family.label());
+        for probe in probes {
+            if let Some(latency) = probe.median_latency_ms {
+                println!("  {:>2}  {:<36} {:>7.1} ms", probe.id, probe.name, latency);
+            } else {
+                println!(
+                    "  {:>2}  {:<36} unavailable ({})",
+                    probe.id,
+                    probe.name,
+                    probe.error.as_deref().unwrap_or("unknown error")
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1043,8 +1138,9 @@ async fn run_doctor(args: DoctorArgs) -> Result<()> {
             streams: 2,
             phase_duration: Duration::from_secs(8),
             family: speedtest_cli::engine::AddressFamily::Any,
+            source_ip: None,
         })?);
-        let result = run_non_interactive(&engine, Duration::from_secs(120), false)
+        let result = run_non_interactive(&engine, Duration::from_secs(120), false, false)
             .await
             .context("full doctor speed test failed")?;
         report.attach_speedtest(result);
@@ -1096,6 +1192,7 @@ async fn run_diagnose(args: DiagnoseArgs, cli: Cli) -> Result<()> {
                 &engine,
                 Duration::from_secs(options.timeout),
                 cli.progress.enabled_for(args.json),
+                false,
             )
             .await
             {
@@ -1161,6 +1258,7 @@ async fn run_monitor(args: MonitorArgs, cli: Cli) -> Result<()> {
             &engine,
             Duration::from_secs(options.timeout),
             cli.progress.enabled_for(args.json),
+            false,
         )
         .await;
         let completed_at = Utc::now();
@@ -1326,6 +1424,9 @@ fn cli_with_measurement(cli: &Cli, measurement: &MeasurementArgs) -> Cli {
     cli.backend = measurement.backend;
     cli.family = measurement.family;
     cli.librespeed_server = measurement.librespeed_server.clone();
+    cli.server_id = measurement.server_id;
+    cli.exclude_server_ids = measurement.exclude_server_ids.clone();
+    cli.source_ip = measurement.source_ip;
     cli.duration = measurement.duration;
     cli.streams = measurement.streams;
     cli.timeout = measurement.timeout;
@@ -1486,6 +1587,7 @@ async fn run_verify(args: VerifyArgs) -> Result<()> {
             streams: usize::from(args.streams),
             phase_duration: Duration::from_secs(args.duration),
             family,
+            source_ip: None,
         },
         args.librespeed_server.as_deref(),
     )
@@ -1497,6 +1599,7 @@ async fn run_verify(args: VerifyArgs) -> Result<()> {
                     streams: usize::from(args.streams),
                     phase_duration: Duration::from_secs(args.duration),
                     family,
+                    source_ip: None,
                 },
                 args.librespeed_server.as_deref(),
             )
@@ -1558,15 +1661,34 @@ async fn run_non_interactive(
     engine: &InternetEngine,
     limit: Duration,
     progress: bool,
+    jsonl: bool,
 ) -> Result<TestResult> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let measurement = runtime::deadline(limit, engine.run(tx));
     tokio::pin!(measurement);
     loop {
         tokio::select! {
-            result = &mut measurement => return result,
+            result = &mut measurement => {
+                let result = result?;
+                while let Ok(event) = rx.try_recv() {
+                    if jsonl {
+                        if !matches!(&event, EngineEvent::Complete(_)) {
+                            print_jsonl_event(&event)?;
+                        }
+                    } else if progress {
+                        if let EngineEvent::PhaseChanged(phase) = event {
+                            output::diagnostic(format_args!("speedtest: {}", tr(&format!("{phase:?}"))))?;
+                        }
+                    }
+                }
+                return Ok(result);
+            },
             Some(event) = rx.recv() => {
-                if progress {
+                if jsonl {
+                    if !matches!(&event, EngineEvent::Complete(_)) {
+                        print_jsonl_event(&event)?;
+                    }
+                } else if progress {
                     if let EngineEvent::PhaseChanged(phase) = event {
                         output::diagnostic(format_args!("speedtest: {}", tr(&format!("{phase:?}"))))?;
                     }
@@ -1574,6 +1696,46 @@ async fn run_non_interactive(
             }
         }
     }
+}
+
+fn print_jsonl_event(event: &EngineEvent) -> Result<()> {
+    let value = match event {
+        EngineEvent::PhaseChanged(phase) => serde_json::json!({
+            "schema_version": 1,
+            "type": "phase",
+            "phase": phase.label().to_ascii_lowercase(),
+        }),
+        EngineEvent::IdleLatency { ping_ms, jitter_ms } => serde_json::json!({
+            "schema_version": 1,
+            "type": "idle_latency",
+            "ping_ms": ping_ms,
+            "jitter_ms": jitter_ms,
+        }),
+        EngineEvent::ThroughputSample { phase, mbps } => serde_json::json!({
+            "schema_version": 1,
+            "type": "throughput_sample",
+            "phase": phase.label().to_ascii_lowercase(),
+            "mbps": mbps,
+        }),
+        EngineEvent::LoadedLatency { phase, ms } => serde_json::json!({
+            "schema_version": 1,
+            "type": "loaded_latency",
+            "phase": phase.label().to_ascii_lowercase(),
+            "ms": ms,
+        }),
+        EngineEvent::Complete(result) => serde_json::json!({
+            "schema_version": 1,
+            "type": "result",
+            "result": result,
+        }),
+        EngineEvent::Error(error) => serde_json::json!({
+            "schema_version": 1,
+            "type": "error",
+            "message": error,
+        }),
+    };
+    println!("{}", serde_json::to_string(&value)?);
+    Ok(())
 }
 
 async fn run_interactive(engine: InternetEngine, fps: u16, limit: Duration) -> Result<TestResult> {
