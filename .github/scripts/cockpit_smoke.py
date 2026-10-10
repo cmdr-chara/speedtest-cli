@@ -449,6 +449,27 @@ def main():
                 before = server.requests
                 tty.send('\t\t')
                 tty.wait('YOUR NETWORK, OVER TIME')
+                tty.send('/fixture-07\r')
+                tty.wait('1 / 25 runs')
+                tty.send('\r')
+                tty.wait('MEASUREMENT COMPLETE')
+                tty.wait('fixture-07')
+                tty.send('\x1b')
+                tty.wait('YOUR NETWORK, OVER TIME')
+                tty.send('/qbc')  # Search text must not quit, pin, or compare.
+                tty.wait('No matching runs')
+                assert tty.process.poll() is None, 'search shortcut text quit the cockpit'
+                tty.send('\x1b')  # Cancel restores the previous query and selection.
+                tty.wait('1 / 25 runs')
+                tty.send('xs\x1b[1~\r')  # Reset, oldest first, then open first visible row.
+                tty.wait('MEASUREMENT COMPLETE')
+                tty.wait('fixture-00')
+                tty.send('\x1b')
+                tty.wait('YOUR NETWORK, OVER TIME')
+                tty.send('x\x1b[1~')  # Reset ordering and select newest again.
+                tty.wait('25 / 25 runs')
+                assert history.read_text(encoding='utf-8').splitlines() == [json.dumps(item) for item in records]
+                assert server.requests == before, 'history explorer started network work'
                 tty.send('\x1b[6~\r')  # PageDown moves the selected row, not hidden report scroll.
                 tty.wait('MEASUREMENT COMPLETE')
                 assert 'fixture-24' not in tty.screen.text(), 'PageDown left the newest row selected'
@@ -490,7 +511,7 @@ def main():
                 tty.wait('fixture-24')
                 tty.send('\x1b')
                 tty.send('\t')
-                tty.wait('26 RUNS')
+                tty.wait('26 runs')
                 tty.snapshot('Statistics from saved loopback fixtures')
                 assert server.requests == before, 'history paging/comparison/reload started network work'
                 tty.send('q')

@@ -194,10 +194,11 @@ pub fn summarize(records: &[MonitorRecord]) -> MonitorReport {
         } else {
             current += 1;
             max_streak = max_streak.max(current);
-            if failures.len() < 5 {
-                if let Some(error) = record.error.as_deref() {
-                    failures.push(error.to_string());
+            if let Some(error) = record.error.as_deref() {
+                if failures.len() == 5 {
+                    failures.remove(0);
                 }
+                failures.push(error.to_string());
             }
         }
     }
@@ -257,5 +258,32 @@ mod tests {
         assert_eq!(report.max_failure_streak, 1);
         assert_eq!(report.current_failure_streak, 0);
         assert_eq!(report.recent_failures, vec!["timeout"]);
+    }
+
+    #[test]
+    fn recent_failures_keeps_the_last_five_in_record_order() {
+        let now = Utc::now();
+        let mut records: Vec<_> = (1..=8)
+            .map(|sequence| {
+                MonitorRecord::failure(sequence, now, now, format!("failure {sequence}"))
+            })
+            .collect();
+        let result: TestResult =
+            serde_json::from_str(include_str!("../tests/fixtures/result.json")).unwrap();
+        records.push(MonitorRecord::success(9, now, now, result));
+        let report = summarize(&records);
+        assert_eq!(
+            report.recent_failures,
+            [
+                "failure 4",
+                "failure 5",
+                "failure 6",
+                "failure 7",
+                "failure 8"
+            ]
+        );
+        assert_eq!(report.failures, 8);
+        assert_eq!(report.max_failure_streak, 8);
+        assert_eq!(report.current_failure_streak, 0);
     }
 }

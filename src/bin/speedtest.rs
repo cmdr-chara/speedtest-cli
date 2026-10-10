@@ -12,9 +12,9 @@ use speedtest_cli::{
         CheckArgs, Cli, ColorMode, Command, CompareArgs, DiagnoseArgs, DiagnosisProfileArg,
         DnsArgs, DnsBenchmarkArgs, DnsBenchmarkProfileArg, DnsCommand, DnsListArgs,
         DnsOptimizeArgs, DnsProtocolArg, DnsResetArgs, DnsRollbackArgs, DnsSetArgs, DnsShowArgs,
-        DnsTestArgs, DoctorArgs, HistoryArgs, InsightsArgs, InsightsScopeArg, InternetBackendArg,
-        LanArgs, LossArgs, MeasurementArgs, MonitorArgs, ServeArgs, ServersArgs, StabilityArgs,
-        StatsArgs, VerifyArgs, WifiArgs,
+        DnsTestArgs, DoctorArgs, HistoryArgs, HistoryOutputFormat, InsightsArgs, InsightsScopeArg,
+        InternetBackendArg, LanArgs, LossArgs, MeasurementArgs, MetricsArgs, MonitorArgs,
+        ServeArgs, ServersArgs, StabilityArgs, StatsArgs, VerifyArgs, WifiArgs,
     },
     compare::{self, CompareResult},
     diagnose::{self, DiagnosisProfile},
@@ -25,7 +25,7 @@ use speedtest_cli::{
     history::{self, HistorySummary},
     i18n,
     insights::{self, InsightsReport},
-    lan, loss,
+    lan, loss, metrics,
     model::TestResult,
     monitor::{self, MonitorRecord, MonitorReport},
     output, runtime,
@@ -224,6 +224,7 @@ async fn dispatch(mut cli: Cli) -> Result<()> {
         Some(Command::History(args)) => run_history(args),
         Some(Command::Stats(args)) => run_stats(args),
         Some(Command::Insights(args)) => run_insights(args),
+        Some(Command::Metrics(args)) => run_metrics(args),
         Some(Command::Dns(args)) => run_dns(args).await,
         Some(Command::Compare(args)) => run_compare(args),
         Some(Command::Doctor(args)) => run_doctor(args).await,
@@ -354,7 +355,17 @@ async fn run_stability(args: StabilityArgs) -> Result<()> {
 }
 
 fn run_history(args: HistoryArgs) -> Result<()> {
-    let results = storage::load_history_since(args.days)?;
+    let results = args
+        .filter
+        .selection()
+        .select(&storage::load_history_since(args.days)?);
+    if let Some(path) = &args.output {
+        match args.format {
+            HistoryOutputFormat::Json => storage::write_history_json(path, &results)?,
+            HistoryOutputFormat::Csv => storage::write_history_csv(path, &results)?,
+            HistoryOutputFormat::Jsonl => storage::write_history_jsonl(path, &results)?,
+        }
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&results)?);
         return Ok(());
@@ -431,7 +442,10 @@ fn run_history(args: HistoryArgs) -> Result<()> {
 }
 
 fn run_stats(args: StatsArgs) -> Result<()> {
-    let results = storage::load_history_since(args.days)?;
+    let results = args
+        .filter
+        .selection()
+        .select(&storage::load_history_since(args.days)?);
     let Some(summary) = history::summarize(&results, args.days) else {
         if args.json {
             println!("null");
@@ -456,20 +470,36 @@ fn run_stats(args: StatsArgs) -> Result<()> {
 
 fn run_insights(args: InsightsArgs) -> Result<()> {
     let history = storage::load_history_since(args.days)?;
-    let selection = history::HistorySelection {
-        scope: match args.scope {
-            InsightsScopeArg::All => None,
-            InsightsScopeArg::Internet => Some(history::HistoryScope::Internet),
-            InsightsScopeArg::Lan => Some(history::HistoryScope::Lan),
-        },
-        backend: args.backend.clone(),
-    };
-    let selected = selection.select(&history);
+    let selected = args.filter.selection().select(&history);
     let report = insights::analyze(&selected, args.days);
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        print_insights(&report, args.scope, args.backend.as_deref())?;
+        print_insights(&report, args.filter.scope, args.filter.backend.as_deref())?;
+    }
+    Ok(())
+}
+
+fn run_metrics(args: MetricsArgs) -> Result<()> {
+    let result = match args.result.as_deref() {
+        Some("-") => check::read_result(io::stdin().lock())?,
+        Some(path) => storage::read_result(std::path::Path::new(path))?,
+        None => args
+            .filter
+            .selection()
+            .select(&storage::load_history()?)
+            .pop()
+            .context("no saved result matches the metrics filters; run a speed test or provide a canonical JSON file")?,
+    };
+    if let Some(max_age) = args.max_age {
+        metrics::ensure_fresh(&result, max_age, Utc::now())?;
+    }
+    let content = metrics::render(&result)?;
+    if let Some(path) = &args.output {
+        storage::write_metrics(path, &content)?;
+    } else {
+        // The renderer escapes label controls and includes the required final newline.
+        println!("{}", content.trim_end_matches('\n'));
     }
     Ok(())
 }

@@ -510,15 +510,35 @@ speedtest stability --json
 speedtest history
 speedtest history --days 30 --limit 50
 speedtest history --json
+speedtest history --scope internet --backend cloudflare
+speedtest history --server speed.cloudflare.com --output history.jsonl --format jsonl
+speedtest history --scope lan --output lan-history.csv --format csv
 
 speedtest stats
 speedtest stats --days 90
 speedtest stats --json
+speedtest stats --backend librespeed --server example.net
 
 speedtest insights
 speedtest insights --days 90 --scope internet
 speedtest insights --backend cloudflare --json
+speedtest insights --scope lan --server 192.168.1.50:9876 --json
 ```
+
+All three commands support `--scope all|internet|lan`, `--backend BACKEND`, and
+`--server HOST`. Backends and hostnames match case-insensitively. Complete HTTP(S)
+URLs normalize scheme/host but retain case-sensitive paths and query strings;
+server display names and partial host names do not match. Filters combine. Use the
+host value from a saved JSON result when an endpoint includes a scheme or port.
+The existing `stats --scope all` policy prefers Internet results when both Internet
+and LAN data match; choose `--scope lan` to summarize LAN measurements explicitly.
+
+`history --output PATH --format json|csv|jsonl` atomically replaces an export with
+**all matching runs in chronological order**. `--limit` affects only the terminal
+table; it never truncates JSON output or file exports. JSON is a canonical result
+array, JSONL contains one canonical result per line, and CSV retains the existing
+single-result column names and units. Empty selections export `[]`, an empty JSONL
+file, or a CSV header. Export failures return an error without claiming success.
 
 History/statistics include median/best throughput, latency statistics, quality context, S-tier counts, trend detection, a Unicode throughput sparkline, and latest-run anomaly detection against prior saved results.
 Anomaly detection requires at least five earlier runs on the same backend/server path;
@@ -540,6 +560,60 @@ and bufferbloat, with before/after values, changes, and explicit better/worse la
 Each side identifies its timestamp and backend. Missing metrics remain unavailable;
 they are never shown as zero. Comparison and baseline selection are offline and
 session-only.
+
+### Cockpit history explorer
+
+In **History**, press `/` to search backend, server host/name, or date. While editing,
+characters such as `q`, `b`, and `c` are query text; Enter applies and Esc cancels.
+Press `f` to cycle All / Internet / LAN, `s` to change sort order, `p` to isolate the
+selected backend/server path, and `x` to reset the explorer. The toolbar shows active
+filters and matching counts. These controls never rewrite or delete saved history.
+
+Enter, baseline pinning, and comparison always act on the visible selected record.
+Without a pinned baseline, comparison uses older chronological evidence even when
+the table is sorted by speed or latency. A pinned baseline remains a snapshot when
+filters change. Empty matches have a reset hint and cannot open or compare a run.
+
+In **Statistics**, `m` cycles download, upload, idle latency, jitter, loaded latency,
+and quality; `f` changes scope and `p` changes path. Values retain their units and
+indicate whether higher or lower is better. Missing optional measurements remain
+unavailable. The chart describes saved test samples, not continuous monitoring.
+
+## Prometheus textfile export
+
+```bash
+speedtest metrics                                      # Latest saved run
+speedtest metrics --backend cloudflare --max-age 3600
+speedtest metrics result.json                          # One canonical JSON file
+speedtest --json --no-save | speedtest metrics -        # Explicit test, then conversion
+speedtest metrics --max-age 3600 --output speedtest.prom
+```
+
+This command is an offline converter for the
+[Prometheus text exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/).
+It does not start an HTTP server, schedule measurements, or contact a speed-test provider.
+Point a separately configured node-exporter textfile collector at the output directory,
+or read stdout in your existing automation.
+
+On Unix, new metrics files use `0666` restricted by your process umask: the usual
+`022` creates `0644`, while `027` creates `0640` and `077` creates `0600`.
+Replacing a file preserves its existing permissions. Choose a directory and file
+permissions readable by the collector's account; a restrictive umask remains
+restrictive. JSON, CSV, and history exports retain their private creation defaults.
+
+With no input file, the latest matching saved run is selected. `--backend`, `--scope`,
+and `--server` apply only to saved-history selection; they cannot be combined with an
+explicit file or stdin. `--max-age SECONDS` rejects stale and future results before
+writing. Missing history, malformed input, and output errors fail explicitly.
+An unsuccessful conversion leaves an existing regular output file intact.
+
+Metric names use the `speedtest_` prefix. Throughput is exported in bits per second,
+latency in seconds, and transferred data in bytes. The result timestamp is a Unix-time
+gauge so consumers can detect stale evidence. Metrics describe one test, so byte
+readings are gauges rather than lifetime counters. Backend and server labels are
+escaped. Optional loaded-latency, loss, and quality readings are omitted when absent;
+unavailable measurements are never converted to zero. Textfile output has no
+per-sample Prometheus timestamps.
 
 ## Installation
 
