@@ -293,6 +293,92 @@ fn metrics_reads_stdin_files_or_latest_selected_history_offline() {
     assert!(String::from_utf8_lossy(&empty.stderr).contains("no saved result matches"));
 }
 
+#[cfg(unix)]
+#[test]
+fn metrics_textfiles_respect_umask_and_preserve_existing_modes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("result.json");
+    std::fs::write(&source, include_str!("fixtures/result.json")).unwrap();
+    // Set umask only in the child shell, never in this parallel test process.
+    let run_with_umask = |mask: &str, arguments: &[&str]| {
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                "umask \"$1\" && shift && exec \"$@\"",
+                "speedtest-permissions",
+                mask,
+            ])
+            .arg(env!("CARGO_BIN_EXE_speedtest"))
+            .args(arguments)
+            .env("HOME", directory.path())
+            .env("XDG_DATA_HOME", directory.path())
+            .env("SPEEDTEST_LANGUAGE", "en")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    for (mask, expected) in [("022", 0o644), ("027", 0o640), ("077", 0o600)] {
+        let destination = directory.path().join(format!("metrics-{mask}.prom"));
+        let output = run_with_umask(
+            mask,
+            &[
+                "metrics",
+                source.to_str().unwrap(),
+                "--output",
+                destination.to_str().unwrap(),
+            ],
+        );
+        assert!(output.stdout.is_empty());
+        assert_eq!(mode(&destination), expected);
+        assert!(std::fs::read_to_string(destination)
+            .unwrap()
+            .contains("speedtest_download_bits_per_second"));
+    }
+
+    for (existing, mask) in [(0o640, "077"), (0o600, "022")] {
+        let destination = directory.path().join("existing.prom");
+        std::fs::write(&destination, "previous metrics\n").unwrap();
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(existing)).unwrap();
+        run_with_umask(
+            mask,
+            &[
+                "metrics",
+                source.to_str().unwrap(),
+                "--output",
+                destination.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(mode(&destination), existing);
+    }
+
+    for format in ["json", "csv", "jsonl"] {
+        let destination = directory.path().join(format!("history.{format}"));
+        run_with_umask(
+            "022",
+            &[
+                "history",
+                "--json",
+                "--output",
+                destination.to_str().unwrap(),
+                "--format",
+                format,
+            ],
+        );
+        assert_eq!(mode(&destination), 0o600);
+    }
+}
+
 #[test]
 fn metrics_fail_closed_on_invalid_input_stale_data_or_conflicting_filters() {
     let directory = tempfile::tempdir().unwrap();

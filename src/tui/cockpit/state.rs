@@ -115,6 +115,12 @@ pub(super) enum Effect {
 }
 
 #[derive(Debug)]
+struct StatisticsComparison {
+    scope: crate::history::HistoryScope,
+    path: Option<(String, String)>,
+}
+
+#[derive(Debug)]
 pub(super) struct Cockpit {
     pub pages: Vec<Page>,
     pub options: TestOptions,
@@ -137,6 +143,7 @@ pub(super) struct Cockpit {
     pub baseline: Option<TestResult>,
     pub comparison: Option<ComparedRuns>,
     pub comparison_selected: bool,
+    statistics_comparison: Option<StatisticsComparison>,
     pub table: TableState,
     pub live: App,
     pub result: Option<TestResult>,
@@ -175,6 +182,7 @@ impl Cockpit {
             baseline: None,
             comparison: None,
             comparison_selected: false,
+            statistics_comparison: None,
             table: TableState::default(),
             live: App::default(),
             result: None,
@@ -286,6 +294,24 @@ impl Cockpit {
         };
         self.refresh_history_view(anchor.as_ref());
         self.refresh_statistics();
+        self.refresh_statistics_comparison();
+    }
+
+    fn refresh_statistics_comparison(&mut self) {
+        let (Some(selection), Load::Ready(archive)) = (&self.statistics_comparison, &self.history)
+        else {
+            return;
+        };
+        // Statistics compares the latest pair in its chosen population. Unlike
+        // explicitly selected History snapshots, this pair follows a successful
+        // reload, including becoming unavailable when fewer than two runs remain.
+        let filter = crate::history::HistorySelection {
+            scope: Some(selection.scope),
+            backend: selection.path.as_ref().map(|(backend, _)| backend.clone()),
+            server: selection.path.as_ref().map(|(_, host)| host.clone()),
+        };
+        self.comparison = crate::history::latest_comparable_pair(&filter.select(&archive.results))
+            .map(|(before, after)| ComparedRuns::new(&before, &after));
     }
 
     fn refresh_history_view(&mut self, anchor: Option<&HistoryAnchor>) {
@@ -440,6 +466,7 @@ impl Cockpit {
         }
         self.comparison = Some(ComparedRuns::new(before, after));
         self.comparison_selected = true;
+        self.statistics_comparison = None;
         self.notice.clear();
         self.push(Screen::Compare);
     }
@@ -882,21 +909,13 @@ impl Cockpit {
                     }
                 }
                 Screen::Statistics => {
-                    let scope = self.statistics_scope();
-                    self.comparison = self
-                        .statistics()
-                        .and_then(|archive| {
-                            crate::history::latest_comparable_pair(
-                                &archive
-                                    .results
-                                    .iter()
-                                    .filter(|result| crate::history::matches_scope(result, scope))
-                                    .cloned()
-                                    .collect::<Vec<_>>(),
-                            )
-                        })
-                        .map(|(before, after)| ComparedRuns::new(&before, &after));
+                    self.statistics_comparison = Some(StatisticsComparison {
+                        scope: self.statistics_scope(),
+                        path: self.statistics_path.clone(),
+                    });
+                    self.comparison = None;
                     self.comparison_selected = true;
+                    self.refresh_statistics_comparison();
                     self.push(Screen::Compare);
                 }
                 Screen::Dns | Screen::Diagnostics => {

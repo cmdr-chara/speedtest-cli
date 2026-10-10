@@ -496,7 +496,7 @@ fn run_metrics(args: MetricsArgs) -> Result<()> {
     }
     let content = metrics::render(&result)?;
     if let Some(path) = &args.output {
-        storage::write_text(path, &content)?;
+        storage::write_metrics(path, &content)?;
     } else {
         // The renderer escapes label controls and includes the required final newline.
         println!("{}", content.trim_end_matches('\n'));

@@ -83,6 +83,8 @@ The controls rebuild an in-memory archive from existing results. Both the compac
 sparkline and larger chart use the selected metric and its units; missing optional
 values are excluded from summaries. The view identifies saved samples explicitly
 so a sparse archive cannot be mistaken for continuous monitoring.
+Reloading history refreshes a Statistics comparison within its selected scope and
+path. Explicit History comparisons and pinned baselines remain session snapshots.
 
 ## Lifecycle and navigation
 

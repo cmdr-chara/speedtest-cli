@@ -595,6 +595,12 @@ It does not start an HTTP server, schedule measurements, or contact a speed-test
 Point a separately configured node-exporter textfile collector at the output directory,
 or read stdout in your existing automation.
 
+On Unix, new metrics files use `0666` restricted by your process umask: the usual
+`022` creates `0644`, while `027` creates `0640` and `077` creates `0600`.
+Replacing a file preserves its existing permissions. Choose a directory and file
+permissions readable by the collector's account; a restrictive umask remains
+restrictive. JSON, CSV, and history exports retain their private creation defaults.
+
 With no input file, the latest matching saved run is selected. `--backend`, `--scope`,
 and `--server` apply only to saved-history selection; they cannot be combined with an
 explicit file or stdin. `--max-age SECONDS` rejects stale and future results before

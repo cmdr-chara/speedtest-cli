@@ -90,7 +90,7 @@ fn persist_at<T: Serialize>(
     let results_dir = root.join("results");
     fs::create_dir_all(&results_dir).context("failed to create results directory")?;
     let stamp = timestamp.format("%Y%m%dT%H%M%S%.9fZ");
-    let mut pending = prepared_file(&results_dir, &json_bytes(result)?)?;
+    let mut pending = prepared_file(&results_dir, &json_bytes(result)?, None)?;
     let mut sequence = 0_u64;
     let result_path = loop {
         let filename = if sequence == 0 {
@@ -190,9 +190,18 @@ fn validate_history_export(results: &[TestResult]) -> Result<()> {
     Ok(())
 }
 
-/// Reuse the same atomic replacement and destination handling as JSON/CSV exports.
-pub fn write_text(path: &Path, content: &str) -> Result<()> {
-    atomic_write(path, content.as_bytes())
+/// Atomically publish collector-readable metrics. On Unix, new textfiles use
+/// normal file creation permissions (0666 restricted by umask); existing modes
+/// are preserved. Other result/history exports keep their private defaults.
+pub fn write_metrics(path: &Path, content: &str) -> Result<()> {
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(fs::Permissions::from_mode(0o666))
+    };
+    #[cfg(not(unix))]
+    let permissions = None;
+    atomic_write_with_permissions(path, content.as_bytes(), permissions)
 }
 
 fn write_json_value<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -206,9 +215,17 @@ fn json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(content)
 }
 
-fn prepared_file(directory: &Path, content: &[u8]) -> Result<NamedTempFile> {
-    let mut pending = tempfile::Builder::new()
-        .prefix(".speedtest-")
+fn prepared_file(
+    directory: &Path,
+    content: &[u8],
+    permissions: Option<fs::Permissions>,
+) -> Result<NamedTempFile> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".speedtest-");
+    if let Some(permissions) = permissions {
+        builder.permissions(permissions);
+    }
+    let mut pending = builder
         .tempfile_in(directory)
         .context("failed to create temporary output")?;
     pending
@@ -222,6 +239,14 @@ fn prepared_file(directory: &Path, content: &[u8]) -> Result<NamedTempFile> {
 }
 
 fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    atomic_write_with_permissions(path, content, None)
+}
+
+fn atomic_write_with_permissions(
+    path: &Path,
+    content: &[u8],
+    permissions: Option<fs::Permissions>,
+) -> Result<()> {
     ensure_parent(path)?;
     // Follow output symlinks as ordinary file writes do, including a link to a
     // target that has not been created yet. Never replace a device or named pipe.
@@ -248,7 +273,14 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let pending = prepared_file(parent, content)?;
+    // Existing destinations retain a private temporary file until their mode
+    // is restored below; only brand-new metrics opt into ordinary file modes.
+    let permissions = if metadata.is_none() {
+        permissions
+    } else {
+        None
+    };
+    let pending = prepared_file(parent, content, permissions)?;
     if let Some(metadata) = metadata {
         pending
             .as_file()

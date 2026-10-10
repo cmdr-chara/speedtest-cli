@@ -1827,6 +1827,137 @@ fn optional_statistics_chart_uses_available_samples_before_applying_its_window()
 }
 
 #[test]
+fn statistics_comparison_reload_refreshes_only_its_scope_and_keeps_missing_pairs_explicit() {
+    let mut app = app();
+    let first = result();
+    let mut second = first.clone();
+    second.timestamp += chrono::Duration::hours(1);
+    let mut lan_first = second.clone();
+    lan_first.backend = "lan".into();
+    lan_first.timestamp += chrono::Duration::hours(1);
+    let mut lan_second = lan_first.clone();
+    lan_second.timestamp += chrono::Duration::hours(1);
+    let mut records = vec![
+        first.clone(),
+        second.clone(),
+        lan_first.clone(),
+        lan_second.clone(),
+    ];
+    app.set_history(Ok(Archive::from_results(records.clone())));
+    app.push(Screen::Statistics);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.screen(), Screen::Compare);
+    assert_eq!(
+        app.comparison.as_ref().unwrap().after.timestamp,
+        second.timestamp
+    );
+
+    let mut newest = second.clone();
+    newest.timestamp += chrono::Duration::hours(4);
+    records.push(newest.clone());
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Ok(Archive::from_results(records)));
+    let compared = app.comparison.as_ref().unwrap();
+    assert_eq!(compared.before.timestamp, second.timestamp);
+    assert_eq!(compared.after.timestamp, newest.timestamp);
+    assert_eq!(app.screen(), Screen::Compare);
+
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Err("temporary history failure".into()));
+    assert_eq!(
+        app.comparison.as_ref().unwrap().after.timestamp,
+        newest.timestamp
+    );
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Ok(Archive::from_results(vec![
+        lan_first.clone(),
+        lan_second.clone(),
+    ])));
+    assert!(app.comparison.is_none());
+    assert!(app.comparison_selected);
+    assert!(render(&mut app, 80, 24)
+        .0
+        .contains("Two saved tests are needed in this selection"));
+
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Ok(Archive::from_results(vec![
+        first.clone(),
+        lan_first.clone(),
+        lan_second.clone(),
+    ])));
+    assert!(
+        app.comparison.is_none(),
+        "one Internet result must not fall back to the LAN pair"
+    );
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Ok(Archive::from_results(vec![
+        first,
+        second.clone(),
+        lan_first,
+        lan_second,
+    ])));
+    assert_eq!(
+        app.comparison.as_ref().unwrap().after.timestamp,
+        second.timestamp
+    );
+}
+
+#[test]
+fn statistics_path_reload_does_not_make_later_explicit_history_snapshots_dynamic() {
+    let mut app = app();
+    let mut records: Vec<_> = (0..4)
+        .map(|index| {
+            let mut saved = result();
+            saved.timestamp += chrono::Duration::hours(index);
+            saved.server.host = if index < 2 {
+                "https://example.test/A/"
+            } else {
+                "https://example.test/a/"
+            }
+            .into();
+            saved
+        })
+        .collect();
+    app.set_history(Ok(Archive::from_results(records.clone())));
+    app.push(Screen::Statistics);
+    key(&mut app, KeyCode::Char('p'));
+    key(&mut app, KeyCode::Enter);
+    let mut newest = app.comparison.as_ref().unwrap().after.clone();
+    newest.timestamp += chrono::Duration::hours(10);
+    let mut unrelated = newest.clone();
+    unrelated.server.host = "https://example.test/other/".into();
+    unrelated.timestamp += chrono::Duration::hours(1);
+    records.extend([newest.clone(), unrelated]);
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Ok(Archive::from_results(records.clone())));
+    assert!(super::services::same_result(
+        &app.comparison.as_ref().unwrap().after,
+        &newest
+    ));
+
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::BackTab);
+    assert_eq!(app.screen(), Screen::History);
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Char('b'));
+    key(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::Char('c'));
+    let before = app.comparison.as_ref().unwrap().before.clone();
+    let after = app.comparison.as_ref().unwrap().after.clone();
+    let mut replacement = newest;
+    replacement.timestamp += chrono::Duration::days(1);
+    assert_eq!(key(&mut app, KeyCode::Char('r')), Effect::LoadHistory);
+    app.set_history(Ok(Archive::from_results(vec![replacement])));
+    let compared = app.comparison.as_ref().unwrap();
+    assert!(super::services::same_result(&compared.before, &before));
+    assert!(super::services::same_result(&compared.after, &after));
+    assert!(super::services::same_result(
+        app.baseline.as_ref().unwrap(),
+        &before
+    ));
+}
+
+#[test]
 fn capture_explorer_frames_when_explicitly_requested() {
     let Ok(root) = std::env::var("COCKPIT_EXPLORER_SNAPSHOT_DIR") else {
         return;
