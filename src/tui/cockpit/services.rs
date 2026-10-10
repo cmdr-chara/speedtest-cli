@@ -41,11 +41,129 @@ impl ComparedRuns {
 
 /// Timestamp collisions are valid. Match the complete canonical record, and keep
 /// the occurrence when an archive contains identical duplicate records.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct HistoryAnchor {
     timestamp: chrono::DateTime<chrono::Utc>,
     record: String,
     occurrence: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScopeFilter {
+    #[default]
+    All,
+    Internet,
+    Lan,
+}
+
+impl ScopeFilter {
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Internet,
+            Self::Internet => Self::Lan,
+            Self::Lan => Self::All,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All runs",
+            Self::Internet => "Internet",
+            Self::Lan => "LAN",
+        }
+    }
+    fn matches(self, result: &TestResult) -> bool {
+        match self {
+            Self::All => true,
+            Self::Internet => !history::is_lan(result),
+            Self::Lan => history::is_lan(result),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HistorySort {
+    #[default]
+    Newest,
+    Oldest,
+    Metric(crate::insights::HistoryMetric),
+}
+
+impl HistorySort {
+    pub fn next(self) -> Self {
+        use crate::insights::HistoryMetric;
+        match self {
+            Self::Newest => Self::Oldest,
+            Self::Oldest => Self::Metric(HistoryMetric::Download),
+            Self::Metric(HistoryMetric::Quality) => Self::Newest,
+            Self::Metric(metric) => Self::Metric(metric.next()),
+        }
+    }
+    pub fn label(self) -> &'static str {
+        use crate::insights::HistoryMetric;
+        match self {
+            Self::Newest => "Newest first",
+            Self::Oldest => "Oldest first",
+            Self::Metric(HistoryMetric::Download) => "Fastest download",
+            Self::Metric(HistoryMetric::Upload) => "Fastest upload",
+            Self::Metric(HistoryMetric::IdleLatency) => "Lowest latency",
+            Self::Metric(HistoryMetric::Jitter) => "Lowest jitter",
+            Self::Metric(HistoryMetric::LoadedLatency) => "Lowest loaded latency",
+            Self::Metric(HistoryMetric::Quality) => "Highest quality",
+        }
+    }
+}
+
+/// A projection only: raw results and their duplicate-aware anchors never move.
+#[derive(Debug, Default)]
+pub(super) struct HistoryView {
+    pub query: String,
+    pub scope: ScopeFilter,
+    pub sort: HistorySort,
+    pub path: Option<(String, String)>,
+}
+
+impl HistoryView {
+    pub fn indices(&self, archive: &Archive) -> Vec<usize> {
+        let query = self.query.trim().to_lowercase();
+        let mut indices: Vec<_> = (0..archive.results.len())
+            .filter(|index| {
+                let result = archive.newest(*index).expect("archive index");
+                self.scope.matches(result)
+                    && self.path.as_ref().is_none_or(|(backend, host)| {
+                        result.backend.eq_ignore_ascii_case(backend)
+                            && history::server_identity(&result.server.host)
+                                == history::server_identity(host)
+                    })
+                    && (query.is_empty()
+                        || format!(
+                            "{} {} {} {}",
+                            result.backend,
+                            result.server.host,
+                            result.server.name,
+                            result.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                        )
+                        .to_lowercase()
+                        .contains(&query))
+            })
+            .collect();
+        indices.sort_by(|left, right| {
+            let a = archive.newest(*left).expect("archive index");
+            let b = archive.newest(*right).expect("archive index");
+            let order = match self.sort {
+                HistorySort::Newest => b.timestamp.cmp(&a.timestamp),
+                HistorySort::Oldest => a.timestamp.cmp(&b.timestamp),
+                HistorySort::Metric(metric) => match (metric.value(a), metric.value(b)) {
+                    (Some(a), Some(b)) if metric.higher_is_better() => b.total_cmp(&a),
+                    (Some(a), Some(b)) => a.total_cmp(&b),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                },
+            };
+            order.then_with(|| left.cmp(right))
+        });
+        indices
+    }
 }
 
 impl HistoryAnchor {

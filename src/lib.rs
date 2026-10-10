@@ -10,6 +10,7 @@ pub mod history;
 pub mod insights;
 pub mod lan;
 pub mod loss;
+pub mod metrics;
 pub mod model;
 pub mod monitor;
 pub mod network;

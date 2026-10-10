@@ -62,11 +62,27 @@ canonical metric deltas, including optional quality and bufferbloat evidence.
 Baseline and comparison snapshots remain local to the session and never save data
 or start network work.
 
+The history explorer keeps a visible-index projection over the immutable archive.
+Search, scope, path, and sort controls change that projection, not source order.
+Every record action maps its visible row back through the projection; reload anchors
+still include full serialized identity and duplicate occurrence. Search has an
+explicit editing mode so printable shortcuts remain text until Enter or Esc.
+Changing filters or sorting preserves the selected record when it remains visible;
+otherwise selection is clamped safely. Optional metric values sort after available
+measurements. Unpinned comparison follows original chronology, never sorted adjacency.
+
 Statistics also computes an offline `InsightsReport` for each backend/server path. It
 keeps LAN and Internet populations separate, preserves missing evidence as unavailable,
 and adds interpolated distributions, direction-aware trends, and conservative UTC
 time-of-day comparisons. This analysis is derived from the already-loaded history; it
 does not probe a server, refresh DNS, or write a new result.
+
+Statistics selection is separate from the History explorer. `m` selects one of the
+six domain metrics, `f` changes Internet/LAN scope, and `p` cycles saved paths.
+The controls rebuild an in-memory archive from existing results. Both the compact
+sparkline and larger chart use the selected metric and its units; missing optional
+values are excluded from summaries. The view identifies saved samples explicitly
+so a sparse archive cannot be mistaken for continuous monitoring.
 
 ## Lifecycle and navigation
 

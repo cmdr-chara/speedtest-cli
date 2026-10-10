@@ -147,12 +147,52 @@ pub fn write_stability_json(path: &Path, result: &StabilityResult) -> Result<()>
 }
 
 pub fn write_csv(path: &Path, result: &TestResult) -> Result<()> {
+    write_history_csv(path, std::slice::from_ref(result))
+}
+
+/// Export the full selected history without changing canonical result schemas.
+pub fn write_history_json(path: &Path, results: &[TestResult]) -> Result<()> {
+    validate_history_export(results)?;
+    write_json_value(path, &results)
+}
+
+pub fn write_history_jsonl(path: &Path, results: &[TestResult]) -> Result<()> {
+    validate_history_export(results)?;
+    let mut content = Vec::new();
+    for result in results {
+        serde_json::to_writer(&mut content, result).context("failed to serialize JSONL result")?;
+        content.push(b'\n');
+    }
+    atomic_write(path, &content)
+}
+
+pub fn write_history_csv(path: &Path, results: &[TestResult]) -> Result<()> {
+    validate_history_export(results)?;
     let mut writer = csv::Writer::from_writer(Vec::new());
-    writer
-        .serialize(CsvRecord::from(result))
-        .context("failed to serialize CSV result")?;
+    if results.is_empty() {
+        writer
+            .write_record(CSV_COLUMNS)
+            .context("failed to serialize CSV header")?;
+    }
+    for result in results {
+        writer
+            .serialize(CsvRecord::from(result))
+            .context("failed to serialize CSV result")?;
+    }
     let content = writer.into_inner().context("failed to finish CSV result")?;
     atomic_write(path, &content)
+}
+
+fn validate_history_export(results: &[TestResult]) -> Result<()> {
+    for result in results {
+        result.validate().context("invalid history export result")?;
+    }
+    Ok(())
+}
+
+/// Reuse the same atomic replacement and destination handling as JSON/CSV exports.
+pub fn write_text(path: &Path, content: &str) -> Result<()> {
+    atomic_write(path, content.as_bytes())
 }
 
 fn write_json_value<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -322,6 +362,37 @@ fn load_history_path_since(path: &Path, cutoff: DateTime<Utc>) -> Result<Vec<Tes
     results.sort_by_key(|result| result.timestamp);
     Ok(results)
 }
+
+const CSV_COLUMNS: &[&str] = &[
+    "timestamp",
+    "backend",
+    "server_name",
+    "server_host",
+    "download_mbps",
+    "upload_mbps",
+    "idle_latency_ms",
+    "jitter_ms",
+    "idle_p95_ms",
+    "idle_p99_ms",
+    "jitter_p95_ms",
+    "jitter_p99_ms",
+    "download_loaded_ms",
+    "upload_loaded_ms",
+    "packet_loss_percent",
+    "quality_score",
+    "quality_grade",
+    "quality_confidence",
+    "bufferbloat_grade",
+    "download_bufferbloat_ms",
+    "upload_bufferbloat_ms",
+    "gaming_grade",
+    "video_calls_grade",
+    "streaming_grade",
+    "cloud_gaming_grade",
+    "primary_diagnosis",
+    "download_bytes",
+    "upload_bytes",
+];
 
 #[derive(Serialize)]
 struct CsvRecord<'a> {
@@ -494,6 +565,25 @@ mod tests {
         assert!(content.contains("quality_score"));
         assert!(content.contains("download_mbps"));
         assert!(content.contains("100"));
+    }
+
+    #[test]
+    fn empty_history_exports_keep_valid_json_and_csv_schema() {
+        let dir = tempdir().unwrap();
+        let csv_path = dir.path().join("empty.csv");
+        write_history_csv(&csv_path, &[]).unwrap();
+        let mut empty = csv::Reader::from_path(&csv_path).unwrap();
+        let full_path = dir.path().join("full.csv");
+        write_csv(&full_path, &result()).unwrap();
+        let mut full = csv::Reader::from_path(&full_path).unwrap();
+        assert_eq!(empty.headers().unwrap(), full.headers().unwrap());
+        assert_eq!(empty.records().count(), 0);
+        let json_path = dir.path().join("empty.json");
+        write_history_json(&json_path, &[]).unwrap();
+        assert_eq!(fs::read_to_string(json_path).unwrap(), "[]\n");
+        let jsonl_path = dir.path().join("empty.jsonl");
+        write_history_jsonl(&jsonl_path, &[]).unwrap();
+        assert!(fs::read(jsonl_path).unwrap().is_empty());
     }
 
     #[test]

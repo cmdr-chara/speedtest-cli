@@ -8,7 +8,19 @@ use chrono::Utc;
 use speedtest_cli::monitor::MonitorRecord;
 
 fn run(arguments: &[&str], input: Option<&str>) -> Output {
+    run_with_history(arguments, input, None)
+}
+
+fn run_with_history(arguments: &[&str], input: Option<&str>, history: Option<&str>) -> Output {
     let home = tempfile::tempdir().unwrap();
+    if let Some(history) = history {
+        #[cfg(target_os = "macos")]
+        let root = home.path().join("Library/Application Support/speedtest");
+        #[cfg(not(target_os = "macos"))]
+        let root = home.path().join("speedtest");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("history.jsonl"), history).unwrap();
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_speedtest"))
         .args(arguments)
         .env("LC_ALL", "C")
@@ -37,6 +49,292 @@ fn run(arguments: &[&str], input: Option<&str>) -> Output {
             .unwrap();
     }
     child.wait_with_output().unwrap()
+}
+
+fn offline_history_fixture() -> (String, Vec<speedtest_cli::model::TestResult>) {
+    let base: speedtest_cli::model::TestResult =
+        serde_json::from_str(include_str!("fixtures/result.json")).unwrap();
+    let mut results = Vec::new();
+    for (minutes, backend, host, download) in [
+        (4, "cloudflare", "edge.example", 123.0),
+        (3, "cloudflare", "edge.example", 456.0),
+        (2, "cloudflare", "other.example", 789.0),
+        (1, "lan", "edge.example", 999.0),
+    ] {
+        let mut result = base.clone();
+        result.timestamp = Utc::now() - chrono::Duration::minutes(minutes);
+        result.backend = backend.into();
+        result.server.host = host.into();
+        result.download.mbps = download;
+        results.push(result);
+    }
+    let history = results
+        .iter()
+        .rev()
+        .map(|result| serde_json::to_string(result).unwrap() + "\n")
+        .collect::<String>();
+    (history, results)
+}
+
+#[test]
+fn offline_filters_are_consistent_and_table_limits_do_not_trim_json() {
+    let (history, _) = offline_history_fixture();
+    let filters = [
+        "--backend",
+        "CLOUDFLARE",
+        "--scope",
+        "internet",
+        "--server",
+        "EDGE.EXAMPLE",
+    ];
+    let mut args = vec!["history", "--json", "--limit", "1"];
+    args.extend(filters);
+    let result = run_with_history(&args, None, Some(&history));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let selected: Vec<speedtest_cli::model::TestResult> =
+        serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(selected.len(), 2);
+    assert_eq!(selected[0].download.mbps, 123.0);
+    assert_eq!(selected[1].download.mbps, 456.0);
+    assert!(selected[0].timestamp < selected[1].timestamp);
+
+    let mut args = vec!["history", "--limit", "1"];
+    args.extend(filters);
+    let table = run_with_history(&args, None, Some(&history));
+    assert!(table.status.success());
+    let table = String::from_utf8(table.stdout).unwrap();
+    assert!(table.contains("456.0 M"));
+    assert!(!table.contains("123.0 M"));
+    for command in ["stats", "insights"] {
+        let mut args = vec![command, "--json"];
+        args.extend(filters);
+        let result = run_with_history(&args, None, Some(&history));
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["runs"], 2);
+        if command == "stats" {
+            assert_eq!(report["median_download_mbps"], 289.5);
+        }
+    }
+    let unmatched = run_with_history(
+        &["history", "--json", "--server", "edge"],
+        None,
+        Some(&history),
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&unmatched.stdout).unwrap(),
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn history_exports_all_selected_runs_in_canonical_formats() {
+    let (history, results) = offline_history_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    for format in ["json", "jsonl", "csv"] {
+        let path = directory.path().join(format!("history.{format}"));
+        let result = run_with_history(
+            &[
+                "history",
+                "--json",
+                "--limit",
+                "1",
+                "--backend",
+                "cloudflare",
+                "--server",
+                "edge.example",
+                "--output",
+                path.to_str().unwrap(),
+                "--format",
+                format,
+            ],
+            None,
+            Some(&history),
+        );
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Vec<serde_json::Value>>(&result.stdout)
+                .unwrap()
+                .len(),
+            2
+        );
+        let content = std::fs::read_to_string(path).unwrap();
+        match format {
+            "json" => assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&content).unwrap(),
+                serde_json::to_value(&results[..2]).unwrap()
+            ),
+            "jsonl" => {
+                let records: Vec<serde_json::Value> = content
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(
+                    records,
+                    serde_json::to_value(&results[..2])
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .clone()
+                );
+                assert!(content.ends_with('\n'));
+            }
+            "csv" => {
+                let mut reader = csv::Reader::from_reader(content.as_bytes());
+                let canonical = directory.path().join("canonical.csv");
+                speedtest_cli::storage::write_csv(&canonical, &results[0]).unwrap();
+                let mut canonical_reader = csv::Reader::from_path(canonical).unwrap();
+                assert_eq!(
+                    reader.headers().unwrap(),
+                    canonical_reader.headers().unwrap()
+                );
+                let records = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+                assert_eq!(records.len(), 2);
+                assert_eq!(&records[0][4], "123.0");
+                assert_eq!(&records[1][4], "456.0");
+            }
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(
+        run(&["history", "--format", "csv"], None).status.code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn export_errors_do_not_emit_success_or_replace_existing_data() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("export.json");
+    std::fs::write(&path, "previous export").unwrap();
+    let corrupt = run_with_history(
+        &["history", "--json", "--output", path.to_str().unwrap()],
+        None,
+        Some("invalid JSON\n"),
+    );
+    assert_eq!(corrupt.status.code(), Some(1));
+    assert!(corrupt.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&corrupt.stderr).contains("line 1"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous export");
+    let unwritable = run(
+        &[
+            "history",
+            "--json",
+            "--output",
+            directory.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    assert_eq!(unwritable.status.code(), Some(1));
+    assert!(unwritable.stdout.is_empty());
+}
+
+#[test]
+fn metrics_reads_stdin_files_or_latest_selected_history_offline() {
+    let (history, results) = offline_history_fixture();
+    let selected = run_with_history(
+        &[
+            "metrics",
+            "--backend",
+            "cloudflare",
+            "--server",
+            "edge.example",
+        ],
+        None,
+        Some(&history),
+    );
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert!(selected.stderr.is_empty());
+    let expected = speedtest_cli::metrics::render(&results[1]).unwrap();
+    assert_eq!(String::from_utf8(selected.stdout).unwrap(), expected);
+    let input = serde_json::to_string(&results[1]).unwrap();
+    let stdin = run(&["metrics", "-"], Some(&input));
+    assert!(
+        stdin.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stdin.stderr)
+    );
+    assert_eq!(String::from_utf8(stdin.stdout).unwrap(), expected);
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("result.json");
+    let destination = directory.path().join("speedtest.prom");
+    std::fs::write(&source, input).unwrap();
+    let exported = run(
+        &[
+            "metrics",
+            source.to_str().unwrap(),
+            "--output",
+            destination.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(exported.status.success());
+    assert!(exported.stdout.is_empty());
+    assert_eq!(std::fs::read_to_string(destination).unwrap(), expected);
+    let empty = run(&["metrics"], None);
+    assert_eq!(empty.status.code(), Some(1));
+    assert!(empty.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("no saved result matches"));
+}
+
+#[test]
+fn metrics_fail_closed_on_invalid_input_stale_data_or_conflicting_filters() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("speedtest.prom");
+    std::fs::write(&destination, "previous metrics\n").unwrap();
+    for arguments in [
+        vec![
+            "metrics",
+            "-",
+            "--max-age",
+            "1",
+            "--output",
+            destination.to_str().unwrap(),
+        ],
+        vec![
+            "metrics",
+            "missing-result.json",
+            "--output",
+            destination.to_str().unwrap(),
+        ],
+    ] {
+        let input = (arguments[1] == "-").then_some(include_str!("fixtures/result.json"));
+        let result = run(&arguments, input);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "previous metrics\n"
+        );
+    }
+    let invalid = run(&["metrics", "-"], Some("{}{}"));
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(invalid.stdout.is_empty());
+    for flag in ["--backend", "--server", "--scope"] {
+        let conflict = run(&["metrics", "result.json", flag, "all"], None);
+        assert_eq!(conflict.status.code(), Some(2));
+        assert!(conflict.stdout.is_empty());
+    }
+    assert_eq!(
+        run(&["history", "--server", " "], None).status.code(),
+        Some(2)
+    );
 }
 
 #[test]
