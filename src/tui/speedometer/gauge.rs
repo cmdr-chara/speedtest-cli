@@ -1,5 +1,6 @@
 use crate::i18n::ui;
 use std::f64::consts::PI;
+use std::sync::OnceLock;
 
 use ratatui::{
     prelude::{Alignment, Color, Frame, Line, Modifier, Rect, Span, Style},
@@ -27,6 +28,12 @@ const START_ANGLE: f64 = PI * 1.15;
 const SWEEP_ANGLE: f64 = PI * 1.30;
 const TRACK_STEPS: usize = 260;
 const TRACK_RADII: &[f64] = &[1.00, 0.975, 0.95];
+
+#[derive(Clone, Copy, Default)]
+struct GaugeEffects {
+    enhanced: bool,
+    seconds: Option<f64>,
+}
 
 pub fn render(
     frame: &mut Frame,
@@ -71,6 +78,53 @@ pub fn render_themed(
     palette: GaugePalette,
     large_values: bool,
 ) {
+    render_gauge(
+        frame,
+        area,
+        state,
+        show_value,
+        palette,
+        large_values,
+        GaugeEffects::default(),
+    );
+}
+
+/// Render the cockpit dial with orbital accents and a measured peak marker.
+///
+/// Time is presentation-only monotonic seconds. `None` disables every moving
+/// decoration; neither path modifies measurement, the spring, or the dial scale.
+pub fn render_animated(
+    frame: &mut Frame,
+    area: Rect,
+    state: &SpeedometerState,
+    show_value: bool,
+    palette: GaugePalette,
+    large_values: bool,
+    animation_seconds: Option<f64>,
+) {
+    render_gauge(
+        frame,
+        area,
+        state,
+        show_value,
+        palette,
+        large_values,
+        GaugeEffects {
+            enhanced: true,
+            seconds: animation_seconds.filter(|seconds| seconds.is_finite() && *seconds >= 0.0),
+        },
+    );
+}
+
+fn render_gauge(
+    frame: &mut Frame,
+    area: Rect,
+    state: &SpeedometerState,
+    show_value: bool,
+    palette: GaugePalette,
+    large_values: bool,
+    effects: GaugeEffects,
+) {
     let GaugePalette {
         background, accent, ..
     } = palette;
@@ -83,14 +137,6 @@ pub fn render_themed(
     let ratio = (state.displayed_mbps() / maximum).clamp(0.0, 1.0);
     let needle_angle = angle_for_ratio(ratio);
 
-    let track_layers: Vec<Vec<(f64, f64)>> = TRACK_RADII
-        .iter()
-        .map(|radius| arc_points(*radius, 1.0))
-        .collect();
-    let active_layers: Vec<Vec<(f64, f64)>> = TRACK_RADII
-        .iter()
-        .map(|radius| arc_points(*radius, ratio))
-        .collect();
     let active_cap = point_on_arc(0.975, ratio);
 
     let labels = if area.width >= 62 && area.height >= 11 {
@@ -106,21 +152,33 @@ pub fn render_themed(
         .x_bounds([-1.28, 1.28])
         .y_bounds([-0.56, 1.18])
         .paint(move |ctx| {
-            for coords in &track_layers {
+            // The complete track is immutable geometry. Keep it off the frame
+            // allocation/trigonometry path, especially during live measurements.
+            for coords in track_layers() {
                 ctx.draw(&Points {
                     coords,
                     color: palette.track,
                 });
             }
 
+            if effects.enhanced {
+                draw_orbits(ctx, palette, effects.seconds);
+                if show_value && effects.seconds.is_some() {
+                    draw_needle_trail(ctx, state, ratio, maximum, palette);
+                }
+            }
+
             ctx.layer();
 
             if ratio > 0.0 {
-                for coords in &active_layers {
-                    ctx.draw(&Points {
-                        coords,
-                        color: accent,
-                    });
+                for radius in TRACK_RADII {
+                    draw_arc(ctx, *radius, 0.0, ratio, accent);
+                }
+                if let Some(seconds) = effects.seconds.filter(|_| show_value) {
+                    // The scan stays within the measured part of the scale. It
+                    // never presents the decorative orbit as extra throughput.
+                    let head = (seconds / 2.4).fract() * ratio;
+                    draw_arc(ctx, 0.975, (head - 0.075).max(0.0), head, palette.text);
                 }
                 ctx.draw(&Points {
                     coords: &[active_cap],
@@ -129,6 +187,9 @@ pub fn render_themed(
             }
 
             draw_ticks(ctx, ratio, palette);
+            if effects.enhanced && show_value && state.peak_mbps() > 0.0 {
+                draw_peak(ctx, (state.peak_mbps() / maximum).clamp(0.0, 1.0), palette);
+            }
             draw_needle(ctx, needle_angle, palette);
 
             for (x, y, label) in &labels {
@@ -173,6 +234,96 @@ fn draw_ticks(ctx: &mut ratatui::widgets::canvas::Context<'_>, ratio: f64, palet
             x2: outer_radius * angle.cos(),
             y2: outer_radius * angle.sin(),
             color,
+        });
+    }
+}
+
+fn draw_orbits(
+    ctx: &mut ratatui::widgets::canvas::Context<'_>,
+    palette: GaugePalette,
+    seconds: Option<f64>,
+) {
+    // Interrupted, thin arcs read as instrumentation, separate from the thick
+    // quantitative track. Native/monochrome palettes remain entirely native.
+    for index in 0..40 {
+        let start = f64::from(index) / 40.0;
+        draw_arc(ctx, 1.145, start, start + 0.009, palette.track);
+    }
+    for index in 0..24 {
+        let start = f64::from(index) / 24.0;
+        draw_arc(ctx, 0.70, start, start + 0.012, palette.track);
+    }
+    let Some(seconds) = seconds else {
+        return;
+    };
+
+    // Opposing comet heads share one monotonic clock: no timers, randomness,
+    // retained frame buffers, or changes to measured values are needed here.
+    let outer_head = (seconds / 5.5).fract();
+    let inner_head = 1.0 - (seconds / 7.0).fract();
+    for (radius, head, direction) in [(1.145, outer_head, -1.0), (0.70, inner_head, 1.0)] {
+        for (length, color) in [
+            (0.095, palette.secondary),
+            (0.045, palette.accent),
+            (0.010, palette.text),
+        ] {
+            let tail = (head + direction * length).clamp(0.0, 1.0);
+            draw_arc(ctx, radius, tail.min(head), tail.max(head), color);
+        }
+    }
+}
+
+fn draw_needle_trail(
+    ctx: &mut ratatui::widgets::canvas::Context<'_>,
+    state: &SpeedometerState,
+    ratio: f64,
+    maximum: f64,
+    palette: GaugePalette,
+) {
+    let spread = (state.velocity.abs() / maximum * 0.07).min(0.12);
+    if spread < 0.002 {
+        return;
+    }
+    for (fraction, color) in [
+        (1.0, palette.track),
+        (0.6, palette.track),
+        (0.25, palette.secondary),
+    ] {
+        let angle = angle_for_ratio(ratio - state.velocity.signum() * spread * fraction);
+        ctx.draw(&CanvasLine {
+            x1: 0.24 * angle.cos(),
+            y1: 0.24 * angle.sin(),
+            x2: 0.76 * angle.cos(),
+            y2: 0.76 * angle.sin(),
+            color,
+        });
+    }
+}
+
+fn draw_peak(
+    ctx: &mut ratatui::widgets::canvas::Context<'_>,
+    peak_ratio: f64,
+    palette: GaugePalette,
+) {
+    let angle = angle_for_ratio(peak_ratio);
+    let (x, y) = point_on_arc(0.91, peak_ratio);
+    let radial = (angle.cos() * 0.035, angle.sin() * 0.035);
+    let tangent = (-angle.sin() * 0.027, angle.cos() * 0.027);
+    let corners = [
+        (x + radial.0, y + radial.1),
+        (x + tangent.0, y + tangent.1),
+        (x - radial.0, y - radial.1),
+        (x - tangent.0, y - tangent.1),
+    ];
+    for index in 0..corners.len() {
+        let start = corners[index];
+        let end = corners[(index + 1) % corners.len()];
+        ctx.draw(&CanvasLine {
+            x1: start.0,
+            y1: start.1,
+            x2: end.0,
+            y2: end.1,
+            color: palette.text,
         });
     }
 }
@@ -320,16 +471,35 @@ fn render_fallback(
     );
 }
 
-fn arc_points(radius: f64, fraction: f64) -> Vec<(f64, f64)> {
-    let fraction = fraction.clamp(0.0, 1.0);
-    let steps = ((TRACK_STEPS as f64 * fraction).ceil() as usize).max(1);
-    (0..=steps)
-        .map(|step| {
-            let t = fraction * step as f64 / steps as f64;
-            let angle = angle_for_ratio(t);
-            (radius * angle.cos(), radius * angle.sin())
+fn track_layers() -> &'static [[(f64, f64); TRACK_STEPS + 1]; 3] {
+    static TRACK: OnceLock<[[(f64, f64); TRACK_STEPS + 1]; 3]> = OnceLock::new();
+    TRACK.get_or_init(|| {
+        std::array::from_fn(|layer| {
+            std::array::from_fn(|step| {
+                point_on_arc(TRACK_RADII[layer], step as f64 / TRACK_STEPS as f64)
+            })
         })
-        .collect()
+    })
+}
+
+fn draw_arc(
+    ctx: &mut ratatui::widgets::canvas::Context<'_>,
+    radius: f64,
+    start: f64,
+    end: f64,
+    color: Color,
+) {
+    let start = start.clamp(0.0, 1.0);
+    let end = end.clamp(start, 1.0);
+    let steps = ((TRACK_STEPS as f64 * (end - start)).ceil() as usize).max(1);
+    let mut coords = [(0.0, 0.0); TRACK_STEPS + 1];
+    for (step, point) in coords.iter_mut().take(steps + 1).enumerate() {
+        *point = point_on_arc(radius, start + (end - start) * step as f64 / steps as f64);
+    }
+    ctx.draw(&Points {
+        coords: &coords[..=steps],
+        color,
+    });
 }
 
 fn point_on_arc(radius: f64, fraction: f64) -> (f64, f64) {
@@ -389,7 +559,85 @@ fn format_scale(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    fn animated_buffer(width: u16, height: u16, show_value: bool, seconds: Option<f64>) -> Buffer {
+        let mut state = SpeedometerState::default();
+        state.snap_to_with_peak(642.7, 780.2);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_animated(
+                    frame,
+                    frame.area(),
+                    &state,
+                    show_value,
+                    GaugePalette {
+                        background: Color::Reset,
+                        accent: Color::Reset,
+                        text: Color::Reset,
+                        secondary: Color::Reset,
+                        track: Color::Reset,
+                    },
+                    true,
+                    seconds,
+                );
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        buffer.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn orbital_motion_changes_geometry_without_changing_readings_or_palette() {
+        let start = animated_buffer(96, 30, true, Some(0.0));
+        let later = animated_buffer(96, 30, true, Some(1.7));
+        assert_ne!(start, later, "even monochrome motion must be visible");
+        for buffer in [&start, &later] {
+            let text = buffer_text(buffer);
+            assert!(text.contains("642.7 Mbps"));
+            assert!(text.contains("peak 780.2"));
+            assert!(text.contains("scale 1 Gbps"));
+            assert!(buffer
+                .content()
+                .iter()
+                .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset));
+        }
+        // Animation never paints over the exact center value, unit, or peak.
+        for y in 9..17 {
+            for x in 29..67 {
+                assert_eq!(start[(x, y)], later[(x, y)]);
+            }
+        }
+    }
+
+    #[test]
+    fn reduced_motion_and_invalid_clocks_produce_the_same_static_dial() {
+        let still = animated_buffer(96, 30, true, None);
+        assert_eq!(still, animated_buffer(96, 30, true, None));
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            assert_eq!(still, animated_buffer(96, 30, true, Some(invalid)));
+        }
+    }
+
+    #[test]
+    fn animated_gauge_resizes_and_keeps_unmeasured_readings_hidden() {
+        for (width, height) in [(1, 1), (30, 6), (44, 12), (96, 30)] {
+            for seconds in [None, Some(2.9)] {
+                let buffer = animated_buffer(width, height, false, seconds);
+                let text = buffer_text(&buffer);
+                assert!(!text.contains("642.7"));
+                assert!(!text.contains("780.2"));
+                assert!(!text.contains("peak"));
+                if width >= 30 {
+                    assert!(text.contains("Mbps"));
+                }
+            }
+        }
+    }
 
     #[test]
     fn rendered_gauge_contains_value_and_unit() {
