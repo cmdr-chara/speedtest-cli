@@ -90,9 +90,19 @@ completed result remains visible if export/history fails, with a **SAVE FAILED**
 
 Settings apply to **this session only**; they do not change a configuration file or the
 CLI defaults for future launches. They include a reduced-motion option that removes
-needle interpolation and animated activity markers. The balanced timing preset uses
+needle interpolation, orbital accents, and animated activity markers, and immediately
+settles page, chart, selection, and results reveals. The balanced timing preset uses
 8-second phases, 2 streams, 60 FPS, and a 120-second deadline. CLI `--timeout` starts
 when an operation starts, not while browsing the menu.
+
+The default cockpit includes a scanning brand entrance, short page and dialog light
+sweeps, a moving selection underline, and staggered result highlights. Live tests
+add orbital gauge accents, a peak marker, phase indicators, and a recent-sample trace
+when there is enough vertical space. Statistics traces the selected saved series
+without changing its scale or sample count. Exact values remain readable during
+every transition, and navigation stays immediate. Idle pages stop animating after
+their entrance. Use **Reduced motion** or a lower `--fps` cap for a quieter display.
+See the [before/after and animated gallery](images/motion/README.md).
 
 DNS and diagnostic tools have a separate **Ready to start** screen. They run the
 existing read-only commands and show their reports in scrollable panels, with bounded

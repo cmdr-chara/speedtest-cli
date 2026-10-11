@@ -32,6 +32,37 @@ up to 96 columns by 30 rows and keeps its readings beside it. Resizing recompute
 report scroll limits. Body font size remains the terminal's setting.
 Action highlights are label-sized; descriptions and blank rows are not selected.
 
+## Motion system
+
+The cockpit assembles its block-letter brand through a scan front, sweeps light
+across incoming pages and dialogs, and traces an underline through the selected
+item. Completed metrics receive four staggered sweeps while their exact values
+and any save failure remain readable from the first frame. Statistics traces the
+selected saved series over its complete outline with fixed full-series axes.
+Changing metric, scope, path, or reloading history restarts that trace.
+
+Live adds opposing orbital comets, a measured-arc scanner, velocity-based needle
+trails, a peak diamond, and an animated phase rail. Comfortable layouts with enough
+height also show the actual recent throughput samples beneath the gauge. Orbits
+and the traveling phase accent are decoration, not extra samples or percentage
+completion. Download and upload retain separate sample windows.
+
+`motion.rs` owns a separate monotonic presentation clock. Entrance effects finish
+within 720 ms, selection within 240 ms, phase accents within 480 ms, and dialog
+arrival within 280 ms. Drawing is bounded by the existing `--fps` cap. Animation
+never waits before navigation, work, saving, or cancellation, and always renders a
+final settled frame. Idle effects terminate; there is no perpetual home animation.
+The existing 240 Hz spring loop does not drive decoration. Static gauge geometry
+is cached and arcs use bounded buffers; this is not a claim of zero measurement
+overhead on every terminal. Lower `--fps` or use reduced motion on slow connections.
+
+**Settings → Reduced motion** immediately settles reveals, freezes decorative
+motion, and snaps the gauge. A modal pauses live decoration; resize settles
+transient effects. Native and monochrome colors remain native, glyphs are never
+shifted, and no font or terminal profile is modified. The direct `--run` gauge
+retains its original composition. No animation dependency or image protocol is
+required. See [before/after frames and animation captures](images/motion/README.md).
+
 ## Ownership
 
 | Surface | Responsibility |
@@ -40,6 +71,7 @@ Action highlights are label-sized; descriptions and blank rows are not selected.
 | `src/session.rs` | Share CLI-derived test options, existing engine construction, and export-before-history completion policy |
 | `src/tui/cockpit/state.rs` | Pure navigation stack, selections, modal decisions, settings, task/result states, effects |
 | `src/tui/cockpit/mod.rs` | Own the terminal, asynchronous work, events, physics and rendering schedules |
+| `src/tui/cockpit/motion.rs` | Bounded presentation timelines and cell-safe emphasis effects |
 | `src/tui/cockpit/view.rs`, `theme.rs` | Compose widgets, accessible states, responsive geometry, semantic colors |
 | `src/tui/cockpit/services.rs` | Adapt existing local history/analysis and read-only CLI reports |
 | `src/tui/speedometer/` | Existing gauge and physics; shell-supplied palette and optional large readout |
@@ -117,7 +149,7 @@ the export, per-run file, and history append remain separate operations. See
 
 Input polling drains bounded batches every 16 ms. Live physics keep the existing
 240 Hz schedule independently of the requested render cap; idle screens redraw only
-when dirty. Reduced motion snaps live values instead of interpolating and uses
+when dirty or while a finite transition is active. Reduced motion snaps live values instead of interpolating and uses
 static activity labels. Resize invalidates rendering but does not reset navigation.
 Below 80×24, hidden start/navigation controls are disabled while back, help, quit and
 cancellation remain available. Long reports clamp their scroll offsets to the new
