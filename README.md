@@ -34,9 +34,9 @@ Most speed tests stop at download and upload. `speedtest-cli` helps answer the q
 
 - **Is the connection fast and responsive?** Measure download, upload, idle and loaded latency, jitter, bufferbloat, and a quality score with workload grades.
 - **Where is the bottleneck?** Compare Internet backends, inspect Wi-Fi, or test directly between two machines on your LAN.
-- **Did something change?** Save results locally, browse history, pin a baseline, compare runs, and use offline statistics and insights to spot trends.
+- **Did something change?** Search and sort saved runs, isolate Internet or LAN paths, pin a baseline, and explore six statistics metrics without leaving the cockpit.
 - **Is the network reliable?** Inspect DNS, benchmark UDP, DoH, DoT, or DoQ, monitor repeated runs, and measure ICMP response loss separately.
-- **Do I need a script?** Use plain text, JSON, or CSV output with stable field names and units.
+- **Do I need a script?** Filter and export history as JSON, CSV, or JSONL, or publish an offline Prometheus textfile with a freshness check.
 
 ## Install
 
@@ -139,6 +139,9 @@ For the interactive dashboard, use a terminal at least **80 × 24** characters:
 | `Tab` / `Shift+Tab` | Switch sections |
 | `Esc` | Go back |
 | `b` / `c` in History | Pin a baseline / compare |
+| `/` / `f` / `s` in History | Search / filter scope / sort |
+| `p` / `x` in History | Isolate selected path / reset explorer |
+| `m` / `f` / `p` in Statistics | Change metric / scope / path |
 | `?` / `q` | Keyboard guide / quit |
 
 [Full keyboard guide and cockpit behavior →](./docs/usage.md#network-cockpit)
@@ -156,6 +159,8 @@ For the interactive dashboard, use a terminal at least **80 × 24** characters:
 | Force an IPv4 or IPv6 measurement | `speedtest --family ipv4 --run` |
 | Compare IPv4 and IPv6 paths | `speedtest verify --compare-families` |
 | Review saved runs | `speedtest history` |
+| Export one backend's history | `speedtest history --backend cloudflare --output history.csv --format csv` |
+| Write fresh Prometheus metrics | `speedtest metrics --max-age 3600 --output speedtest.prom` |
 | See aggregate history statistics | `speedtest stats` |
 | Find trends and unusual results offline | `speedtest insights` |
 | Compare two saved results | `speedtest compare` |
@@ -226,6 +231,10 @@ speedtest --output result.csv --format csv
 ```
 
 Machine-readable output keeps canonical field names, units, command names, and provider identifiers regardless of interface language. Read the [automation contract](./docs/usage.md#terminal-and-automation-behavior), [offline checks](./docs/usage.md#offline-checks-for-scripts), and [storage guarantees](./docs/usage.md#data-storage) for output streams, errors, cancellation, and concurrent jobs.
+
+History exports and Prometheus metrics read existing local evidence; they do not start a
+measurement. See [filtered history and exports](./docs/usage.md#history-and-statistics)
+and [Prometheus textfiles](./docs/usage.md#prometheus-textfile-export) for examples and units.
 
 ## Safety, privacy, and limitations
 

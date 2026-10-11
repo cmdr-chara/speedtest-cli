@@ -7,7 +7,7 @@ use crate::{
 };
 
 use super::{
-    services::{same_result, Archive, ComparedRuns, HistoryAnchor, Tool},
+    services::{same_result, Archive, ComparedRuns, HistoryAnchor, HistoryView, Tool},
     theme::Palette,
 };
 use crate::tui::app::App;
@@ -115,6 +115,12 @@ pub(super) enum Effect {
 }
 
 #[derive(Debug)]
+struct StatisticsComparison {
+    scope: crate::history::HistoryScope,
+    path: Option<(String, String)>,
+}
+
+#[derive(Debug)]
 pub(super) struct Cockpit {
     pub pages: Vec<Page>,
     pub options: TestOptions,
@@ -125,9 +131,19 @@ pub(super) struct Cockpit {
     pub modal_scroll: u16,
     pub history: Load<Archive>,
     history_anchor: Option<HistoryAnchor>,
+    pub history_view: HistoryView,
+    pub history_rows: Vec<usize>,
+    pub search_previous: Option<String>,
+    search_anchor: Option<HistoryAnchor>,
+    pub statistics_archive: Option<Archive>,
+    pub statistics_scope: Option<crate::history::HistoryScope>,
+    pub statistics_path: Option<(String, String)>,
+    pub statistics_metric: crate::insights::HistoryMetric,
     pub history_page_size: usize,
     pub baseline: Option<TestResult>,
     pub comparison: Option<ComparedRuns>,
+    pub comparison_selected: bool,
+    statistics_comparison: Option<StatisticsComparison>,
     pub table: TableState,
     pub live: App,
     pub result: Option<TestResult>,
@@ -154,9 +170,19 @@ impl Cockpit {
             modal_scroll: 0,
             history: Load::Loading,
             history_anchor: None,
+            history_view: HistoryView::default(),
+            history_rows: Vec::new(),
+            search_previous: None,
+            search_anchor: None,
+            statistics_archive: None,
+            statistics_scope: None,
+            statistics_path: None,
+            statistics_metric: crate::insights::HistoryMetric::Download,
             history_page_size: 10,
             baseline: None,
             comparison: None,
+            comparison_selected: false,
+            statistics_comparison: None,
             table: TableState::default(),
             live: App::default(),
             result: None,
@@ -258,19 +284,48 @@ impl Cockpit {
             .history_anchor
             .take()
             .or_else(|| self.selected_anchor());
-        let selected = match (&outcome, &anchor) {
-            (Ok(archive), Some(anchor)) => archive.position(anchor),
-            _ => None,
-        };
         // Keep the anchor through a failed reload so Retry can restore the run.
         if outcome.is_err() {
-            self.history_anchor = anchor;
+            self.history_anchor = anchor.clone();
         }
         self.history = match outcome {
             Ok(value) => Load::Ready(value),
             Err(error) => Load::Failed(error),
         };
-        let count = self.history_count();
+        self.refresh_history_view(anchor.as_ref());
+        self.refresh_statistics();
+        self.refresh_statistics_comparison();
+    }
+
+    fn refresh_statistics_comparison(&mut self) {
+        let (Some(selection), Load::Ready(archive)) = (&self.statistics_comparison, &self.history)
+        else {
+            return;
+        };
+        // Statistics compares the latest pair in its chosen population. Unlike
+        // explicitly selected History snapshots, this pair follows a successful
+        // reload, including becoming unavailable when fewer than two runs remain.
+        let filter = crate::history::HistorySelection {
+            scope: Some(selection.scope),
+            backend: selection.path.as_ref().map(|(backend, _)| backend.clone()),
+            server: selection.path.as_ref().map(|(_, host)| host.clone()),
+        };
+        self.comparison = crate::history::latest_comparable_pair(&filter.select(&archive.results))
+            .map(|(before, after)| ComparedRuns::new(&before, &after));
+    }
+
+    fn refresh_history_view(&mut self, anchor: Option<&HistoryAnchor>) {
+        self.history_rows = match &self.history {
+            Load::Ready(archive) => self.history_view.indices(archive),
+            _ => Vec::new(),
+        };
+        let selected = match (&self.history, anchor) {
+            (Load::Ready(archive), Some(anchor)) => archive
+                .position(anchor)
+                .and_then(|raw| self.history_rows.iter().position(|index| *index == raw)),
+            _ => None,
+        };
+        let count = self.history_rows.len();
         for page in &mut self.pages {
             if page.screen == Screen::History {
                 page.selected = selected
@@ -278,6 +333,7 @@ impl Cockpit {
                     .min(count.saturating_sub(1));
             }
         }
+        self.table = TableState::default();
     }
 
     fn selected_anchor(&self) -> Option<HistoryAnchor> {
@@ -288,14 +344,81 @@ impl Cockpit {
             .pages
             .iter()
             .find(|page| page.screen == Screen::History)?;
-        archive.anchor(page.selected)
+        archive.anchor(*self.history_rows.get(page.selected)?)
     }
 
     fn selected_result(&self) -> Option<&TestResult> {
         let Load::Ready(archive) = &self.history else {
             return None;
         };
-        archive.newest(self.page().selected)
+        archive.newest(*self.history_rows.get(self.page().selected)?)
+    }
+
+    pub fn statistics(&self) -> Option<&Archive> {
+        self.statistics_archive.as_ref().or(match &self.history {
+            Load::Ready(archive) => Some(archive),
+            _ => None,
+        })
+    }
+
+    pub fn statistics_scope(&self) -> crate::history::HistoryScope {
+        self.statistics_scope.unwrap_or_else(|| {
+            self.statistics()
+                .and_then(|archive| archive.summary.as_ref())
+                .map_or(crate::history::HistoryScope::Internet, |summary| {
+                    summary.scope
+                })
+        })
+    }
+
+    fn refresh_statistics(&mut self) {
+        self.statistics_archive = match &self.history {
+            Load::Ready(archive)
+                if self.statistics_scope.is_some() || self.statistics_path.is_some() =>
+            {
+                Some(Archive::from_results(
+                    archive
+                        .results
+                        .iter()
+                        .filter(|result| {
+                            self.statistics_scope
+                                .is_none_or(|scope| crate::history::matches_scope(result, scope))
+                                && self.statistics_path.as_ref().is_none_or(|(backend, host)| {
+                                    result.backend.eq_ignore_ascii_case(backend)
+                                        && crate::history::server_identity(&result.server.host)
+                                            == crate::history::server_identity(host)
+                                })
+                        })
+                        .cloned()
+                        .collect(),
+                ))
+            }
+            _ => None,
+        };
+    }
+
+    fn cycle_statistics_path(&mut self) {
+        let scope = self.statistics_scope();
+        let Load::Ready(archive) = &self.history else {
+            return;
+        };
+        let paths: Vec<_> = archive
+            .insights
+            .groups
+            .iter()
+            .filter(|group| group.scope == scope)
+            .map(|group| (group.backend.clone(), group.server_host.clone()))
+            .collect();
+        self.statistics_path = self
+            .statistics_path
+            .as_ref()
+            .and_then(|current| paths.iter().position(|path| path == current))
+            .map_or_else(
+                || paths.first().cloned(),
+                |index| paths.get(index + 1).cloned(),
+            );
+        self.refresh_statistics();
+        self.page_mut().scroll = 0;
     }
 
     pub fn is_baseline(&self, result: &TestResult) -> bool {
@@ -322,13 +445,17 @@ impl Cockpit {
         let Load::Ready(archive) = &self.history else {
             return;
         };
-        let Some(after) = archive.newest(self.page().selected) else {
+        let Some(raw) = self.history_rows.get(self.page().selected).copied() else {
             return;
         };
-        let before = self
-            .baseline
-            .as_ref()
-            .or_else(|| archive.newest(self.page().selected.saturating_add(1)));
+        let Some(after) = archive.newest(raw) else {
+            return;
+        };
+        let before = self.baseline.as_ref().or_else(|| {
+            (raw + 1..archive.results.len())
+                .filter_map(|index| archive.newest(index))
+                .find(|before| crate::history::is_lan(before) == crate::history::is_lan(after))
+        });
         let Some(before) = before else {
             self.notice = "No older run. Pin a baseline with b, then select another run.".into();
             return;
@@ -338,6 +465,8 @@ impl Cockpit {
             return;
         }
         self.comparison = Some(ComparedRuns::new(before, after));
+        self.comparison_selected = true;
+        self.statistics_comparison = None;
         self.notice.clear();
         self.push(Screen::Compare);
     }
@@ -358,10 +487,7 @@ impl Cockpit {
     }
 
     fn history_count(&self) -> usize {
-        match &self.history {
-            Load::Ready(archive) => archive.results.len(),
-            _ => 0,
-        }
+        self.history_rows.len()
     }
 
     fn select_count(&self) -> usize {
@@ -505,6 +631,13 @@ impl Cockpit {
 
     /// Hidden controls must not start work while the terminal is too small.
     pub fn key_at_size(&mut self, key: KeyEvent, width: u16, height: u16) -> Effect {
+        if (width < 80 || height < 24) && self.search_previous.is_some() {
+            // The editor is hidden below minimum size; restore its prior query
+            // before handling the visible emergency and help bindings.
+            self.history_view.query = self.search_previous.take().unwrap_or_default();
+            let anchor = self.search_anchor.take();
+            self.refresh_history_view(anchor.as_ref());
+        }
         if (width < 80 || height < 24)
             && self.modal.is_none()
             && !matches!(
@@ -527,6 +660,7 @@ impl Cockpit {
             return Effect::None;
         }
         if key.kind == KeyEventKind::Repeat
+            && self.search_previous.is_none()
             && !matches!(
                 key.code,
                 KeyCode::Up
@@ -550,6 +684,36 @@ impl Cockpit {
                 return Effect::None;
             }
             return Effect::Interrupt;
+        }
+        if self.search_previous.is_some() && self.modal.is_none() {
+            let anchor = self.selected_anchor();
+            match key.code {
+                KeyCode::Esc => {
+                    self.history_view.query = self.search_previous.take().unwrap_or_default();
+                    let original = self.search_anchor.take();
+                    self.refresh_history_view(original.as_ref());
+                    return Effect::None;
+                }
+                KeyCode::Enter => {
+                    self.search_previous = None;
+                    self.search_anchor = None;
+                }
+                KeyCode::Backspace => {
+                    self.history_view.query.pop();
+                }
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && !character.is_control()
+                        && self.history_view.query.chars().count() < 256 =>
+                {
+                    self.history_view.query.push(character);
+                }
+                _ => return Effect::None,
+            }
+            self.refresh_history_view(anchor.as_ref());
+            return Effect::None;
         }
         if let Some(modal) = self.modal {
             match modal {
@@ -647,6 +811,48 @@ impl Cockpit {
             return Effect::None;
         }
         match key.code {
+            KeyCode::Char('/') if self.screen() == Screen::History => {
+                self.search_previous = Some(self.history_view.query.clone());
+                self.search_anchor = self.selected_anchor();
+                self.notice.clear();
+            }
+            KeyCode::Char('f' | 's' | 'p' | 'x') if self.screen() == Screen::History => {
+                let anchor = self.selected_anchor();
+                match key.code {
+                    KeyCode::Char('f') => self.history_view.scope = self.history_view.scope.next(),
+                    KeyCode::Char('s') => self.history_view.sort = self.history_view.sort.next(),
+                    KeyCode::Char('p') => {
+                        self.history_view.path = if self.history_view.path.is_some() {
+                            None
+                        } else {
+                            self.selected_result()
+                                .map(|result| (result.backend.clone(), result.server.host.clone()))
+                        };
+                    }
+                    KeyCode::Char('x') => self.history_view = HistoryView::default(),
+                    _ => {}
+                }
+                self.refresh_history_view(anchor.as_ref());
+                self.notice.clear();
+            }
+            KeyCode::Char('m') if self.screen() == Screen::Statistics => {
+                self.statistics_metric = self.statistics_metric.next();
+                self.page_mut().scroll = 0;
+                self.notice.clear();
+            }
+            KeyCode::Char('f') if self.screen() == Screen::Statistics => {
+                self.statistics_scope = Some(match self.statistics_scope() {
+                    crate::history::HistoryScope::Internet => crate::history::HistoryScope::Lan,
+                    crate::history::HistoryScope::Lan => crate::history::HistoryScope::Internet,
+                });
+                self.statistics_path = None;
+                self.refresh_statistics();
+                self.page_mut().scroll = 0;
+                self.notice.clear();
+            }
+            KeyCode::Char('p') if self.screen() == Screen::Statistics => {
+                self.cycle_statistics_path()
+            }
             KeyCode::Char('q') => return Effect::Quit,
             KeyCode::Esc | KeyCode::Backspace => self.back(),
             KeyCode::Tab | KeyCode::Right => self.sibling(1),
@@ -696,19 +902,20 @@ impl Cockpit {
                     self.push(Screen::Configure);
                 }
                 Screen::History => {
-                    if let Load::Ready(archive) = &self.history {
-                        if let Some(result) = archive.newest(self.page().selected).cloned() {
-                            self.result = Some(result);
-                            self.save_notice = "SAVED RESULT • local history".into();
-                            self.push(Screen::Results);
-                        }
+                    if let Some(result) = self.selected_result().cloned() {
+                        self.result = Some(result);
+                        self.save_notice = "SAVED RESULT • local history".into();
+                        self.push(Screen::Results);
                     }
                 }
                 Screen::Statistics => {
-                    self.comparison = match &self.history {
-                        Load::Ready(archive) => archive.comparison.clone(),
-                        _ => None,
-                    };
+                    self.statistics_comparison = Some(StatisticsComparison {
+                        scope: self.statistics_scope(),
+                        path: self.statistics_path.clone(),
+                    });
+                    self.comparison = None;
+                    self.comparison_selected = true;
+                    self.refresh_statistics_comparison();
                     self.push(Screen::Compare);
                 }
                 Screen::Dns | Screen::Diagnostics => {

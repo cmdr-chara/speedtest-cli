@@ -42,6 +42,7 @@ pub enum HistoryScope {
 pub struct HistorySelection {
     pub scope: Option<HistoryScope>,
     pub backend: Option<String>,
+    pub server: Option<String>,
 }
 
 impl HistorySelection {
@@ -51,6 +52,9 @@ impl HistorySelection {
                 .backend
                 .as_ref()
                 .is_none_or(|backend| result.backend.eq_ignore_ascii_case(backend))
+            && self.server.as_ref().is_none_or(|server| {
+                server_identity(&result.server.host) == server_identity(server)
+            })
     }
 
     pub fn select(&self, results: &[TestResult]) -> Vec<TestResult> {
@@ -198,7 +202,23 @@ pub fn matches_scope(result: &TestResult, scope: HistoryScope) -> bool {
 /// are descriptive and may change between registry responses.
 pub fn same_path(left: &TestResult, right: &TestResult) -> bool {
     left.backend.eq_ignore_ascii_case(&right.backend)
-        && left.server.host.eq_ignore_ascii_case(&right.server.host)
+        && server_identity(&left.server.host) == server_identity(&right.server.host)
+}
+
+/// Stable comparison key, separate from the saved/display identifier. LibreSpeed
+/// stores a base URL here: scheme/host are case-insensitive, paths and queries are
+/// not. Ordinary hostnames and LAN addresses retain case-insensitive matching.
+pub fn server_identity(server: &str) -> String {
+    if let Ok(url) = reqwest::Url::parse(server) {
+        if matches!(url.scheme(), "http" | "https") && url.has_host() {
+            return url.to_string();
+        }
+    }
+    if server.contains("://") {
+        server.to_owned()
+    } else {
+        server.to_ascii_lowercase()
+    }
 }
 
 pub fn detect_latest_anomalies(results: &[TestResult]) -> Vec<HistoryAnomaly> {
@@ -420,6 +440,31 @@ mod tests {
         results.push(result(7, 400.0, 100.0, 10.0));
         let anomalies = detect_latest_anomalies(&results);
         assert!(anomalies.iter().any(|item| item.metric == "download"));
+    }
+
+    #[test]
+    fn url_server_identity_preserves_case_sensitive_paths_and_queries() {
+        let mut first = result(0, 100.0, 20.0, 10.0);
+        first.server.host = "HTTPS://EXAMPLE.TEST/A/?Key=Value".into();
+        let selection = HistorySelection {
+            server: Some("https://example.test/A/?Key=Value".into()),
+            ..Default::default()
+        };
+        assert!(selection.matches(&first));
+        let mut equivalent = first.clone();
+        equivalent.server.host = "https://example.test:443/A/?Key=Value".into();
+        assert!(same_path(&first, &equivalent));
+        for host in [
+            "https://example.test/a/?Key=Value",
+            "https://example.test/A/?key=value",
+        ] {
+            let mut other = first.clone();
+            other.server.host = host.into();
+            assert!(!selection.matches(&other));
+            assert!(!same_path(&first, &other));
+        }
+        assert_eq!(server_identity("EXAMPLE.TEST"), "example.test");
+        assert_eq!(server_identity("[FE80::1]:9876"), "[fe80::1]:9876");
     }
 
     #[test]

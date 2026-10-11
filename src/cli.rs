@@ -13,6 +13,13 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum HistoryOutputFormat {
+    Json,
+    Csv,
+    Jsonl,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum InternetBackendArg {
     Cloudflare,
     Librespeed,
@@ -202,6 +209,8 @@ pub enum Command {
     Stats(StatsArgs),
     /// Analyze saved runs by comparable backend/server path and time of day.
     Insights(InsightsArgs),
+    /// Export a saved result as Prometheus metrics, without network traffic.
+    Metrics(MetricsArgs),
     /// Inspect, benchmark, optimize, and configure DNS resolvers.
     Dns(DnsArgs),
     /// Compare two saved results, or the two most recent history entries.
@@ -257,6 +266,9 @@ pub struct StabilityArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct HistoryArgs {
+    #[command(flatten)]
+    pub filter: HistoryFilterArgs,
+
     /// Only include results from the last N days.
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3650))]
     pub days: u64,
@@ -268,10 +280,21 @@ pub struct HistoryArgs {
     /// Print matching history as a JSON array.
     #[arg(long)]
     pub json: bool,
+
+    /// Atomically export all matching runs; --limit only affects the table.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
+    /// Export format; JSON/JSONL retain canonical results and CSV retains existing columns.
+    #[arg(long, value_enum, default_value_t = HistoryOutputFormat::Json, requires = "output")]
+    pub format: HistoryOutputFormat,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct StatsArgs {
+    #[command(flatten)]
+    pub filter: HistoryFilterArgs,
+
     /// Analyze results from the last N days.
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3650))]
     pub days: u64,
@@ -293,21 +316,76 @@ pub enum InsightsScopeArg {
 
 #[derive(Debug, Clone, Args)]
 pub struct InsightsArgs {
+    #[command(flatten)]
+    pub filter: HistoryFilterArgs,
+
     /// Analyze results from the last N days.
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3650))]
     pub days: u64,
 
-    /// Restrict the report to one backend identifier, case-insensitively.
-    #[arg(long, value_name = "BACKEND")]
-    pub backend: Option<String>,
-
-    /// Separate Internet and LAN populations instead of comparing them.
-    #[arg(long, value_enum, default_value_t = InsightsScopeArg::All)]
-    pub scope: InsightsScopeArg,
-
     /// Print the versioned report as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct HistoryFilterArgs {
+    /// Restrict the report to one backend identifier, case-insensitively.
+    #[arg(long, value_name = "BACKEND", value_parser = parse_history_identifier)]
+    pub backend: Option<String>,
+
+    /// Select Internet, LAN, or all saved measurements.
+    #[arg(long, value_enum, default_value_t = InsightsScopeArg::All)]
+    pub scope: InsightsScopeArg,
+
+    /// Match a saved server host or URL; URL paths and queries are case-sensitive.
+    #[arg(long, value_name = "HOST", value_parser = parse_history_identifier)]
+    pub server: Option<String>,
+}
+
+impl HistoryFilterArgs {
+    pub fn selection(&self) -> crate::history::HistorySelection {
+        crate::history::HistorySelection {
+            scope: match self.scope {
+                InsightsScopeArg::All => None,
+                InsightsScopeArg::Internet => Some(crate::history::HistoryScope::Internet),
+                InsightsScopeArg::Lan => Some(crate::history::HistoryScope::Lan),
+            },
+            backend: self.backend.clone(),
+            server: self.server.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MetricsArgs {
+    /// Canonical JSON file or - for stdin; omit to use the latest matching saved run.
+    #[arg(value_name = "RESULT", conflicts_with_all = ["backend", "scope", "server"])]
+    pub result: Option<String>,
+
+    #[command(flatten)]
+    pub filter: HistoryFilterArgs,
+
+    /// Reject stale or future results before writing; age is measured in seconds.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub max_age: Option<u64>,
+
+    /// Atomically replace a Prometheus textfile; omit to write metrics to stdout.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+}
+
+fn parse_history_identifier(value: &str) -> Result<String, String> {
+    if value.trim().is_empty()
+        || value.chars().count() > 2048
+        || value.chars().any(char::is_control)
+    {
+        return Err(
+            "expected a non-empty identifier of at most 2048 characters without control characters"
+                .into(),
+        );
+    }
+    Ok(value.to_owned())
 }
 
 #[derive(Debug, Clone, Args)]
@@ -739,6 +817,7 @@ impl Cli {
             Some(Command::History(a)) => a.json,
             Some(Command::Stats(a)) => a.json,
             Some(Command::Insights(a)) => a.json,
+            Some(Command::Metrics(_)) => false,
             Some(Command::Compare(a)) => a.json,
             Some(Command::Doctor(a)) => a.json,
             Some(Command::Diagnose(a)) => a.json,

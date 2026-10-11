@@ -119,6 +119,10 @@ fn single(value: impl AsRef<str>) -> String {
     output::safe_text(value.as_ref()).replace(['\n', '\t'], " ")
 }
 
+fn message(app: &Cockpit, key: &str, values: &[String]) -> String {
+    crate::i18n::message(app.language, key, values)
+}
+
 fn chrome(frame: &mut Frame, app: &Cockpit, t: Theme, head: Rect, tabs: Rect) {
     let columns =
         Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(head);
@@ -934,24 +938,95 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
     let area = heading(
         frame,
         "YOUR NETWORK, OVER TIME",
-        "Last 30 days · newest first · Enter opens a result",
+        "/ search · f scope · s sort · p selected path · x reset",
         t,
         area,
     );
     if archive_state(frame, app, t, area) {
         return available;
     }
+    let controls_height = if app.history_view.path.is_some() {
+        3
+    } else {
+        2
+    };
+    let controls = Rect::new(area.x, area.y, area.width, controls_height);
+    let area = Rect::new(
+        area.x,
+        area.y + controls_height,
+        area.width,
+        area.height.saturating_sub(controls_height),
+    );
+    let total = match &app.history {
+        Load::Ready(archive) => archive.results.len(),
+        _ => 0,
+    };
+    let mut control_lines = vec![Line::styled(
+        message(
+            app,
+            "{0} / {1} runs · {2} · {3}",
+            &[
+                app.history_rows.len().to_string(),
+                total.to_string(),
+                ui(app.history_view.scope.label()),
+                ui(app.history_view.sort.label()),
+            ],
+        ),
+        t.focus(),
+    )];
+    let query = if app.history_view.query.is_empty() && app.search_previous.is_none() {
+        ui("Search backend, server or date")
+    } else {
+        single(&app.history_view.query)
+    };
+    let query = if app.search_previous.is_some() {
+        let mut tail = query.as_str();
+        while Line::from(tail).width() > usize::from(area.width.saturating_sub(5)) {
+            tail = &tail[tail.chars().next().map_or(0, char::len_utf8)..];
+        }
+        format!("/ {tail}▏")
+    } else if app.history_view.query.is_empty() {
+        query
+    } else {
+        message(app, "Search: {0}", &[query])
+    };
+    control_lines.push(Line::styled(
+        query,
+        if app.search_previous.is_some() {
+            t.selected()
+        } else {
+            t.muted()
+        },
+    ));
+    if let Some((backend, host)) = &app.history_view.path {
+        control_lines.push(Line::styled(
+            message(
+                app,
+                "Path: {0}",
+                &[format!("{} / {}", single(backend), single(host))],
+            ),
+            t.muted(),
+        ));
+    }
+    frame.render_widget(Paragraph::new(control_lines), controls);
+    if app.history_rows.is_empty() {
+        let used = scroll(frame, app, t, area, vec![
+            Line::default(),
+            Line::styled(ui("No matching runs"), t.strong()),
+            Line::from(ui("Change the search or filters, or press x to reset. No saved results were changed.")),
+        ]);
+        return area.y - top + used.saturating_add(1).min(area.height);
+    }
     let Load::Ready(archive) = &app.history else {
         return available;
     };
     let preview = !app.compact && area.height >= 19;
-    let preview_height = if preview { 9 } else { 0 };
-    let table_height = archive
-        .results
-        .len()
-        .saturating_add(2)
-        .min(usize::from(area.height.saturating_sub(2 + preview_height)))
-        as u16;
+    let preview_height = if preview { 10 } else { 0 };
+    let table_height =
+        app.history_rows
+            .len()
+            .saturating_add(2)
+            .min(usize::from(area.height.saturating_sub(2 + preview_height))) as u16;
     let layout = Layout::vertical([
         Constraint::Length(table_height),
         Constraint::Length(2),
@@ -960,10 +1035,10 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
     .flex(ratatui::layout::Flex::Start)
     .split(area);
     app.history_page_size = usize::from(layout[0].height.saturating_sub(2).max(1));
-    let rows: Vec<_> = archive
-        .results
+    let rows: Vec<_> = app
+        .history_rows
         .iter()
-        .rev()
+        .filter_map(|index| archive.newest(*index))
         .map(|r| {
             let quality = r.analysis.as_ref().map_or("n/a".into(), |a| {
                 format!("{} {}", a.quality.score, a.quality.grade.label())
@@ -1024,7 +1099,7 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
                 ui(format!(
                     "Run {} of {} · PgUp/PgDn page · Home/End",
                     app.page().selected + 1,
-                    archive.results.len()
+                    app.history_rows.len()
                 )),
                 t.muted(),
             ),
@@ -1045,7 +1120,11 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
         layout[1],
     );
     if preview {
-        if let Some(selected) = archive.newest(app.page().selected) {
+        if let Some(selected) = app
+            .history_rows
+            .get(app.page().selected)
+            .and_then(|index| archive.newest(*index))
+        {
             let preview_area = Rect::new(
                 layout[2].x,
                 layout[2].y,
@@ -1060,13 +1139,27 @@ fn history(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
             let detail = block.inner(preview_area);
             frame.render_widget(block, preview_area);
             let parts =
-                Layout::vertical([Constraint::Length(2), Constraint::Length(6)]).split(detail);
+                Layout::vertical([Constraint::Length(3), Constraint::Length(6)]).split(detail);
             frame.render_widget(
-                Paragraph::new(ui(format!(
-                    "{} UTC · {} · Enter opens details",
-                    selected.timestamp.format("%d %b %Y %H:%M"),
-                    single(&selected.backend)
-                )))
+                Paragraph::new(vec![
+                    Line::from(ui(format!(
+                        "{} UTC · {} · Enter opens details",
+                        selected.timestamp.format("%d %b %Y %H:%M"),
+                        single(&selected.backend)
+                    ))),
+                    Line::from(format!(
+                        "{} · {}",
+                        single(&selected.server.host),
+                        single(&selected.server.name)
+                    )),
+                    Line::from(
+                        selected
+                            .analysis
+                            .as_ref()
+                            .and_then(|analysis| analysis.quality.findings.first())
+                            .map_or_else(String::new, |finding| ui(single(&finding.title))),
+                    ),
+                ])
                 .style(t.muted()),
                 parts[0],
             );
@@ -1090,19 +1183,62 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
     let area = heading(
         frame,
         "THE BIGGER PICTURE",
-        "30-day local history · Enter compares the latest two saved runs",
+        "m metric · f scope · p path",
         t,
         area,
     );
     if archive_state(frame, app, t, area) {
         return available;
     }
-    let Load::Ready(archive) = &app.history else {
+    let toolbar = format!(
+        "{} · {} · {}",
+        ui(app.statistics_metric.label()),
+        ui(app.statistics_scope().label()),
+        app.statistics_path.as_ref().map_or_else(
+            || ui("All paths"),
+            |(backend, host)| format!("{} / {}", single(backend), single(host)),
+        ),
+    );
+    frame.render_widget(
+        Paragraph::new(toolbar).style(t.focus()),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let area = Rect::new(
+        area.x,
+        area.y + 2,
+        area.width,
+        area.height.saturating_sub(2),
+    );
+    let Some(archive) = app.statistics() else {
         return available;
     };
     let Some(summary) = &archive.summary else {
-        return available;
+        let used = scroll(
+            frame,
+            app,
+            t,
+            area,
+            vec![
+                Line::styled(ui("No matching runs"), t.strong()),
+                Line::from(ui("m metric · f scope · p path")),
+            ],
+        );
+        return area.y - top + used.saturating_add(1).min(area.height);
     };
+    let selected_metric = app.statistics_metric;
+    let data: Vec<_> = archive
+        .results
+        .iter()
+        .filter(|result| crate::history::matches_scope(result, summary.scope))
+        .filter_map(|result| selected_metric.value(result))
+        .rev()
+        .take(60)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .enumerate()
+        .map(|(index, value)| (index as f64, value))
+        .collect();
     let rows = Layout::vertical([
         Constraint::Length(metric_height(app, area)),
         Constraint::Min(1),
@@ -1145,18 +1281,6 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
     ])
     .split(rows[1]);
     if plot {
-        let data: Vec<_> = archive
-            .results
-            .iter()
-            .filter(|result| crate::history::matches_scope(result, summary.scope))
-            .rev()
-            .take(60)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .enumerate()
-            .map(|(index, result)| (index as f64, result.download.mbps))
-            .collect();
         if data.len() >= 2 {
             let maximum = data
                 .iter()
@@ -1170,12 +1294,16 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
                 .style(t.base())
                 .block(
                     Block::default()
-                        .title(ui("Download · saved samples, not continuous monitoring"))
+                        .title(message(
+                            app,
+                            "{0} · saved samples, not continuous monitoring",
+                            &[ui(selected_metric.label())],
+                        ))
                         .title_style(t.strong()),
                 )
                 .x_axis(
                     Axis::default()
-                        .bounds([0.0, (data.len() - 1) as f64])
+                        .bounds([0.0, data.last().map_or(1.0, |(index, _)| (*index).max(1.0))])
                         .labels(vec![Line::from(ui("oldest")), Line::from(ui("latest"))])
                         .style(t.base().fg(t.line)),
                 )
@@ -1184,7 +1312,7 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
                         .bounds([0.0, maximum])
                         .labels(vec![
                             Line::from(ui("0")),
-                            Line::from(ui(format!("{maximum:.1} Mbps"))),
+                            Line::from(format!("{maximum:.1} {}", selected_metric.unit())),
                         ])
                         .style(t.base().fg(t.line)),
                 ),
@@ -1192,9 +1320,11 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
             );
         } else {
             frame.render_widget(
-                Paragraph::new(ui(
-                    "ONE SAVED SAMPLE\n\nSave another test to see a download history chart.",
-                ))
+                Paragraph::new(if data.is_empty() {
+                    format!("{}\n\n{}", ui("No samples for this metric"), ui("Optional measurements stay unavailable until a saved run includes them."))
+                } else {
+                    format!("{}\n\n{}", ui("ONE SAVED SAMPLE"), ui("Save another test to see a history chart."))
+                })
                 .style(t.base()),
                 parts[0],
             );
@@ -1202,19 +1332,11 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
     }
     let mut lines = vec![
         Line::styled(
-            ui(format!(
-                "{} RUNS  ·  TREND: {}",
-                summary.runs,
-                summary.trend.label().to_uppercase()
-            )),
-            t.focus(),
-        ),
-        Line::styled(
-            ui(if plot {
-                String::new()
-            } else {
-                summary.download_sparkline.clone()
-            }),
+            message(
+                app,
+                "{0} runs · {1}",
+                &[summary.runs.to_string(), ui(selected_metric.label())],
+            ),
             t.focus(),
         ),
         Line::from(ui(format!(
@@ -1228,13 +1350,42 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
                 .map_or("n/a".into(), |n| format!("{n:.0}/100")),
             summary.s_tier_runs
         ))),
-        Line::default(),
     ];
-    if summary.anomalies.is_empty() {
-        lines.push(Line::styled(
-            ui("No anomaly flags in this sample. This is not a guarantee of stability."),
+    lines.insert(
+        1,
+        Line::styled(
+            message(
+                app,
+                "{0} samples · {1}",
+                &[
+                    data.len().to_string(),
+                    ui(if selected_metric.higher_is_better() {
+                        "Higher is better"
+                    } else {
+                        "Lower is better"
+                    }),
+                ],
+            ),
             t.muted(),
-        ));
+        ),
+    );
+    if !plot && !data.is_empty() {
+        lines.insert(
+            2,
+            Line::styled(
+                crate::history::sparkline(
+                    &data.iter().map(|(_, value)| *value).collect::<Vec<_>>(),
+                    usize::from(parts[1].width.min(60)),
+                ),
+                t.focus(),
+            ),
+        );
+    }
+    if data.is_empty() && !plot {
+        lines.insert(
+            2,
+            Line::styled(ui("No samples for this metric"), t.base().fg(t.warning)),
+        );
     }
     for anomaly in &summary.anomalies {
         lines.push(Line::styled(
@@ -1254,7 +1405,6 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
         .collect();
     if !comparable_paths.is_empty() {
         lines.extend([
-            Line::default(),
             Line::styled(ui("COMPARABLE PATHS"), t.strong()),
             Line::styled(
                 ui("Each backend/server path has its own baseline; LAN is never pooled with Internet."),
@@ -1275,14 +1425,19 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
             let metrics: Vec<_> = group
                 .metrics
                 .iter()
+                .filter(|metric| metric.metric == selected_metric)
                 .filter_map(|metric| {
                     metric.distribution.as_ref().map(|distribution| {
-                        format!(
-                            "{} {:.1} {} (p95 {:.1})",
-                            ui(metric.metric.label()),
-                            distribution.median,
-                            metric.unit,
-                            distribution.p95
+                        message(
+                            app,
+                            "{0}: median {1} {2} · p95 {3} · {4}",
+                            &[
+                                ui(metric.metric.label()),
+                                format!("{:.1}", distribution.median),
+                                metric.unit.to_owned(),
+                                format!("{:.1}", distribution.p95),
+                                ui(metric.trend.label()),
+                            ],
                         )
                     })
                 })
@@ -1303,6 +1458,12 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
             }
         }
     }
+    if summary.anomalies.is_empty() {
+        lines.push(Line::styled(
+            ui("No anomaly flags in this sample. This is not a guarantee of stability."),
+            t.muted(),
+        ));
+    }
     let used = scroll(frame, app, t, parts[1], lines);
     parts[1].y - top + used.saturating_add(1).min(parts[1].height)
 }
@@ -1317,15 +1478,29 @@ fn compare(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
         t,
         area,
     );
-    let comparison = app.comparison.as_ref().or(match &app.history {
-        Load::Ready(archive) => archive.comparison.as_ref(),
-        _ => None,
-    });
+    let comparison = if app.comparison_selected {
+        app.comparison.as_ref()
+    } else {
+        app.comparison.as_ref().or(match &app.history {
+            Load::Ready(archive) => archive.comparison.as_ref(),
+            _ => None,
+        })
+    };
     let Some(comparison) = comparison else {
         if archive_state(frame, app, t, area) {
             return available;
         }
-        frame.render_widget(Paragraph::new(ui("Two saved tests are needed for a comparison.\n\nRun another test with history enabled, then press r to reload.")).style(t.base()).wrap(Wrap { trim: true }), area);
+        let guidance = if app.comparison_selected {
+            "Two saved tests are needed in this selection. Press Esc to change the scope or path, or reload Statistics after saving another run."
+        } else {
+            "Two saved tests are needed for a comparison.\n\nRun another test with history enabled, then press r to reload."
+        };
+        frame.render_widget(
+            Paragraph::new(ui(guidance))
+                .style(t.base())
+                .wrap(Wrap { trim: true }),
+            area,
+        );
         return available;
     };
     let c = &comparison.metrics;
@@ -1664,7 +1839,9 @@ fn scroll_paragraph(
 }
 
 fn footer(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
-    let context = if app.activity == Some(Activity::Saving) {
+    let context = if app.search_previous.is_some() {
+        "Enter apply · Esc cancel".into()
+    } else if app.activity == Some(Activity::Saving) {
         "Finishing completed result. Quit requests wait for the save.".into()
     } else if app.activity.is_some() {
         "Esc cancel task  ·  q cancel and quit  ·  Ctrl+C stop immediately".into()
@@ -1698,7 +1875,9 @@ fn footer(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
             }
         }
     };
-    let bindings = if app.activity.is_some() {
+    let bindings = if app.search_previous.is_some() {
+        Line::styled(ui("Search backend, server or date"), t.muted())
+    } else if app.activity.is_some() {
         Line::from(vec![
             Span::styled(ui("?"), t.focus()),
             Span::styled(ui(" help  ·  "), t.muted()),
@@ -1792,6 +1971,8 @@ fn overlay(frame: &mut Frame, app: &mut Cockpit, modal: Modal, t: Theme, area: R
                 Line::from(ui("PgUp / PgDn      Scroll report details")),
                 Line::from(ui("History: PgUp/PgDn page; Home/End first/last run.")),
                 Line::from(ui("History: b pin baseline; c compare selected with baseline or older neighbor.")),
+                Line::from(ui("History: / search; f scope; s sort; p selected path; x reset.")),
+                Line::from(ui("Statistics: m metric; f scope; p path.")),
                 Line::from(ui("r               Reload history / retry a test")),
                 Line::from(ui("q               Quit; confirm if a task is running")),
                 Line::from(ui("Ctrl+C          Stop immediately (save finishes first)")),

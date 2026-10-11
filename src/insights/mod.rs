@@ -157,7 +157,7 @@ pub fn analyze(results: &[TestResult], period_days: u64) -> InsightsReport {
         groups
             .entry((
                 result.backend.to_ascii_lowercase(),
-                result.server.host.to_ascii_lowercase(),
+                history::server_identity(&result.server.host),
             ))
             .or_default()
             .push(result);
@@ -397,6 +397,31 @@ mod tests {
                 .scope,
             HistoryScope::Lan
         );
+    }
+
+    #[test]
+    fn url_groups_normalize_hosts_without_merging_case_sensitive_paths() {
+        let mut samples = Vec::new();
+        for host in [
+            "HTTPS://EXAMPLE.TEST/A/",
+            "https://example.test:443/A/",
+            "https://example.test/a/",
+            "https://example.test/A/?Token=One",
+            "https://example.test/A/?Token=one",
+        ] {
+            let mut sample = result(0, 9, 100.0);
+            sample.server.host = host.into();
+            samples.push(sample);
+        }
+        let report = analyze(&samples, 30);
+        assert_eq!(report.groups.len(), 4);
+        let upper = report
+            .groups
+            .iter()
+            .find(|group| group.server_host == "https://example.test/A/")
+            .unwrap();
+        assert_eq!(upper.runs, 2);
+        assert_eq!(samples[0].server.host, "HTTPS://EXAMPLE.TEST/A/");
     }
 
     #[test]
