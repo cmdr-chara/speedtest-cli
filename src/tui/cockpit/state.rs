@@ -251,11 +251,7 @@ impl Cockpit {
         self.live.apply(event);
         if self.reduced_motion {
             self.live.speedometer.snap_to_with_peak(
-                self.live
-                    .download_mbps
-                    .filter(|_| self.live.phase == crate::model::TestPhase::Download)
-                    .or(self.live.upload_mbps)
-                    .unwrap_or(0.0),
+                self.live.speedometer.target_mbps(),
                 self.live.speedometer.peak_mbps(),
             );
         }
@@ -839,9 +835,7 @@ impl Cockpit {
         match key.code {
             KeyCode::Char(' ')
                 if matches!(self.screen(), Screen::Home | Screen::Results)
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    && key.modifiers == KeyModifiers::NONE =>
             {
                 // Historical results do not contain the complete test profile;
                 // every explicit quick start uses the current session options.

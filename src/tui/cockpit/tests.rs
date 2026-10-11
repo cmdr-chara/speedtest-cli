@@ -78,6 +78,62 @@ fn result() -> TestResult {
     serde_json::from_str(include_str!("../../../tests/fixtures/result.json")).unwrap()
 }
 
+#[test]
+fn completion_events_preserve_phase_owned_targets_and_peaks() {
+    use crate::model::TestPhase;
+
+    for reduced_motion in [false, true] {
+        let mut app = app();
+        app.reduced_motion = reduced_motion;
+        app.activity = Some(Activity::Test);
+        app.push(Screen::Live);
+        app.apply_engine(EngineEvent::PhaseChanged(TestPhase::Download));
+        app.apply_engine(EngineEvent::ThroughputSample {
+            phase: TestPhase::Download,
+            mbps: 820.0,
+        });
+        app.apply_engine(EngineEvent::ThroughputSample {
+            phase: TestPhase::Download,
+            mbps: 780.0,
+        });
+        app.apply_engine(EngineEvent::PhaseChanged(TestPhase::Upload));
+        app.apply_engine(EngineEvent::ThroughputSample {
+            phase: TestPhase::Upload,
+            mbps: 1_200.0,
+        });
+        app.apply_engine(EngineEvent::ThroughputSample {
+            phase: TestPhase::Upload,
+            mbps: 1_000.0,
+        });
+
+        // A render between these two terminal events must not describe the
+        // upload sample or upload peak as the completed download measurement.
+        app.apply_engine(EngineEvent::PhaseChanged(TestPhase::Complete));
+        assert_eq!(app.live.phase, TestPhase::Upload);
+        assert_eq!(app.live.speedometer.target_mbps(), 1_000.0);
+        assert_eq!(app.live.speedometer.peak_mbps(), 1_200.0);
+        assert!(app.live.result.is_none());
+
+        let mut completed = result();
+        completed.download.mbps = 780.0;
+        completed.upload.mbps = 1_050.0;
+        app.apply_engine(EngineEvent::Complete(completed.clone()));
+        assert_eq!(app.live.phase, TestPhase::Complete);
+        assert_eq!(app.live.speedometer.target_mbps(), 780.0);
+        assert_eq!(app.live.speedometer.displayed_mbps(), 780.0);
+        assert_eq!(app.live.speedometer.peak_mbps(), 820.0);
+        assert_eq!(app.live.speedometer.scale_mbps(), 1_000.0);
+        // A completion event alone still does not start persistence.
+        assert_eq!(app.activity, Some(Activity::Test));
+
+        app.measured(Ok(completed));
+        assert_eq!(app.activity, Some(Activity::Saving));
+        assert_eq!(app.live.speedometer.target_mbps(), 780.0);
+        assert_eq!(app.live.speedometer.displayed_mbps(), 780.0);
+        assert_eq!(app.live.speedometer.peak_mbps(), 820.0);
+    }
+}
+
 fn comparison_results() -> Vec<TestResult> {
     [
         ("fixture-before", 100.0, 20.0, 30.0, 8.0, 50.0, 60),

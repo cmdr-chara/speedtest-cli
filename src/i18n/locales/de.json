@@ -846,7 +846,7 @@
   ,"uses substantial data.": "Verbraucht viele Daten."
   ,"space start now": "Space jetzt starten"
   ,"space test with current settings": "Space mit aktuellen Einstellungen testen"
-  ,"elapsed {0}s": "Vergangen {0}s"
+  ,"elapsed {0}s": "Verstrichen: {0} s"
   ,"esc cancel · q quit · ctrl+c stop": "Esc abbrechen · q beenden · Ctrl+C stoppen"
   ,"space test with current settings · enter configure · j/k scroll": "Space mit aktuellen Einstellungen testen · Enter einrichten · j/k scrollen"
   ,"provisional readings · final results follow completion": "Vorläufige Messwerte · Endergebnisse nach Testabschluss"

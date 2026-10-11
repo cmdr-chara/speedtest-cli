@@ -197,7 +197,14 @@ fn quick_start_requires_a_fresh_visible_unmodified_space_press() {
             );
             assert_eq!(app.activity, None);
         }
-        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SHIFT,
+            KeyModifiers::SUPER,
+            KeyModifiers::HYPER,
+            KeyModifiers::META,
+        ] {
             let mut app = app();
             if screen != Screen::Home {
                 app.push(screen);
