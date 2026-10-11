@@ -595,7 +595,9 @@ impl Cockpit {
     }
 
     fn begin_test(&mut self) -> Effect {
-        if self.screen() == Screen::Failure {
+        if matches!(self.screen(), Screen::Failure | Screen::Results) {
+            // A retry or a new test replaces the terminal run page. Preserve
+            // its parent so repeated tests never accumulate Results/Live pages.
             self.replace(Screen::Live);
         } else {
             self.push(Screen::Live);
@@ -835,6 +837,16 @@ impl Cockpit {
             return Effect::None;
         }
         match key.code {
+            KeyCode::Char(' ')
+                if matches!(self.screen(), Screen::Home | Screen::Results)
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                // Historical results do not contain the complete test profile;
+                // every explicit quick start uses the current session options.
+                return self.begin_test();
+            }
             KeyCode::Char('/') if self.screen() == Screen::History => {
                 self.search_previous = Some(self.history_view.query.clone());
                 self.search_anchor = self.selected_anchor();

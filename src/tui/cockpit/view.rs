@@ -47,7 +47,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut Cockpit, theme: Theme, elapsed: 
         let content = match app.screen() {
             Screen::Home => {
                 Constraint::Length(inner.height.saturating_sub(6).min(if app.compact {
-                    14
+                    18
                 } else {
                     24
                 }))
@@ -233,27 +233,49 @@ fn heading(frame: &mut Frame, title: &str, subtitle: &str, t: Theme, area: Rect)
 }
 
 fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
-    let rows = Layout::vertical([Constraint::Length(5), Constraint::Min(1)]).split(area);
+    let rows = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Length(5),
+        Constraint::Min(1),
+    ])
+    .split(area);
     let hero = Layout::horizontal([
-        Constraint::Length((u32::from(area.width) * 55 / 100).min(48) as u16),
+        Constraint::Length((u32::from(area.width) * 45 / 100).clamp(35, 48) as u16),
         Constraint::Min(1),
     ])
     .split(rows[0]);
     let mut logo: Vec<_> = BRAND.iter().map(|s| Line::styled(*s, t.focus())).collect();
     logo.push(Line::styled(ui("Your network, in focus."), t.strong()));
     frame.render_widget(Paragraph::new(logo), hero[0]);
-    let animation = app.motion.frame();
     motion::assemble_brand(
         frame.buffer_mut(),
         Rect::new(hero[0].x, hero[0].y, hero[0].width.min(35), 4),
         t,
-        animation.arrival,
+        app.motion.frame().arrival,
     );
-    motion::illuminate(frame.buffer_mut(), hero[0], t, animation.arrival);
+    let profile = Block::default()
+        .title(format!(
+            "{} / {}",
+            ui("Test profile"),
+            app.options.backend_label()
+        ))
+        .title_style(t.muted())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.base().fg(t.line))
+        .padding(Padding::horizontal(1));
+    let profile_area = profile.inner(hero[1]);
+    frame.render_widget(profile, hero[1]);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled(ui("MEASUREMENT PROFILE"), t.strong()),
-            Line::styled(app.options.backend_label(), t.focus()),
+            Line::styled(
+                ui(if profile_area.width >= 48 && app.page().selected == 0 {
+                    "Space start now · Enter configure"
+                } else {
+                    "Space start now"
+                }),
+                t.focus(),
+            ),
             Line::styled(
                 ui(format!(
                     "{} s / phase  ·  {} streams",
@@ -261,23 +283,23 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
                 )),
                 t.muted(),
             ),
-            Line::styled(ui("No background network probes"), t.muted()),
-        ])
-        .wrap(Wrap { trim: true }),
-        hero[1],
+            Line::styled(
+                if app.options.output.is_some() {
+                    ui("Explicit export enabled")
+                } else {
+                    format!(
+                        "{}: {}",
+                        ui("Save to history"),
+                        ui(if app.options.no_save { "OFF" } else { "ON" })
+                    )
+                },
+                t.muted(),
+            ),
+            Line::styled(ui("Uses substantial data."), t.muted()),
+        ]),
+        profile_area,
     );
-    let spacious = !app.compact && rows[1].height >= 18;
-    let columns = Layout::horizontal([
-        Constraint::Length(if area.width >= 140 {
-            44
-        } else if area.width >= 96 {
-            34
-        } else {
-            29
-        }),
-        Constraint::Min(1),
-    ])
-    .split(rows[1]);
+
     let labels = [
         ("Run Speed Test", "Configure, then start"),
         ("History", "Browse saved measurements"),
@@ -286,59 +308,66 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
         ("Diagnostics", "Find connection problems"),
         ("Settings", "Appearance and test defaults"),
     ];
-    let mut y = columns[0].y;
+    let columns = Layout::horizontal([Constraint::Ratio(1, 3); 3]).split(rows[1]);
     for (index, (label, description)) in labels.iter().enumerate() {
-        let selected = app.page().selected == index;
+        let rect = columns[index / 2];
+        let y = rect.y + (index as u16 % 2) * 2;
         frame.render_widget(
-            Paragraph::new(choice(label, selected, t)),
-            Rect::new(columns[0].x, y, columns[0].width.saturating_sub(2), 1),
+            Paragraph::new(choice(label, app.page().selected == index, t)),
+            Rect::new(rect.x, y, rect.width, 1),
         );
-        if spacious || index == 0 {
+        if index < 3 || area.height >= 22 {
+            let description = *description;
             frame.render_widget(
-                Paragraph::new(ui(*description))
-                    .style(t.muted())
-                    .wrap(Wrap { trim: true }),
-                Rect::new(
-                    columns[0].x + 3,
-                    y + 1,
-                    columns[0].width.saturating_sub(5),
-                    2,
-                ),
+                Paragraph::new(ui(description)).style(if index == 0 {
+                    t.focus()
+                } else {
+                    t.muted()
+                }),
+                Rect::new(rect.x + 3, y + 1, rect.width.saturating_sub(4), 1),
             );
-            y += 3;
-        } else {
-            y += 1;
         }
     }
-    let divider = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(t.base().fg(t.line))
-        .padding(Padding::new(3, 0, 0, 0));
-    let detail = divider.inner(columns[1]);
-    frame.render_widget(divider, columns[1]);
+    let detail = rows[2];
     if let Some(result) = app.latest() {
-        let metric_rows = if spacious { 8 } else { 3 };
-        let rows = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Length(metric_rows),
-            Constraint::Min(1),
-        ])
-        .split(detail);
+        let header = vec![
+            Line::styled(ui("LATEST RESULT"), t.strong()),
+            Line::styled(
+                ui(format!(
+                    "{} UTC · {}",
+                    result.timestamp.format("%d %b %H:%M"),
+                    single(&result.backend)
+                )),
+                t.muted(),
+            ),
+        ];
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::styled(ui("LATEST RESULT"), t.strong()),
-                Line::styled(
-                    ui(format!(
-                        "{} UTC · {}",
-                        result.timestamp.format("%d %b %H:%M"),
-                        single(&result.backend)
-                    )),
-                    t.muted(),
-                ),
-            ]),
-            rows[0],
+            Paragraph::new(header),
+            Rect::new(detail.x, detail.y, detail.width, 2),
         );
-        let metric_area = Rect::new(rows[1].x, rows[1].y, rows[1].width.min(80), rows[1].height);
+        let body = Rect::new(
+            detail.x,
+            detail.y + 2,
+            detail.width,
+            detail.height.saturating_sub(2),
+        );
+        let spacious = body.height >= 11 && !app.compact;
+        let columns = Layout::horizontal([
+            Constraint::Length(if spacious {
+                (u32::from(body.width) * 68 / 100).min(84) as u16
+            } else {
+                body.width
+            }),
+            Constraint::Min(0),
+        ])
+        .split(body);
+        let metric_rows = if spacious { 8 } else { 3 };
+        let metric_area = Rect::new(
+            columns[0].x,
+            columns[0].y,
+            columns[0].width.min(80),
+            metric_rows.min(body.height),
+        );
         let metrics = Layout::horizontal([Constraint::Percentage(50); 2]).split(metric_area);
         metric(
             frame,
@@ -356,21 +385,32 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
             t,
             metrics[1],
         );
-        let mut lines = vec![Line::from(ui(format!(
-            "Idle {:.1} ms · jitter {:.1} ms",
-            result.latency.idle_ms, result.latency.jitter_ms
-        )))];
-        if let Some(analysis) = &result.analysis {
-            lines.push(Line::styled(
-                ui(format!(
-                    "Quality {}/100 · {} · {} confidence",
-                    analysis.quality.score,
-                    analysis.quality.grade.label(),
-                    analysis.quality.confidence.label()
-                )),
-                t.strong().fg(grade_color(analysis.quality.grade, t)),
-            ));
-            if spacious {
+        if spacious {
+            frame.render_widget(
+                Paragraph::new(ui(format!(
+                    "Idle {:.1} ms · jitter {:.1} ms",
+                    result.latency.idle_ms, result.latency.jitter_ms
+                )))
+                .style(t.muted()),
+                Rect::new(body.x, body.y + metric_rows, columns[0].width, 1),
+            );
+            let separator = Block::default()
+                .borders(Borders::LEFT)
+                .border_style(t.base().fg(t.line))
+                .padding(Padding::new(2, 0, 0, 0));
+            let context = separator.inner(columns[1]);
+            frame.render_widget(separator, columns[1]);
+            let mut lines = Vec::new();
+            if let Some(analysis) = &result.analysis {
+                lines.push(Line::styled(
+                    ui(format!(
+                        "Quality {}/100 · {} · {} confidence",
+                        analysis.quality.score,
+                        analysis.quality.grade.label(),
+                        analysis.quality.confidence.label()
+                    )),
+                    t.strong().fg(grade_color(analysis.quality.grade, t)),
+                ));
                 lines.push(Line::default());
                 if let Some(finding) = analysis.quality.findings.first() {
                     lines.push(Line::styled(
@@ -383,25 +423,22 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
                         "No findings in this result. This is not a continuous connection monitor.",
                     )));
                 }
+            } else {
+                lines.push(Line::from(ui(
+                    "Quality analysis unavailable for this saved result.",
+                )));
             }
-        }
-        let summary = Paragraph::new(lines)
-            .style(t.base())
-            .wrap(Wrap { trim: true });
-        let summary_height = summary
-            .line_count(rows[2].width)
-            .min(usize::from(rows[2].height.saturating_sub(2))) as u16;
-        frame.render_widget(
-            summary,
-            Rect::new(rows[2].x, rows[2].y, rows[2].width, summary_height),
-        );
-        if rows[2].height > 0 {
-            // A wrapped finding may exceed this preview; keep its full-result
-            // action visible even when the window has no more room to grow.
-            let link_y = rows[2].y + (summary_height + 1).min(rows[2].height - 1);
             frame.render_widget(
-                Paragraph::new(Line::styled(ui("v  Open result"), t.focus())),
-                Rect::new(rows[2].x, link_y, rows[2].width, 1),
+                Paragraph::new(lines)
+                    .style(t.base())
+                    .wrap(Wrap { trim: true }),
+                context,
+            );
+        }
+        if body.height > 0 {
+            frame.render_widget(
+                Paragraph::new(ui("v  Open result")).style(t.focus()),
+                Rect::new(body.x, body.bottom() - 1, columns[0].width, 1),
             );
         }
     } else {
@@ -410,12 +447,10 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
             Load::Failed(_) => ("HISTORY UNAVAILABLE", "Local history could not be read. Open History for details, or press r to retry. You can still run a test.", t.warning),
             Load::Ready(_) => ("No tests yet", "Start your first test to see throughput, latency and connection quality here.\n\nYour connection has not been probed.", t.text),
         };
-        let mut lines = vec![
-            Line::styled(ui("RECENT ACTIVITY"), t.strong()),
-            Line::default(),
-            Line::styled(ui(title), t.strong().fg(color)),
-            Line::default(),
-        ];
+        let mut lines = vec![Line::styled(ui(title), t.strong().fg(color))];
+        if detail.height >= 6 {
+            lines.push(Line::default());
+        }
         lines.extend(ui(text).lines().map(|s| Line::from(s.to_owned())));
         frame.render_widget(
             Paragraph::new(lines)
@@ -427,9 +462,12 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
 }
 
 fn metric(frame: &mut Frame, label: &str, value: &str, unit: &str, t: Theme, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
     let digit_height = if area.height >= 7 { 5 } else { 3 };
     frame.render_widget(
-        Paragraph::new(ui(label)).style(t.strong()),
+        Paragraph::new(ui(label)).style(t.muted()),
         Rect::new(area.x, area.y, area.width, 1),
     );
     if area.height >= 5
@@ -603,13 +641,20 @@ fn configure(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) {
 }
 
 fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duration) {
+    let phase = app.live.phase;
+    // A completed event leaves the upload sample window in App while the dial
+    // returns to final download. Never present that window as download evidence.
+    let show_trace = area.height >= 24
+        && !app.compact
+        && matches!(phase, TestPhase::Download | TestPhase::Upload)
+        && app.activity != Some(Activity::Saving);
     let rows = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Min(8),
+        Constraint::Min(9),
+        Constraint::Length(if show_trace { 5 } else { 0 }),
         Constraint::Length(3),
     ])
     .split(area);
-    let phase = app.live.phase;
     let phase_labels = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(rows[0]);
     for (index, step) in [
         TestPhase::Preparing,
@@ -624,14 +669,19 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
         frame.render_widget(
             Paragraph::new(Span::styled(
                 ui(format!(
-                    "{} {}{}  ",
+                    "{} {}{}",
                     index + 1,
                     if active { "› " } else { "" },
                     ui(step.label())
                 )),
                 if active { t.focus() } else { t.muted() },
             )),
-            phase_labels[index],
+            Rect::new(
+                phase_labels[index].x,
+                phase_labels[index].y,
+                phase_labels[index].width,
+                1,
+            ),
         );
     }
     phase_track(
@@ -641,30 +691,62 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
         Rect::new(rows[0].x, rows[0].y + 1, rows[0].width, 1),
     );
     let columns = Layout::horizontal([
-        Constraint::Length((u32::from(rows[1].width) * 64 / 100).min(96) as u16),
+        Constraint::Length((u32::from(rows[1].width) * 66 / 100).min(100) as u16),
         Constraint::Length(3),
         Constraint::Min(1),
     ])
     .split(rows[1]);
+    let accent = if phase == TestPhase::Upload {
+        t.success
+    } else {
+        t.focus
+    };
+    let instrument_theme = Theme { focus: accent, ..t };
+    let heading = Line::from(vec![
+        Span::styled(
+            ui(if app.activity == Some(Activity::Saving) {
+                "FINISHING"
+            } else {
+                phase.label()
+            }),
+            instrument_theme.focus(),
+        ),
+        Span::styled(
+            format!(
+                "  /  {}",
+                ui(if phase == TestPhase::Complete {
+                    "MEASUREMENT COMPLETE"
+                } else {
+                    "Latest sample"
+                })
+            ),
+            t.muted(),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(heading),
+        Rect::new(columns[0].x, columns[0].y + 1, columns[0].width, 1),
+    );
+    let gauge = Rect::new(
+        columns[0].x,
+        columns[0].y + 2,
+        columns[0].width,
+        columns[0].height.saturating_sub(2),
+    );
+    let measured = match phase {
+        TestPhase::Download | TestPhase::Complete => app.live.download_mbps.is_some(),
+        TestPhase::Upload => app.live.upload_mbps.is_some(),
+        _ => false,
+    };
     let animation = app.motion.frame();
-    let show_trace = columns[0].height >= 16 && !app.compact;
-    let gauge_rows = Layout::vertical([
-        Constraint::Min(8),
-        Constraint::Length(if show_trace { 5 } else { 0 }),
-    ])
-    .split(columns[0]);
-    let gauge = gauge_rows[0];
     speedometer::render_animated(
         frame,
         gauge,
         &app.live.speedometer,
-        matches!(
-            phase,
-            TestPhase::Download | TestPhase::Upload | TestPhase::Complete
-        ),
+        measured,
         speedometer::GaugePalette {
             background: t.background,
-            accent: t.focus,
+            accent,
             text: t.text,
             secondary: t.muted,
             track: t.line,
@@ -676,84 +758,196 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
             animation.seconds
         },
     );
-    if show_trace {
-        live_trace(frame, app, t, gauge_rows[1]);
-    }
     motion::illuminate(frame.buffer_mut(), rows[0], t, animation.phase);
-    let side = columns[2];
-    let spacious = !app.compact && side.height >= 21;
-    let mut lines = vec![
-        Line::styled(
-            ui(if app.activity == Some(Activity::Saving) {
-                "FINISHING"
-            } else {
-                phase.label()
-            }),
-            t.focus(),
-        ),
-        Line::styled(
-            ui(format!("Elapsed {}s · latest samples", elapsed.as_secs())),
-            t.muted(),
-        ),
-        Line::default(),
-    ];
-    let details = if spacious {
-        frame.render_widget(
-            Paragraph::new(lines).style(t.base()),
-            Rect::new(side.x, side.y, side.width, 3),
-        );
-        metric(
+
+    let side = Rect::new(
+        columns[2].x,
+        columns[2].y + 1,
+        columns[2].width,
+        columns[2].height.saturating_sub(1),
+    );
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::LEFT)
+            .border_style(t.base().fg(t.line)),
+        Rect::new(columns[1].x + 1, side.y, 1, side.height),
+    );
+    frame.render_widget(
+        Paragraph::new(ui("Connection response"))
+            .style(t.strong())
+            .wrap(Wrap { trim: true }),
+        Rect::new(side.x, side.y, side.width, 2),
+    );
+    if side.width < 32 {
+        compact_readings(
             frame,
-            "DOWNLOAD",
-            &app.live
-                .download_mbps
-                .map_or("—".into(), |v| format!("{v:.1}")),
-            "Mbps",
             t,
-            Rect::new(side.x, side.y + 3, side.width, 6),
+            Rect::new(side.x, side.y + 2, side.width, 2),
+            &[
+                ("Idle", ms(app.live.ping_ms)),
+                ("Jitter", ms(app.live.jitter_ms)),
+            ],
         );
-        metric(
-            frame,
-            "UPLOAD",
-            &app.live
-                .upload_mbps
-                .map_or("—".into(), |v| format!("{v:.1}")),
-            "Mbps",
-            t,
-            Rect::new(side.x, side.y + 9, side.width, 6),
-        );
-        lines = Vec::new();
-        Rect::new(side.x, side.y + 15, side.width, side.height - 15)
     } else {
-        lines.extend([
-            Line::from(ui(format!("Down   {}", speed(app.live.download_mbps)))),
-            Line::from(ui(format!("Up     {}", speed(app.live.upload_mbps)))),
-            Line::default(),
-        ]);
-        side
-    };
-    lines.extend([
-        Line::from(ui(format!("Idle   {}", ms(app.live.ping_ms)))),
-        Line::from(ui(format!("Jitter {}", ms(app.live.jitter_ms)))),
-        Line::from(ui(format!("Load ↓ {}", ms(app.live.download_loaded_ms)))),
-        Line::from(ui(format!("Load ↑ {}", ms(app.live.upload_loaded_ms)))),
-    ]);
-    frame.render_widget(Paragraph::new(lines).style(t.base()), details);
+        let response = Layout::horizontal([Constraint::Percentage(50); 2]).split(Rect::new(
+            side.x,
+            side.y + 2,
+            side.width,
+            3,
+        ));
+        metric(
+            frame,
+            "IDLE LATENCY",
+            &app.live.ping_ms.map_or("—".into(), |v| format!("{v:.1}")),
+            "ms",
+            t,
+            response[0],
+        );
+        metric(
+            frame,
+            "JITTER",
+            &app.live.jitter_ms.map_or("—".into(), |v| format!("{v:.1}")),
+            "ms",
+            t,
+            response[1],
+        );
+    }
+    if side.width < 32 {
+        frame.render_widget(
+            Paragraph::new(ui("LOADED LATENCY")).style(t.muted()),
+            Rect::new(side.x, side.y + 5, side.width, 1),
+        );
+        compact_readings(
+            frame,
+            t,
+            Rect::new(side.x, side.y + 6, side.width, 2),
+            &[
+                ("Download", ms(app.live.download_loaded_ms)),
+                ("Upload", ms(app.live.upload_loaded_ms)),
+            ],
+        );
+        let (label, value) = if phase == TestPhase::Upload {
+            ("Download", app.live.download_mbps)
+        } else {
+            ("Upload", app.live.upload_mbps)
+        };
+        compact_readings(
+            frame,
+            t,
+            Rect::new(side.x, side.y + 8, side.width, 1),
+            &[(label, speed(value))],
+        );
+    } else {
+        let mut lines = vec![
+            Line::styled(ui("LOADED LATENCY"), t.muted()),
+            Line::from(ui(format!("Download  {}", ms(app.live.download_loaded_ms)))),
+            Line::from(ui(format!("Upload    {}", ms(app.live.upload_loaded_ms)))),
+        ];
+        // Ordinary text is deliberate here: the dial is the single primary number.
+        let (other_label, other_value) = if phase == TestPhase::Upload {
+            ("DOWNLOAD", app.live.download_mbps)
+        } else {
+            ("UPLOAD", app.live.upload_mbps)
+        };
+        if side.height >= 16 && other_value.is_some() {
+            frame.render_widget(
+                Paragraph::new(lines).style(t.base()),
+                Rect::new(side.x, side.y + 5, side.width, 3),
+            );
+            let other_theme = Theme {
+                focus: if phase == TestPhase::Upload {
+                    t.focus
+                } else {
+                    t.success
+                },
+                ..t
+            };
+            metric(
+                frame,
+                other_label,
+                &other_value.map_or("—".into(), |v| format!("{v:.1}")),
+                "Mbps",
+                other_theme,
+                Rect::new(
+                    side.x,
+                    side.y + 10,
+                    side.width,
+                    if app.compact { 3 } else { 6 },
+                ),
+            );
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(ui(other_label), t.muted()),
+                Span::styled(format!("  {}", speed(other_value)), t.strong()),
+            ]));
+            frame.render_widget(
+                Paragraph::new(lines).style(t.base()),
+                Rect::new(
+                    side.x,
+                    side.y + 5,
+                    side.width,
+                    side.height.saturating_sub(5),
+                ),
+            );
+        }
+    }
+    if show_trace {
+        live_trace(frame, app, instrument_theme, rows[2]);
+    }
+    let profile = ui(format!(
+        "{} · {} streams · {}s per transfer phase",
+        app.options.backend_label(),
+        app.options.streams,
+        app.options.duration
+    ));
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled(ui(format!(
-                    "{} · {} streams · {}s per transfer phase",
-                    app.options.backend_label(),
-                    app.options.streams,
-                    app.options.duration
-                )),
+            Line::styled(profile, t.muted()),
+            Line::styled(
+                ui(if area.width < 100 {
+                    "Provisional readings · final results follow completion"
+                } else {
+                    "Needle is smoothed. Readings are provisional until the test completes."
+                }),
                 t.muted(),
             ),
-            Line::styled(ui("Gauge is smoothed; samples are provisional. Final results use completed measurements."),
-                t.muted(),
-            ),
-        ]),
-        rows[2],
+        ])
+        .wrap(Wrap { trim: true }),
+        rows[3],
+    );
+    let clock = message(app, "Elapsed {0}s", &[elapsed.as_secs().to_string()]);
+    frame.render_widget(
+        Paragraph::new(clock)
+            .style(t.muted())
+            .alignment(Alignment::Right),
+        Rect::new(side.x, side.bottom().saturating_sub(1), side.width, 1),
+    );
+}
+
+/// Reserve numeric width first so translated labels cannot displace a unit.
+fn compact_readings(frame: &mut Frame, t: Theme, area: Rect, readings: &[(&str, String)]) {
+    let value_width = readings
+        .iter()
+        .map(|(_, value)| Line::from(value.as_str()).width())
+        .max()
+        .unwrap_or(1) as u16;
+    let rows = readings.iter().map(|(label, value)| {
+        Row::new(vec![
+            Cell::from(ui(label)).style(t.muted()),
+            Cell::from(Line::from(value.clone()).alignment(Alignment::Right)).style(t.strong()),
+        ])
+    });
+    frame.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Min(1),
+                Constraint::Length(value_width.min(area.width)),
+            ],
+        )
+        .column_spacing(1)
+        .style(t.base()),
+        area,
     );
 }
 
@@ -798,6 +992,21 @@ fn phase_track(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
 /// Only actual engine samples are plotted. Motion decorates the latest sample;
 /// it does not interpolate, extrapolate or synthesize throughput evidence.
 fn live_trace(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
+    let title = format!(
+        "{} / {} · Mbps",
+        ui("Recent samples"),
+        ui(app.live.phase.label())
+    );
+    if app.live.samples.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(title, t.muted()),
+                Line::styled(ui("No samples yet"), t.muted()),
+            ]),
+            area,
+        );
+        return;
+    }
     let data: Vec<_> = app
         .live
         .samples
@@ -821,7 +1030,7 @@ fn live_trace(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
     frame.render_widget(
         Chart::new(sets)
             .style(t.base())
-            .block(Block::default().title(ui("Mbps")).title_style(t.muted()))
+            .block(Block::default().title(title).title_style(t.muted()))
             .x_axis(
                 Axis::default()
                     .bounds([0.0, (data.len().saturating_sub(1) as f64).max(1.0)])
@@ -845,23 +1054,61 @@ fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
         single(&result.backend),
         single(&result.server.host)
     );
-    let area = heading(frame, "MEASUREMENT COMPLETE", &subtitle, t, area);
+    let next_profile = format!(
+        "{} / {} · {} · {}: {}{}",
+        ui("Current settings"),
+        app.options.backend_label(),
+        ui(format!(
+            "{} s / phase  ·  {} streams",
+            app.options.duration, app.options.streams
+        )),
+        ui("History"),
+        ui(if app.options.no_save { "OFF" } else { "ON" }),
+        if app.options.output.is_some() {
+            format!(" · {}", ui("Explicit export enabled"))
+        } else {
+            String::new()
+        }
+    );
+    let historical = Paragraph::new(ui(subtitle))
+        .style(t.muted())
+        .wrap(Wrap { trim: true });
+    let historical_height = (historical.line_count(area.width) as u16).clamp(1, 2);
+    let profile = Paragraph::new(next_profile)
+        .style(t.muted())
+        .wrap(Wrap { trim: true });
+    let profile_height = (profile.line_count(area.width) as u16).clamp(1, 3);
+    let heading_height = 1 + historical_height + profile_height;
+    frame.render_widget(
+        Paragraph::new(ui("MEASUREMENT COMPLETE")).style(t.focus()),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    frame.render_widget(
+        historical,
+        Rect::new(area.x, area.y + 1, area.width, historical_height),
+    );
+    frame.render_widget(
+        profile,
+        Rect::new(
+            area.x,
+            area.y + 1 + historical_height,
+            area.width,
+            profile_height,
+        ),
+    );
+    let area = Rect::new(
+        area.x,
+        area.y + heading_height,
+        area.width,
+        area.height.saturating_sub(heading_height),
+    );
     let height = metric_height(app, area);
     let rows = Layout::vertical([Constraint::Length(height), Constraint::Min(1)]).split(area);
     result_metrics(frame, result, t, rows[0]);
     let progress = app.motion.frame().arrival;
     // Each exact metric gets its own staggered sweep. No rolling/fabricated
     // intermediate numbers, including when completion carries a save failure.
-    for (index, card) in Layout::horizontal([Constraint::Percentage(25); 4])
-        .split(Rect::new(
-            rows[0].x,
-            rows[0].y,
-            rows[0].width.min(160),
-            rows[0].height,
-        ))
-        .iter()
-        .enumerate()
-    {
+    for (index, card) in result_metric_areas(rows[0]).iter().enumerate() {
         let staggered = ((progress - index as f64 * 0.12) / 0.64).clamp(0.0, 1.0);
         motion::illuminate(frame.buffer_mut(), *card, t, staggered);
     }
@@ -1036,16 +1283,55 @@ fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
     }
 }
 
-fn result_metrics(frame: &mut Frame, result: &TestResult, t: Theme, area: Rect) {
+fn result_metric_areas(area: Rect) -> [Rect; 4] {
     let area = Rect::new(area.x, area.y, area.width.min(160), area.height);
-    let columns = Layout::horizontal([Constraint::Percentage(25); 4]).split(area);
-    for (rect, label, value, unit) in [
+    if area.height >= 7 && area.width >= 96 {
+        let columns = Layout::horizontal([
+            Constraint::Percentage(38),
+            Constraint::Percentage(38),
+            Constraint::Percentage(24),
+        ])
+        .split(area);
+        let response =
+            Layout::vertical([Constraint::Length(4), Constraint::Min(3)]).split(columns[2]);
+        [columns[0], columns[1], response[0], response[1]]
+    } else {
+        let columns = Layout::horizontal([Constraint::Percentage(25); 4]).split(area);
+        [columns[0], columns[1], columns[2], columns[3]]
+    }
+}
+
+fn result_metrics(frame: &mut Frame, result: &TestResult, t: Theme, area: Rect) {
+    let columns = result_metric_areas(area);
+    for (index, (rect, label, value, unit)) in [
         (columns[0], "DOWNLOAD", result.download.mbps, "Mbps"),
         (columns[1], "UPLOAD", result.upload.mbps, "Mbps"),
         (columns[2], "IDLE LATENCY", result.latency.idle_ms, "ms"),
         (columns[3], "JITTER", result.latency.jitter_ms, "ms"),
-    ] {
-        metric(frame, label, &format!("{value:.1}"), unit, t, rect);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let color = if index == 0 {
+            t.focus
+        } else if index == 1 {
+            t.success
+        } else {
+            t.muted
+        };
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(t.base().fg(color)),
+            rect,
+        );
+        let content = Rect::new(
+            rect.x,
+            rect.y + 1,
+            rect.width.saturating_sub(2),
+            rect.height.saturating_sub(1),
+        );
+        metric(frame, label, &format!("{value:.1}"), unit, t, content);
     }
 }
 
@@ -1993,13 +2279,17 @@ fn footer(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
     } else if app.activity == Some(Activity::Saving) {
         "Finishing completed result. Quit requests wait for the save.".into()
     } else if app.activity.is_some() {
-        "Esc cancel task  ·  q cancel and quit  ·  Ctrl+C stop immediately".into()
+        "Esc cancel · q quit · Ctrl+C stop".into()
     } else if !app.notice.is_empty() {
         single(&app.notice)
     } else {
         match app.screen() {
             Screen::Home => {
-                "Enter configure / open  ·  v latest result  ·  r reload local history".into()
+                if app.page().selected == 0 {
+                    "Space start now · Enter configure".into()
+                } else {
+                    "Space start now · Enter open · v latest result".into()
+                }
             }
             Screen::Configure => {
                 "Enter start / edit  ·  +/- change value  ·  settings are session-only".into()
@@ -2010,7 +2300,9 @@ fn footer(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
             Screen::Live => {
                 "Esc cancel test  ·  q cancel and quit  ·  Ctrl+C stop immediately".into()
             }
-            Screen::Results => "Enter another test  ·  j/k or PgUp/PgDn scroll details".into(),
+            Screen::Results => {
+                "Space test with current settings · Enter configure · j/k scroll".into()
+            }
             Screen::History => "Enter result  ·  b pin baseline  ·  c compare  ·  r reload".into(),
             Screen::Statistics => "Enter compare (from Stats)  ·  j/k scroll  ·  r reload".into(),
             Screen::Compare => {
@@ -2117,6 +2409,7 @@ fn overlay(frame: &mut Frame, app: &mut Cockpit, modal: Modal, t: Theme, area: R
                 Line::from(ui("Shift+Tab        Previous section")),
                 Line::from(ui("Esc / Backspace  Back; confirm before cancelling")),
                 Line::from(ui("+ / - / Space   Edit a selected setting")),
+                Line::from(ui("Home / Results: Space starts a test with current settings.")),
                 Line::from(ui("PgUp / PgDn      Scroll report details")),
                 Line::from(ui("History: PgUp/PgDn page; Home/End first/last run.")),
                 Line::from(ui("History: b pin baseline; c compare selected with baseline or older neighbor.")),

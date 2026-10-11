@@ -93,6 +93,11 @@ impl SpeedometerState {
         self.displayed_mbps
     }
 
+    /// Latest measured sample; interpolation belongs only to dial geometry.
+    pub const fn target_mbps(&self) -> f64 {
+        self.target_mbps
+    }
+
     pub const fn peak_mbps(&self) -> f64 {
         self.peak_mbps
     }

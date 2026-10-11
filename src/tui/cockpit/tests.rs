@@ -1162,6 +1162,114 @@ fn home_and_results_keep_exact_readings_at_every_layout_size() {
 }
 
 #[test]
+fn redesigned_live_uses_one_exact_reading_and_keeps_phase_evidence_separate() {
+    use crate::{engine::EngineEvent, model::TestPhase};
+    let mut app = app();
+    start(&mut app);
+    app.apply_engine(EngineEvent::PhaseChanged(TestPhase::Download));
+    let waiting = render(&mut app, 120, 38).0;
+    assert!(waiting.contains("No samples yet"));
+    assert!(!waiting.contains("0.0 Mbps"));
+    app.apply_engine(EngineEvent::ThroughputSample {
+        phase: TestPhase::Download,
+        mbps: 642.7,
+    });
+    assert_eq!(app.live.speedometer.displayed_mbps(), 0.0);
+    for (width, height) in [(80, 24), (120, 38), (214, 52)] {
+        let text = render(&mut app, width, height).0;
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.contains("642.7") && !line.contains("peak"))
+                .count(),
+            1,
+            "primary sample must not compete with another number: {text}"
+        );
+        assert!(text.contains("Ctrl+C stop"));
+        assert!(!text.contains("IDLE LATENCYJITTER"));
+    }
+    app.apply_engine(EngineEvent::PhaseChanged(TestPhase::Upload));
+    let waiting = render(&mut app, 120, 38).0;
+    assert!(waiting.contains("No samples yet"));
+    app.apply_engine(EngineEvent::ThroughputSample {
+        phase: TestPhase::Upload,
+        mbps: 312.3,
+    });
+    let uploading = render(&mut app, 120, 38).0;
+    assert!(uploading.contains("Recent samples / UPLOAD"));
+    assert!(uploading.contains("642.7 Mbps"));
+    app.apply_engine(EngineEvent::Complete(result()));
+    app.activity = Some(Activity::Saving);
+    let saving = render(&mut app, 120, 38).0;
+    assert!(
+        !saving.contains("Recent samples"),
+        "upload samples must not be attached to final download: {saving}"
+    );
+}
+
+#[test]
+fn compact_live_keeps_localized_latency_values_and_units_together() {
+    let mut app = app();
+    start(&mut app);
+    app.live.ping_ms = Some(10.0);
+    app.live.jitter_ms = Some(2.0);
+    app.live.download_loaded_ms = Some(123.4);
+    app.live.upload_loaded_ms = Some(234.5);
+    for language in crate::i18n::Language::ALL {
+        app.language = language;
+        let text = render(&mut app, 80, 24).0;
+        for value in ["10.0 ms", "2.0 ms", "123.4 ms", "234.5 ms"] {
+            assert!(
+                text.contains(value),
+                "{language:?}: missing {value}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn compact_home_keeps_exact_metrics_and_results_identify_current_profile() {
+    let mut app = app();
+    let mut saved = result();
+    saved.backend = "historical-backend".into();
+    saved.download.mbps = 455.5;
+    saved.upload.mbps = 312.3;
+    app.set_history(Ok(Archive::from_results(vec![saved.clone()])));
+    app.compact = true;
+    for (width, height) in [(80, 24), (120, 38)] {
+        let text = render(&mut app, width, height).0;
+        assert!(text.contains("455.5 Mbps"), "{text}");
+        assert!(text.contains("312.3 Mbps"), "{text}");
+        assert!(text.contains("Space start now"));
+        assert!(text.contains("Uses substantial data."));
+    }
+    app.result = Some(saved);
+    app.push(Screen::Results);
+    let text = render(&mut app, 120, 38).0;
+    assert!(text.contains("historical-backend"));
+    assert!(text.contains("Current settings / Cloudflare"));
+    assert!(text.contains("Space test with current settings"));
+}
+
+#[test]
+fn long_historical_metadata_cannot_overwrite_the_next_test_profile() {
+    let mut app = app();
+    let mut saved = result();
+    saved.backend = "historical-backend-".repeat(8);
+    saved.server.host = "long-saved-host-".repeat(12);
+    app.result = Some(saved);
+    app.options.output = Some("next-run.json".into());
+    app.options.no_save = true;
+    app.push(Screen::Results);
+    for (width, height) in [(80, 24), (120, 38)] {
+        let text = render(&mut app, width, height).0;
+        assert!(text.contains("Current settings / Cloudflare"), "{text}");
+        assert!(text.contains("Explicit export enabled"), "{text}");
+        assert!(text.contains("100.0 Mbps"), "{text}");
+        assert!(text.contains("Space test with current settings"), "{text}");
+    }
+}
+
+#[test]
 fn short_summaries_keep_controls_nearby_and_long_results_remain_scrollable() {
     let mut app = app();
     let records = comparison_results();
@@ -1186,7 +1294,13 @@ fn short_summaries_keep_controls_nearby_and_long_results_remain_scrollable() {
             Screen::Statistics => &["MEDIAN DOWNLOAD", "MEDIAN UPLOAD", "MEDIAN LATENCY"],
             _ => &[],
         };
-        if !labels.is_empty() {
+        if screen == Screen::Results {
+            // Speeds now lead the summary; latency and jitter stack beside
+            // them. Every metric must remain visible with its own label.
+            for label in labels {
+                assert!(text.contains(label), "missing {label}: {text}");
+            }
+        } else if !labels.is_empty() {
             let header = text.lines().find(|line| line.contains(labels[0])).unwrap();
             for pair in labels.windows(2) {
                 assert!(header.find(pair[1]).unwrap() - header.find(pair[0]).unwrap() <= 40);
