@@ -332,7 +332,7 @@ def main():
                 assert server.requests == before, 'returning Home started a test'
                 tty.wait('Space start now')
                 tty.send(' ')
-                tty.wait('MEASURING')
+                tty.wait('Latest sample')
                 tty.wait('Esc cancel · q quit · Ctrl+C stop')
                 tty.wait('MEASUREMENT COMPLETE', timeout=25)
                 tty.wait('EXPORTED')
@@ -376,7 +376,7 @@ def main():
                 tty.snapshot('Shared completion policy / CSV export and exactly one history row')
                 tty.wait('Space test with current settings')
                 tty.send(' ')
-                tty.wait('MEASURING')
+                tty.wait('Latest sample')
                 tty.wait('Esc cancel · q quit · Ctrl+C stop')
                 until = time.monotonic() + 5
                 while server.requests == before and time.monotonic() < until:
@@ -402,7 +402,7 @@ def main():
             with session(options) as tty:
                 tty.wait('No tests yet')
                 tty.send('\r\r')
-                tty.wait('MEASURING')
+                tty.wait('Latest sample')
                 tty.send('?')
                 tty.wait('KEYBOARD FIELD GUIDE')
                 tty.send('\x1b')

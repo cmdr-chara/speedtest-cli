@@ -155,7 +155,7 @@ fn chrome(frame: &mut Frame, app: &Cockpit, t: Theme, head: Rect, tabs: Rect) {
         columns[0],
     );
     let (status, color) = match app.activity {
-        Some(Activity::Test) => ("● MEASURING", t.focus),
+        Some(Activity::Test) => ("", t.muted),
         Some(Activity::Saving) => ("● SAVING", t.warning),
         Some(Activity::Tool) => ("● DIAGNOSTIC RUNNING", t.focus),
         None => ("", t.muted),
