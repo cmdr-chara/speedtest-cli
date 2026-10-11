@@ -58,11 +58,11 @@ def raster(source, title, font_size=14):
         draw.rectangle((x, y, x + width - 1, y + height - 1), fill=background)
     for index, cell in enumerate(frame["cells"]):
         symbol = cell["symbol"]
-        if not symbol or symbol == " ":
+        if not symbol or (symbol == " " and not cell.get("underlined")):
             continue
         x, y = margin + index % columns * width, header + index // columns * height
         foreground, background = styles[index]
-        if not CELLS.block(draw, symbol, x, y, width, height, foreground, background):
+        if symbol != " " and not CELLS.block(draw, symbol, x, y, width, height, foreground, background):
             draw.text((x, y + 1), symbol, font=fonts[bool(cell.get("bold")), bool(cell.get("italic"))], fill=foreground)
         if cell.get("underlined"):
             draw.line((x, y + height - 2, x + width - 1, y + height - 2), fill=foreground)

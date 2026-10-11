@@ -90,8 +90,9 @@ completed result remains visible if export/history fails, with a **SAVE FAILED**
 
 Settings apply to **this session only**; they do not change a configuration file or the
 CLI defaults for future launches. They include a reduced-motion option that removes
-needle interpolation, orbital accents, and animated activity markers, and immediately
-settles page, chart, selection, and results reveals. The balanced timing preset uses
+needle interpolation and animated activity markers, freezes the gauge's decorative
+rings, and immediately settles page, chart, selection, and results reveals. Static
+rings and the measured peak marker remain visible. The balanced timing preset uses
 8-second phases, 2 streams, 60 FPS, and a 120-second deadline. CLI `--timeout` starts
 when an operation starts, not while browsing the menu.
 
