@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - ".github/workflows/cockpit-visuals.yml"
+      - "docs/images/readme/render_gallery.py"
 
 permissions:
   contents: read
@@ -25,6 +26,7 @@ jobs:
           python-version: "3.12"
       - name: Capture actual renderer fixtures
         env:
+          COCKPIT_SNAPSHOT_DIR: ${{ runner.temp }}/cockpit-review
           READABILITY_SNAPSHOT_DIR: ${{ runner.temp }}/cockpit-readability
           COCKPIT_MOTION_SNAPSHOT_DIR: ${{ runner.temp }}/cockpit-motion
         run: cargo test --locked --lib capture_
@@ -35,6 +37,7 @@ jobs:
           sudo apt-get install --yes fonts-dejavu-core
       - name: Render current gallery
         env:
+          COCKPIT_SNAPSHOT_DIR: ${{ runner.temp }}/cockpit-review
           READABILITY_SNAPSHOT_DIR: ${{ runner.temp }}/cockpit-readability
           COCKPIT_MOTION_SNAPSHOT_DIR: ${{ runner.temp }}/cockpit-motion
         run: |
@@ -63,6 +66,11 @@ jobs:
               out / "live-motion.gif",
               "LIVE COCKPIT | synthetic download, upload, and result reveal",
           )
+          source = Path("docs/images/readme/render_gallery.py")
+          spec = importlib.util.spec_from_file_location("readme_gallery", source)
+          readme = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(readme)
+          readme.render(stills, Path(os.environ["COCKPIT_SNAPSHOT_DIR"]), motion, out / "readme")
           (out / "source-sha.txt").write_text(os.environ["GITHUB_SHA"] + "\n")
           print("Captured badge-free frames and rendered current gallery.")
           PY
