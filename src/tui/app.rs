@@ -46,6 +46,12 @@ impl App {
     pub(super) fn apply(&mut self, event: EngineEvent) {
         match event {
             EngineEvent::PhaseChanged(phase) => {
+                // The phase notification can arrive a frame before its result.
+                // Keep the upload sample labeled as upload until Complete can
+                // atomically replace the value, peak, and phase with download.
+                if phase == TestPhase::Complete {
+                    return;
+                }
                 if matches!(phase, TestPhase::Download | TestPhase::Upload) {
                     self.speedometer.reset();
                     self.samples.clear();

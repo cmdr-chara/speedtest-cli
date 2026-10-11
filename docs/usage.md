@@ -73,7 +73,8 @@ analysis, including explicit better/worse labels rather than color alone.
 | `Enter` | Open, start, or edit the selected item |
 | `Tab` / `Shift+Tab`, `←` / `→` | Switch sibling sections |
 | `Esc` / `Backspace` | Back to the previous screen, preserving its selection |
-| `+` / `-`, `Space` | Change the selected configuration/setting value |
+| `Space` on Home / Results | Start a test with the current session settings |
+| `+` / `-`, `Space` in configuration/settings | Change the selected value |
 | `PgUp` / `PgDn` | Page through history or scroll long reports |
 | `Home` / `End` | Jump to the newest/oldest history run |
 | `b` / `c` | Pin/unpin a history baseline / compare the selected run |
@@ -90,20 +91,32 @@ completed result remains visible if export/history fails, with a **SAVE FAILED**
 
 Settings apply to **this session only**; they do not change a configuration file or the
 CLI defaults for future launches. They include a reduced-motion option that removes
-needle interpolation and animated activity markers, freezes the gauge's decorative
-rings, and immediately settles page, chart, selection, and results reveals. Static
-rings and the measured peak marker remain visible. The balanced timing preset uses
+needle interpolation and animated activity markers, freezes the dial highlight,
+and immediately settles page, chart, selection, and results reveals. The segmented
+scale and measured peak marker remain visible. The balanced timing preset uses
 8-second phases, 2 streams, 60 FPS, and a 120-second deadline. CLI `--timeout` starts
 when an operation starts, not while browsing the menu.
 
 The default cockpit includes a scanning brand entrance, short page and dialog light
 sweeps, a moving selection underline, and staggered result highlights. Live tests
-add orbital gauge accents, a peak marker, phase indicators, and a recent-sample trace
-when there is enough vertical space. Statistics traces the selected saved series
+use a segmented dial, a short animated cursor, a peak marker, phase indicators,
+and a phase-labeled recent-sample trace when there is enough vertical space. The
+primary number is the exact latest sample to one decimal; only dial geometry is
+smoothed. Missing samples stay unavailable, and the previous phase is shown
+separately. The trace is hidden during completion so upload samples cannot appear
+beneath the final download reading. Statistics traces the selected saved series
 without changing its scale or sample count. Exact values remain readable during
 every transition, and navigation stays immediate. Idle pages stop animating after
 their entrance. Use **Reduced motion** or a lower `--fps` cap for a quieter display.
-See the [before/after and animated gallery](images/motion/README.md).
+See the [before/after and animated gallery](images/design/README.md).
+
+Home shows the current backend, phase duration, streams, save/export status, and
+data-use warning beside the quick-start action. Enter continues to open
+configuration without network traffic. On Results, Space uses the **current
+session settings** shown above the measurements; it does not reconstruct settings
+from a historical result. Enter opens configuration. Repeated tests replace the
+run page and preserve its Back destination. Busy states, dialogs, key repeats,
+search entry, and terminals below 80×24 cannot trigger quick start.
 
 DNS and diagnostic tools have a separate **Ready to start** screen. They run the
 existing read-only commands and show their reports in scrollable panels, with bounded

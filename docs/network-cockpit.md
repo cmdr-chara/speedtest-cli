@@ -25,10 +25,11 @@ columns and one row at the edges. Home groups its two speed readings into adjace
 columns and places the footer after its summary, rather than stretching controls
 and dividers across unused rows. The full-result action remains visible beneath
 long findings. Results, Statistics, and Compare also place controls after short
-content; long findings retain the full scroll viewport. Numeric groups use adjacent
-columns up to 40 cells wide. Sparse histories size the table to their record count,
+content; long findings retain the full scroll viewport. Home groups its speed metrics within 80 columns. Comfortable Results gives
+download and upload more width and stacks latency/jitter beside them; compact
+Results retains four aligned ordinary readings. Sparse histories size the table to their record count,
 while long histories use all available table rows for paging. The live dial grows
-up to 96 columns by 30 rows and keeps its readings beside it. Resizing recomputes
+up to 100 columns and separates its primary reading from connection-response metrics. Resizing recomputes
 report scroll limits. Body font size remains the terminal's setting.
 Action highlights are label-sized; descriptions and blank rows are not selected.
 
@@ -41,11 +42,22 @@ and any save failure remain readable from the first frame. Statistics traces the
 selected saved series over its complete outline with fixed full-series axes.
 Changing metric, scope, path, or reloading history restarts that trace.
 
-Live adds opposing orbital comets, a measured-arc scanner, velocity-based needle
-trails, a peak diamond, and an animated phase rail. Comfortable layouts with enough
-height also show the actual recent throughput samples beneath the gauge. Orbits
-and the traveling phase accent are decoration, not extra samples or percentage
-completion. Download and upload retain separate sample windows.
+Live uses one segmented precision sweep, a short spring-driven cursor, a quiet
+traveling arc highlight, a peak diamond, and an animated phase rail. The primary
+number reads the exact target sample to one decimal immediately; interpolation
+only changes geometry. It never competes with a second active throughput value.
+Missing values stay unavailable. Download and upload use separate sample windows
+and accents. The trace explicitly names its phase and disappears during completion,
+when the engine returns the dial to the final download result.
+
+Home places an explicit Space start action beside its current backend, duration,
+streams, save/export status, and data-use warning. Its compact navigation groups
+follow the reducer's vertical selection order. Recent measurements retain their
+timestamps and are not represented as continuous connection status. Space on
+Results starts with the displayed current session settings; historical records do
+not contain a reconstructible test profile. Enter retains offline configuration.
+Repeated tests replace Results rather than growing the navigation stack. All
+existing busy/modal/search/repeat/minimum-size guards apply to quick start.
 
 `motion.rs` owns a separate monotonic presentation clock. Entrance effects finish
 within 720 ms, selection within 240 ms, phase accents within 480 ms, and dialog
@@ -61,7 +73,7 @@ motion, and snaps the gauge. A modal pauses live decoration; resize settles
 transient effects. Native and monochrome colors remain native, glyphs are never
 shifted, and no font or terminal profile is modified. The direct `--run` gauge
 retains its original composition. No animation dependency or image protocol is
-required. See [before/after frames and animation captures](images/motion/README.md).
+required. See [before/after frames and animation captures](images/design/README.md).
 
 ## Ownership
 

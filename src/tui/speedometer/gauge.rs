@@ -89,7 +89,7 @@ pub fn render_themed(
     );
 }
 
-/// Render the cockpit dial with orbital accents and a measured peak marker.
+/// Render the cockpit's segmented dial, exact sample, and measured peak marker.
 ///
 /// Time is presentation-only monotonic seconds. `None` disables every moving
 /// decoration; neither path modifies measurement, the spring, or the dial scale.
@@ -128,18 +128,29 @@ fn render_gauge(
     let GaugePalette {
         background, accent, ..
     } = palette;
+    let show_value = show_value && (!effects.enhanced || state.target_mbps().is_finite());
     if area.width < 40 || area.height < 8 {
-        render_fallback(frame, area, state, palette, show_value);
+        render_fallback(frame, area, state, palette, show_value, effects.enhanced);
         return;
     }
 
-    let maximum = state.scale_mbps().max(1.0);
-    let ratio = (state.displayed_mbps() / maximum).clamp(0.0, 1.0);
+    let maximum = if state.scale_mbps().is_finite() {
+        state.scale_mbps().max(1.0)
+    } else {
+        1.0
+    };
+    let ratio = if state.displayed_mbps().is_finite() && (!effects.enhanced || show_value) {
+        (state.displayed_mbps() / maximum).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let needle_angle = angle_for_ratio(ratio);
 
     let active_cap = point_on_arc(0.975, ratio);
 
-    let labels = if area.width >= 62 && area.height >= 11 {
+    let labels = if area.width >= if effects.enhanced { 48 } else { 62 }
+        && area.height >= if effects.enhanced { 10 } else { 11 }
+    {
         scale_labels(maximum, area.width)
     } else {
         Vec::new()
@@ -152,45 +163,33 @@ fn render_gauge(
         .x_bounds([-1.28, 1.28])
         .y_bounds([-0.56, 1.18])
         .paint(move |ctx| {
-            // The complete track is immutable geometry. Keep it off the frame
-            // allocation/trigonometry path, especially during live measurements.
-            for coords in track_layers() {
-                ctx.draw(&Points {
-                    coords,
-                    color: palette.track,
-                });
-            }
-
             if effects.enhanced {
-                draw_orbits(ctx, palette, effects.seconds);
-                if show_value && effects.seconds.is_some() {
-                    draw_needle_trail(ctx, state, ratio, maximum, palette);
+                draw_precision_track(ctx, ratio, palette, effects.seconds);
+                if show_value && state.peak_mbps().is_finite() && state.peak_mbps() > 0.0 {
+                    draw_peak(ctx, (state.peak_mbps() / maximum).clamp(0.0, 1.0), palette);
                 }
-            }
-
-            ctx.layer();
-
-            if ratio > 0.0 {
-                for radius in TRACK_RADII {
-                    draw_arc(ctx, *radius, 0.0, ratio, accent);
+            } else {
+                // Keep legacy direct-run composition while caching its fixed
+                // geometry outside the allocation/trigonometry frame path.
+                for coords in track_layers() {
+                    ctx.draw(&Points {
+                        coords,
+                        color: palette.track,
+                    });
                 }
-                if let Some(seconds) = effects.seconds.filter(|_| show_value) {
-                    // The scan stays within the measured part of the scale. It
-                    // never presents the decorative orbit as extra throughput.
-                    let head = (seconds / 2.4).fract() * ratio;
-                    draw_arc(ctx, 0.975, (head - 0.075).max(0.0), head, palette.text);
+                ctx.layer();
+                if ratio > 0.0 {
+                    for radius in TRACK_RADII {
+                        draw_arc(ctx, *radius, 0.0, ratio, accent);
+                    }
+                    ctx.draw(&Points {
+                        coords: &[active_cap],
+                        color: palette.text,
+                    });
                 }
-                ctx.draw(&Points {
-                    coords: &[active_cap],
-                    color: palette.text,
-                });
+                draw_ticks(ctx, ratio, palette);
+                draw_needle(ctx, needle_angle, palette);
             }
-
-            draw_ticks(ctx, ratio, palette);
-            if effects.enhanced && show_value && state.peak_mbps() > 0.0 {
-                draw_peak(ctx, (state.peak_mbps() / maximum).clamp(0.0, 1.0), palette);
-            }
-            draw_needle(ctx, needle_angle, palette);
 
             for (x, y, label) in &labels {
                 ctx.print(
@@ -205,7 +204,15 @@ fn render_gauge(
         });
 
     frame.render_widget(canvas, area);
-    render_center_readout(frame, area, state, show_value, palette, large_values);
+    render_center_readout(
+        frame,
+        area,
+        state,
+        show_value,
+        palette,
+        large_values,
+        effects.enhanced,
+    );
 }
 
 fn draw_ticks(ctx: &mut ratatui::widgets::canvas::Context<'_>, ratio: f64, palette: GaugePalette) {
@@ -238,66 +245,56 @@ fn draw_ticks(ctx: &mut ratatui::widgets::canvas::Context<'_>, ratio: f64, palet
     }
 }
 
-fn draw_orbits(
+fn draw_precision_track(
     ctx: &mut ratatui::widgets::canvas::Context<'_>,
+    ratio: f64,
     palette: GaugePalette,
     seconds: Option<f64>,
 ) {
-    // Interrupted, thin arcs read as instrumentation, separate from the thick
-    // quantitative track. Native/monochrome palettes remain entirely native.
-    for index in 0..40 {
-        let start = f64::from(index) / 40.0;
-        draw_arc(ctx, 1.145, start, start + 0.009, palette.track);
-    }
-    for index in 0..24 {
-        let start = f64::from(index) / 24.0;
-        draw_arc(ctx, 0.70, start, start + 0.012, palette.track);
-    }
-    let Some(seconds) = seconds else {
-        return;
-    };
-
-    // Opposing comet heads share one monotonic clock: no timers, randomness,
-    // retained frame buffers, or changes to measured values are needed here.
-    let outer_head = (seconds / 5.5).fract();
-    let inner_head = 1.0 - (seconds / 7.0).fract();
-    for (radius, head, direction) in [(1.145, outer_head, -1.0), (0.70, inner_head, 1.0)] {
-        for (length, color) in [
-            (0.095, palette.secondary),
-            (0.045, palette.accent),
-            (0.010, palette.text),
-        ] {
-            let tail = (head + direction * length).clamp(0.0, 1.0);
-            draw_arc(ctx, radius, tail.min(head), tail.max(head), color);
+    const SEGMENTS: u32 = 36;
+    // A single interrupted sweep establishes the scale. Filled segments are
+    // thicker, so measured progress remains legible in monochrome as well.
+    for index in 0..SEGMENTS {
+        let start = f64::from(index) / f64::from(SEGMENTS);
+        let end = (start + 0.021).min(1.0);
+        draw_arc(ctx, 0.985, start, end, palette.track);
+        if start < ratio {
+            for radius in [0.94, 0.96, 0.98, 1.0] {
+                draw_arc(ctx, radius, start, end.min(ratio), palette.accent);
+            }
         }
+    }
+    for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        draw_radial(ctx, fraction, 1.025, 1.065, palette.secondary);
+    }
+    if ratio <= 0.0 {
+        return;
+    }
+    // The cursor ends at the animated measured position; it never crosses the
+    // number. A quiet inward gleam traverses only the active part of the arc.
+    draw_radial(ctx, ratio, 0.88, 1.02, palette.text);
+    if let Some(seconds) = seconds {
+        let head = (seconds / 3.6).fract() * ratio;
+        draw_arc(ctx, 0.905, (head - 0.045).max(0.0), head, palette.secondary);
+        draw_radial(ctx, head, 0.895, 0.925, palette.text);
     }
 }
 
-fn draw_needle_trail(
+fn draw_radial(
     ctx: &mut ratatui::widgets::canvas::Context<'_>,
-    state: &SpeedometerState,
-    ratio: f64,
-    maximum: f64,
-    palette: GaugePalette,
+    fraction: f64,
+    inner: f64,
+    outer: f64,
+    color: Color,
 ) {
-    let spread = (state.velocity.abs() / maximum * 0.07).min(0.12);
-    if spread < 0.002 {
-        return;
-    }
-    for (fraction, color) in [
-        (1.0, palette.track),
-        (0.6, palette.track),
-        (0.25, palette.secondary),
-    ] {
-        let angle = angle_for_ratio(ratio - state.velocity.signum() * spread * fraction);
-        ctx.draw(&CanvasLine {
-            x1: 0.24 * angle.cos(),
-            y1: 0.24 * angle.sin(),
-            x2: 0.76 * angle.cos(),
-            y2: 0.76 * angle.sin(),
-            color,
-        });
-    }
+    let angle = angle_for_ratio(fraction);
+    ctx.draw(&CanvasLine {
+        x1: inner * angle.cos(),
+        y1: inner * angle.sin(),
+        x2: outer * angle.cos(),
+        y2: outer * angle.sin(),
+        color,
+    });
 }
 
 fn draw_peak(
@@ -385,16 +382,27 @@ fn render_center_readout(
     show_value: bool,
     palette: GaugePalette,
     large_values: bool,
+    precise: bool,
 ) {
     if area.width < 20 || area.height < 6 {
         return;
     }
-    let large = large_values && area.height >= 16;
-    let tall = large && area.height >= 23;
+    let large = large_values && area.height >= if precise { 12 } else { 16 };
+    let tall = large && area.height >= if precise { 18 } else { 23 };
     let digit_height = if tall { 5 } else { 3 };
-    let width = area.width.min(38);
+    let width = if precise {
+        (u32::from(area.width) * 55 / 100).min(46) as u16
+    } else {
+        area.width.min(38)
+    };
     let x = area.x + (area.width - width) / 2;
-    let y = area.y + area.height.saturating_mul(if large { 32 } else { 53 }) / 100;
+    let top = match (precise, large) {
+        (true, true) => 37,
+        (true, false) => 44,
+        (false, true) => 32,
+        (false, false) => 53,
+    };
+    let y = area.y + (u32::from(area.height) * top / 100) as u16;
     let height = area.bottom().saturating_sub(y).min(if tall {
         8
     } else if large {
@@ -403,7 +411,14 @@ fn render_center_readout(
         3
     });
     let value = if show_value {
-        format!("{:.1}", state.displayed_mbps())
+        format!(
+            "{:.1}",
+            if precise {
+                state.target_mbps()
+            } else {
+                state.displayed_mbps()
+            }
+        )
     } else {
         "—".into()
     };
@@ -427,15 +442,18 @@ fn render_center_readout(
         lines.push(Line::styled(value, base.add_modifier(Modifier::BOLD)));
         lines.push(Line::styled(ui("Mbps"), base.fg(palette.secondary)));
     }
-    if show_value {
-        lines.push(Line::styled(
+    if show_value && state.peak_mbps().is_finite() && state.scale_mbps().is_finite() {
+        let metadata = Line::styled(
             ui(format!(
                 "peak {:.1}  •  scale {}",
                 state.peak_mbps(),
                 format_scale(state.scale_mbps())
             )),
             base.fg(palette.secondary),
-        ));
+        );
+        if !precise || metadata.width() <= usize::from(width) {
+            lines.push(metadata);
+        }
     }
     let offset = if big { digit_height } else { 0 };
     frame.render_widget(
@@ -452,9 +470,17 @@ fn render_fallback(
     state: &SpeedometerState,
     palette: GaugePalette,
     show_value: bool,
+    precise: bool,
 ) {
     let value = if show_value {
-        format!("{:.1} Mbps", state.displayed_mbps())
+        format!(
+            "{:.1} Mbps",
+            if precise {
+                state.target_mbps()
+            } else {
+                state.displayed_mbps()
+            }
+        )
     } else {
         "— Mbps".to_string()
     };
@@ -564,13 +590,23 @@ mod tests {
     fn animated_buffer(width: u16, height: u16, show_value: bool, seconds: Option<f64>) -> Buffer {
         let mut state = SpeedometerState::default();
         state.snap_to_with_peak(642.7, 780.2);
+        animated_state_buffer(&state, width, height, show_value, seconds)
+    }
+
+    fn animated_state_buffer(
+        state: &SpeedometerState,
+        width: u16,
+        height: u16,
+        show_value: bool,
+        seconds: Option<f64>,
+    ) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 render_animated(
                     frame,
                     frame.area(),
-                    &state,
+                    state,
                     show_value,
                     GaugePalette {
                         background: Color::Reset,
@@ -592,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn orbital_motion_changes_geometry_without_changing_readings_or_palette() {
+    fn arc_highlight_changes_geometry_without_changing_readings_or_palette() {
         let start = animated_buffer(96, 30, true, Some(0.0));
         let later = animated_buffer(96, 30, true, Some(1.7));
         assert_ne!(start, later, "even monochrome motion must be visible");
@@ -607,10 +643,64 @@ mod tests {
                 .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset));
         }
         // Animation never paints over the exact center value, unit, or peak.
-        for y in 9..17 {
-            for x in 29..67 {
+        for y in 11..19 {
+            for x in 25..71 {
                 assert_eq!(start[(x, y)], later[(x, y)]);
             }
+        }
+    }
+
+    #[test]
+    fn exact_sample_is_readable_before_the_spring_reaches_it_at_every_size() {
+        let mut state = SpeedometerState::default();
+        state.snap_to_with_peak(642.7, 780.2);
+        state.set_target(910.3);
+        assert_eq!(state.displayed_mbps(), 642.7);
+        assert_eq!(state.target_mbps(), 910.3);
+        for (width, height) in [(30, 6), (48, 10), (76, 20), (100, 28)] {
+            for seconds in [None, Some(1.3)] {
+                let buffer = animated_state_buffer(&state, width, height, true, seconds);
+                let text = buffer_text(&buffer);
+                assert!(
+                    text.contains("910.3"),
+                    "exact sample missing at {width}×{height}"
+                );
+                assert!(
+                    !text.contains("642.7"),
+                    "interpolated value leaked into readout"
+                );
+            }
+        }
+        state.tick(std::time::Duration::from_millis(16));
+        assert_ne!(state.displayed_mbps(), state.target_mbps());
+        let text = buffer_text(&animated_state_buffer(&state, 76, 20, true, Some(1.3)));
+        assert!(text.contains("910.3 Mbps"));
+        assert!(!text.contains(&format!("{:.1}", state.displayed_mbps())));
+    }
+
+    #[test]
+    fn comfortable_precision_dial_uses_five_rows_and_handles_nonfinite_samples() {
+        let buffer = animated_buffer(76, 20, true, None);
+        for y in 7..12 {
+            assert!((17..58).any(|x| {
+                let symbol = buffer[(x, y)].symbol();
+                symbol == "█" || symbol == "▄" || symbol == "▀"
+            }));
+        }
+        let mut invalid = SpeedometerState::default();
+        invalid.snap_to_with_peak(f64::INFINITY, f64::INFINITY);
+        for (width, height) in [(30, 6), (48, 10), (76, 20)] {
+            let text = buffer_text(&animated_state_buffer(
+                &invalid,
+                width,
+                height,
+                true,
+                Some(1.0),
+            ));
+            assert!(!text.contains("inf"));
+            assert!(!text.contains("NaN"));
+            assert!(!text.contains("peak"));
+            assert!(text.contains("Mbps"));
         }
     }
 
@@ -688,6 +778,7 @@ mod tests {
                                 show_value,
                                 palette,
                                 true,
+                                false,
                             );
                         })
                         .unwrap();
