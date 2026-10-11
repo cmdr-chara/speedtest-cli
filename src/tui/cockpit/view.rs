@@ -14,6 +14,7 @@ use ratatui::{
 };
 
 use super::{
+    motion,
     services::{Tool, HISTORY_DAYS},
     state::{Activity, Cockpit, Load, Modal, Screen, SECTIONS},
     theme::Theme,
@@ -87,6 +88,16 @@ pub(super) fn draw(frame: &mut Frame, app: &mut Cockpit, theme: Theme, elapsed: 
             Screen::Dns | Screen::Diagnostics => tools(frame, app, theme, rows[2]),
             Screen::Tool => report(frame, app, theme, rows[2], elapsed),
             Screen::Failure => failure(frame, app, theme, rows[2]),
+        }
+        let animation = app.motion.frame();
+        // Emphasis moves across the existing cells; values, warnings and wide
+        // Unicode glyphs remain readable and never shift under the user's input.
+        if app.screen() != Screen::Live && app.screen() != Screen::Results {
+            motion::illuminate(frame.buffer_mut(), rows[2], theme, animation.arrival);
+        }
+        if animation.focus < 1.0 {
+            motion::illuminate(frame.buffer_mut(), rows[1], theme, animation.focus);
+            motion::focus_selection(frame.buffer_mut(), rows[2], animation.focus);
         }
         footer(frame, app, theme, footer_area);
     }
@@ -231,6 +242,14 @@ fn home(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
     let mut logo: Vec<_> = BRAND.iter().map(|s| Line::styled(*s, t.focus())).collect();
     logo.push(Line::styled(ui("Your network, in focus."), t.strong()));
     frame.render_widget(Paragraph::new(logo), hero[0]);
+    let animation = app.motion.frame();
+    motion::assemble_brand(
+        frame.buffer_mut(),
+        Rect::new(hero[0].x, hero[0].y, hero[0].width.min(35), 4),
+        t,
+        animation.arrival,
+    );
+    motion::illuminate(frame.buffer_mut(), hero[0], t, animation.arrival);
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(ui("MEASUREMENT PROFILE"), t.strong()),
@@ -591,7 +610,7 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
     ])
     .split(area);
     let phase = app.live.phase;
-    let mut rail = Vec::new();
+    let phase_labels = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(rows[0]);
     for (index, step) in [
         TestPhase::Preparing,
         TestPhase::Latency,
@@ -602,25 +621,40 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
     .enumerate()
     {
         let active = *step == phase;
-        rail.push(Span::styled(
-            ui(format!(
-                "{} {}{}  ",
-                index + 1,
-                if active { "› " } else { "" },
-                ui(step.label())
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                ui(format!(
+                    "{} {}{}  ",
+                    index + 1,
+                    if active { "› " } else { "" },
+                    ui(step.label())
+                )),
+                if active { t.focus() } else { t.muted() },
             )),
-            if active { t.focus() } else { t.muted() },
-        ));
+            phase_labels[index],
+        );
     }
-    frame.render_widget(Paragraph::new(Line::from(rail)), rows[0]);
+    phase_track(
+        frame,
+        app,
+        t,
+        Rect::new(rows[0].x, rows[0].y + 1, rows[0].width, 1),
+    );
     let columns = Layout::horizontal([
         Constraint::Length((u32::from(rows[1].width) * 64 / 100).min(96) as u16),
         Constraint::Length(3),
         Constraint::Min(1),
     ])
     .split(rows[1]);
-    let gauge = columns[0];
-    speedometer::render_themed(
+    let animation = app.motion.frame();
+    let show_trace = columns[0].height >= 16 && !app.compact;
+    let gauge_rows = Layout::vertical([
+        Constraint::Min(8),
+        Constraint::Length(if show_trace { 5 } else { 0 }),
+    ])
+    .split(columns[0]);
+    let gauge = gauge_rows[0];
+    speedometer::render_animated(
         frame,
         gauge,
         &app.live.speedometer,
@@ -636,7 +670,16 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
             track: t.line,
         },
         !app.compact,
+        if app.reduced_motion || app.modal.is_some() {
+            None
+        } else {
+            animation.seconds
+        },
     );
+    if show_trace {
+        live_trace(frame, app, t, gauge_rows[1]);
+    }
+    motion::illuminate(frame.buffer_mut(), rows[0], t, animation.phase);
     let side = columns[2];
     let spacious = !app.compact && side.height >= 21;
     let mut lines = vec![
@@ -714,6 +757,81 @@ fn live(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect, elapsed: Duratio
     );
 }
 
+fn phase_track(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
+    let active = match app.live.phase {
+        TestPhase::Preparing => 0,
+        TestPhase::Latency => 1,
+        TestPhase::Download => 2,
+        TestPhase::Upload => 3,
+        TestPhase::Complete => 4,
+    };
+    let animation = app.motion.frame();
+    let segments = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(area);
+    for (index, part) in segments.iter().enumerate() {
+        let width = part.width.saturating_sub(2);
+        let travel = animation
+            .seconds
+            .filter(|_| !app.reduced_motion && app.modal.is_none())
+            .map(|seconds| (seconds / 1.6).fract() * f64::from(width));
+        let spans = (0..width)
+            .map(|x| {
+                let distance = travel.map_or(f64::INFINITY, |head| head - f64::from(x));
+                let (symbol, style) = if index < active {
+                    ("━", t.base().fg(t.success))
+                } else if index == active && (0.0..4.0).contains(&distance) {
+                    (
+                        "━",
+                        t.strong().fg(if distance < 1.0 { t.text } else { t.focus }),
+                    )
+                } else if index == active {
+                    ("─", t.base().fg(t.focus))
+                } else {
+                    ("·", t.base().fg(t.line))
+                };
+                Span::styled(symbol, style)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(Line::from(spans)), *part);
+    }
+}
+
+/// Only actual engine samples are plotted. Motion decorates the latest sample;
+/// it does not interpolate, extrapolate or synthesize throughput evidence.
+fn live_trace(frame: &mut Frame, app: &Cockpit, t: Theme, area: Rect) {
+    let data: Vec<_> = app
+        .live
+        .samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| (index as f64, *sample))
+        .collect();
+    let maximum = data.iter().fold(1.0_f64, |max, (_, value)| max.max(*value)) * 1.12;
+    let latest = data.last().copied().into_iter().collect::<Vec<_>>();
+    let mut sets = vec![Dataset::default()
+        .data(&data)
+        .marker(Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(t.base().fg(t.focus))];
+    sets.push(
+        Dataset::default()
+            .data(&latest)
+            .marker(Marker::Dot)
+            .style(t.strong().fg(t.text)),
+    );
+    frame.render_widget(
+        Chart::new(sets)
+            .style(t.base())
+            .block(Block::default().title(ui("Mbps")).title_style(t.muted()))
+            .x_axis(
+                Axis::default()
+                    .bounds([0.0, (data.len().saturating_sub(1) as f64).max(1.0)])
+                    .style(t.base().fg(t.line)),
+            )
+            .y_axis(Axis::default().bounds([0.0, maximum])),
+        area,
+    );
+}
+
 /// Return the used body height so the footer follows short results while long
 /// findings retain the full available scroll viewport.
 fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
@@ -731,6 +849,22 @@ fn results(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16 {
     let height = metric_height(app, area);
     let rows = Layout::vertical([Constraint::Length(height), Constraint::Min(1)]).split(area);
     result_metrics(frame, result, t, rows[0]);
+    let progress = app.motion.frame().arrival;
+    // Each exact metric gets its own staggered sweep. No rolling/fabricated
+    // intermediate numbers, including when completion carries a save failure.
+    for (index, card) in Layout::horizontal([Constraint::Percentage(25); 4])
+        .split(Rect::new(
+            rows[0].x,
+            rows[0].y,
+            rows[0].width.min(160),
+            rows[0].height,
+        ))
+        .iter()
+        .enumerate()
+    {
+        let staggered = ((progress - index as f64 * 0.12) / 0.64).clamp(0.0, 1.0);
+        motion::illuminate(frame.buffer_mut(), *card, t, staggered);
+    }
     let roomy = height >= 6 && area.width >= 100 && rows[1].height >= 12;
     let mut summary = vec![
         Line::styled(
@@ -1285,12 +1419,27 @@ fn statistics(frame: &mut Frame, app: &mut Cockpit, t: Theme, area: Rect) -> u16
             let maximum = data
                 .iter()
                 .fold(1.0f64, |maximum, (_, value)| maximum.max(*value));
+            let count = ((motion::ease(app.motion.frame().arrival) * data.len() as f64).ceil()
+                as usize)
+                .clamp(1, data.len());
+            let tip = [data[count - 1]];
             frame.render_widget(
-                Chart::new(vec![Dataset::default()
-                    .data(&data)
-                    .marker(Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(t.base().fg(t.focus))])
+                Chart::new(vec![
+                    Dataset::default()
+                        .data(&data)
+                        .marker(Marker::Braille)
+                        .graph_type(GraphType::Line)
+                        .style(t.base().fg(t.line)),
+                    Dataset::default()
+                        .data(&data[..count])
+                        .marker(Marker::Braille)
+                        .graph_type(GraphType::Line)
+                        .style(t.base().fg(t.focus)),
+                    Dataset::default()
+                        .data(&tip)
+                        .marker(Marker::Dot)
+                        .style(t.strong()),
+                ])
                 .style(t.base())
                 .block(
                     Block::default()
@@ -2042,6 +2191,7 @@ fn overlay(frame: &mut Frame, app: &mut Cockpit, modal: Modal, t: Theme, area: R
             .min(usize::from(u16::MAX)) as u16,
     );
     frame.render_widget(paragraph.scroll((app.modal_scroll, 0)).block(block), popup);
+    motion::illuminate(frame.buffer_mut(), popup, t, app.motion.frame().modal);
 }
 
 fn speed(value: Option<f64>) -> String {

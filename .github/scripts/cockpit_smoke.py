@@ -234,6 +234,16 @@ def main():
                 assert 'NETWORK NOT PROBED' not in tty.screen.text()
                 assert 'LAST RESULT AVAILABLE' not in tty.screen.text()
                 tty.snapshot('Bare speedtest / 80x24 home')
+                # Entrance motion never blocks navigation, then stops writing.
+                tty.send('\t')
+                tty.wait('READY WHEN YOU ARE')
+                tty.send('\x1b')
+                tty.wait('No tests yet')
+                tty.pump(1.0)
+                settled_bytes = len(tty.raw)
+                tty.pump(0.35)
+                assert len(tty.raw) == settled_bytes, 'settled cockpit kept redrawing'
+                transcript.append('PASS: navigation during entrance motion; idle output stops after effects settle.\n')
                 tty.send('q')
                 tty.finish()
             assert server.requests == 0

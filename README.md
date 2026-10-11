@@ -180,6 +180,10 @@ For the interactive dashboard, use a terminal at least **80 × 24** characters:
 
 ### Screenshots and demos
 
+The cockpit now includes orbital gauge accents, needle trails, a live sample trace,
+phase indicators, and short page, chart, and results reveals. **Settings → Reduced
+motion** settles all effects immediately. [See the animation gallery and before/after captures](./docs/images/motion/README.md).
+
 #### Watch a connection under load
 
 The live view shows throughput alongside latency as the test progresses.

@@ -18,6 +18,59 @@ fn app() -> Cockpit {
         "--no-save",
     ])))
 }
+
+#[test]
+fn motion_keeps_results_exact_and_reduced_motion_immediately_settles() {
+    let mut app = app();
+    app.result = Some(result());
+    app.save_notice = "SAVE FAILED · fixture".into();
+    app.push(Screen::Results);
+    app.sync_motion(Duration::ZERO, 120, 38);
+    let expected = format!("{:.1}", app.result.as_ref().unwrap().download.mbps);
+    for millis in [0, 100, 300, 600, 800] {
+        app.motion.advance(Duration::from_millis(millis));
+        let text = render(&mut app, 120, 38).0;
+        assert!(text.contains(&expected), "exact value absent at {millis}ms");
+        assert!(text.contains("SAVE FAILED"));
+        app.motion.finish_frame();
+    }
+    assert!(!app.motion.needs_frame());
+    app.push(Screen::Home);
+    app.sync_motion(Duration::from_secs(1), 120, 38);
+    assert!(app.motion.needs_frame());
+    app.reduced_motion = true;
+    app.sync_motion(Duration::from_millis(1100), 120, 38);
+    let (_, before) = render(&mut app, 120, 38);
+    app.motion.advance(Duration::from_secs(5));
+    assert_eq!(before, render(&mut app, 120, 38).1);
+    assert!(!app.motion.needs_frame());
+    app.reduced_motion = false;
+    app.sync_motion(Duration::from_secs(6), 120, 38);
+    assert!(!app.motion.needs_frame(), "old motion must not replay");
+}
+
+#[test]
+fn in_flight_motion_preserves_native_palettes_across_resize_and_cjk() {
+    for theme in [Theme::ansi(), Theme::monochrome()] {
+        let mut app = app();
+        app.language = crate::i18n::Language::Ja;
+        app.sync_motion(Duration::ZERO, 120, 38);
+        for (width, height) in [(120, 38), (80, 24), (79, 23), (1, 1), (214, 52)] {
+            app.sync_motion(Duration::from_millis(120), width, height);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|f| view::draw(f, &mut app, theme, Duration::ZERO))
+                .unwrap();
+            for cell in terminal.backend().buffer().content() {
+                assert!(!matches!(
+                    cell.fg,
+                    ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(_)
+                ));
+                assert!(!cell.modifier.contains(ratatui::style::Modifier::DIM));
+            }
+        }
+    }
+}
 fn key(app: &mut Cockpit, code: KeyCode) -> Effect {
     app.key(KeyEvent::new(code, KeyModifiers::NONE))
 }

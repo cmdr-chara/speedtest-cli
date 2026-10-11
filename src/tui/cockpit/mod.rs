@@ -1,4 +1,7 @@
 //! Full-screen application shell. Owns navigation, not measurement business logic.
+mod motion;
+#[cfg(test)]
+mod motion_capture;
 mod services;
 mod state;
 #[cfg(test)]
@@ -81,8 +84,10 @@ pub async fn run(options: TestOptions) -> Result<()> {
     }
     let mut dirty = true;
     let mut started = Instant::now();
+    let ui_clock = Instant::now();
     let mut heartbeat = 0;
     let mut size = terminal.size()?;
+    app.sync_motion(ui_clock.elapsed(), size.width, size.height);
     let result = loop {
         let mut effect = Effect::None;
         tokio::select! {
@@ -103,10 +108,12 @@ pub async fn run(options: TestOptions) -> Result<()> {
             _ = physics.tick(), if app.activity == Some(Activity::Test) && !app.reduced_motion => {
                 dirty |= app.live.tick(PHYSICS_RATE);
             }
-            _ = render.tick(), if dirty => {
+            _ = render.tick(), if dirty || app.motion.needs_frame() => {
                 let theme = Theme::resolve(app.palette, color_depth);
+                app.motion.advance(ui_clock.elapsed());
                 terminal.draw(|frame| view::draw(frame, &mut app, theme, started.elapsed()))
                     .context("failed to draw cockpit")?;
+                app.motion.finish_frame();
                 dirty = false;
             }
             event = next_event(&mut receiver) => {
@@ -196,6 +203,7 @@ pub async fn run(options: TestOptions) -> Result<()> {
             render = tokio::time::interval(frame_interval(fps));
             render.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         }
+        app.sync_motion(ui_clock.elapsed(), size.width, size.height);
     };
     // Drop the owned measurement/child process before restoring the terminal.
     drop(job);

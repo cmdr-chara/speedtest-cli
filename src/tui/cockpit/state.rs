@@ -122,6 +122,8 @@ struct StatisticsComparison {
 
 #[derive(Debug)]
 pub(super) struct Cockpit {
+    pub motion: super::motion::Motion,
+    motion_revision: u64,
     pub pages: Vec<Page>,
     pub options: TestOptions,
     pub reduced_motion: bool,
@@ -161,6 +163,8 @@ pub(super) struct Cockpit {
 impl Cockpit {
     pub fn new(options: TestOptions) -> Self {
         Self {
+            motion: super::motion::Motion::default(),
+            motion_revision: 0,
             pages: vec![Page::new(Screen::Home)],
             options,
             reduced_motion: false,
@@ -206,6 +210,25 @@ impl Cockpit {
     }
     pub fn screen(&self) -> Screen {
         self.page().screen
+    }
+
+    pub fn sync_motion(&mut self, now: std::time::Duration, width: u16, height: u16) {
+        let scene = super::motion::Scene {
+            screen: self.screen(),
+            selected: self.page().selected,
+            phase: self.live.phase,
+            metric: self.statistics_metric,
+            revision: self.motion_revision,
+            modal: match self.modal {
+                None => 0,
+                Some(Modal::Help) => 1,
+                Some(Modal::TextSize) => 2,
+                Some(Modal::Cancel { .. }) => 3,
+            },
+            size: (width, height),
+            live: self.screen() == Screen::Live && self.activity == Some(Activity::Test),
+        };
+        self.motion.observe(scene, now, self.reduced_motion);
     }
     pub fn push(&mut self, screen: Screen) {
         self.pages.push(Page::new(screen));
@@ -372,6 +395,7 @@ impl Cockpit {
     }
 
     fn refresh_statistics(&mut self) {
+        self.motion_revision = self.motion_revision.wrapping_add(1);
         self.statistics_archive = match &self.history {
             Load::Ready(archive)
                 if self.statistics_scope.is_some() || self.statistics_path.is_some() =>
