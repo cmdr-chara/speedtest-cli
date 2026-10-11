@@ -180,9 +180,12 @@ For the interactive dashboard, use a terminal at least **80 × 24** characters:
 
 ### Screenshots and demos
 
-The cockpit now includes orbital gauge accents, needle trails, a live sample trace,
-phase indicators, and short page, chart, and results reveals. **Settings → Reduced
-motion** settles all effects immediately. [See the animation gallery and before/after captures](./docs/images/motion/README.md).
+The cockpit has a segmented precision dial with an exact live sample readout,
+separate connection-response metrics, and phase-labeled sample history. Home puts
+**Space · Start now** beside the current profile; Results leads with download and
+upload readings and lets Space start another test with the current settings.
+Page, chart, selection, and result transitions remain animated, with a static
+**Settings → Reduced motion** mode. [See the redesign and before/after gallery](./docs/images/design/README.md).
 
 #### Watch a connection under load
 

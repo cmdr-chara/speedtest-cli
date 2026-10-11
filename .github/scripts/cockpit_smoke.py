@@ -230,7 +230,7 @@ def main():
 
             with session([]) as tty:
                 tty.wait('No tests yet')
-                tty.wait('No background network probes')
+                tty.wait('Your connection has not been probed.')
                 assert 'NETWORK NOT PROBED' not in tty.screen.text()
                 assert 'LAST RESULT AVAILABLE' not in tty.screen.text()
                 tty.snapshot('Bare speedtest / 80x24 home')
@@ -313,7 +313,7 @@ def main():
                 assert tty.process.poll() is None
                 tty.resize(60, 15)
                 tty.wait('TERMINAL TOO SMALL')
-                tty.send('\r\r')
+                tty.send('\r\r  ')
                 assert server.requests == 0, 'hidden controls started a test'
                 tty.resize(80, 24)
                 tty.wait('No tests yet')
@@ -327,16 +327,20 @@ def main():
                 tty.wait('READY WHEN YOU ARE')
                 tty.pump(0.3)
                 assert server.requests == before
-                tty.send('\r')
+                tty.send('\x1b')
+                tty.wait('No tests yet')
+                assert server.requests == before, 'returning Home started a test'
+                tty.wait('Space start now')
+                tty.send(' ')
                 tty.wait('MEASURING')
+                tty.wait('Esc cancel · q quit · Ctrl+C stop')
                 tty.wait('MEASUREMENT COMPLETE', timeout=25)
                 tty.wait('EXPORTED')
-                tty.snapshot('Completed loopback measurement and export')
+                assert server.requests > before, 'Home quick start did not reach the local fixture'
+                tty.snapshot('Home Space quick start / completed loopback measurement and export')
                 result = json.loads(result_path.read_text())
                 assert result['download']['bytes'] > 0 and result['upload']['bytes'] > 0
                 assert not (root / 'history.jsonl').exists(), '--no-save persisted history'
-                tty.send('\x1b')
-                tty.wait('READY WHEN YOU ARE')
                 tty.send('\x1b')
                 tty.wait('LATEST RESULT')
                 tty.send('v')
@@ -359,6 +363,8 @@ def main():
                 with csv_path.open(encoding='utf-8', newline='') as stream:
                     rows = list(csv.DictReader(stream))
                 assert len(rows) == 1 and float(rows[0]['download_mbps']) > 0
+                exported_csv = csv_path.read_bytes()
+                before = server.requests
                 tty.send('\x1b')
                 tty.wait('READY WHEN YOU ARE')
                 tty.send('\x1b')
@@ -366,9 +372,30 @@ def main():
                 tty.send('v')
                 tty.wait('MEASUREMENT COMPLETE')
                 assert history_file.read_text(encoding='utf-8').splitlines() == saved_lines
+                assert server.requests == before, 'opening a saved result started a test'
                 tty.snapshot('Shared completion policy / CSV export and exactly one history row')
+                tty.wait('Space test with current settings')
+                tty.send(' ')
+                tty.wait('MEASURING')
+                tty.wait('Esc cancel · q quit · Ctrl+C stop')
+                until = time.monotonic() + 5
+                while server.requests == before and time.monotonic() < until:
+                    tty.pump()
+                assert server.requests > before, 'Results quick start lost the current loopback settings'
+                assert history_file.read_text(encoding='utf-8').splitlines() == saved_lines, 'starting another test duplicated history'
+                tty.send('\x1b')
+                tty.wait('CONFIRM CANCELLATION')
+                tty.send('y')
+                tty.wait('LATEST RESULT')
+                count = server.requests
+                tty.pump(0.5)
+                assert server.requests == count, 'cancelled Results quick start kept sending requests'
+                assert history_file.read_text(encoding='utf-8').splitlines() == saved_lines, 'cancelled Results quick start saved an incomplete result'
+                assert csv_path.read_bytes() == exported_csv, 'cancelled Results quick start replaced the completed export'
+                tty.snapshot('Results Space quick start / cancelled to Home with saved result intact')
                 tty.send('q')
                 tty.finish()
+            transcript.append('PASS: Home and Results Space start only on explicit input; current loopback settings, cancellation, completed export and single history row are preserved.\n')
             # Only remove the fixture's own automatically persisted data.
             history_file.unlink()
 
@@ -544,7 +571,7 @@ def main():
                 tty.wait('HISTORY UNAVAILABLE')
                 tty.process.send_signal(signal.SIGINT)
                 tty.finish(130)
-            transcript.append('PASS: offline menu, 80x24 navigation, local diagnostic command and child cancellation, explicit --plain, resize guard, JSON/CSV export, persistence/no-save, cancellation, retry, history/compare/stats, Ctrl+C and SIGINT restoration.\nOnly loopback network traffic was used. No public probes or DNS changes ran.\n')
+            transcript.append('PASS: offline menu, 80x24 navigation, Home/Results quick start, local diagnostic command and child cancellation, explicit --plain, resize guard, JSON/CSV export, persistence/no-save, cancellation, retry, history/compare/stats, Ctrl+C and SIGINT restoration.\nOnly loopback network traffic was used. No public probes or DNS changes ran.\n')
     finally:
         output.write_text('\n'.join(transcript), encoding='utf-8')
         server.shutdown()

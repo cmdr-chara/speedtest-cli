@@ -2,6 +2,8 @@
 mod motion;
 #[cfg(test)]
 mod motion_capture;
+#[cfg(test)]
+mod quick_start_tests;
 mod services;
 mod state;
 #[cfg(test)]
