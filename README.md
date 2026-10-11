@@ -192,7 +192,7 @@ Page, chart, selection, and result transitions remain animated, with a static
 The live view shows throughput alongside latency as the test progresses.
 
 <p align="center">
-  <img src="./docs/images/readme/live-demo.gif" width="960" alt="Animated speedtest-cli walkthrough from the dashboard into a live download measurement and back">
+  <img src="./docs/images/readme/live-demo.gif" width="960" alt="Animated speedtest-cli walkthrough through Home, download, upload, completed results, and back">
 </p>
 
 #### Explore results and history
@@ -200,7 +200,7 @@ The live view shows throughput alongside latency as the test progresses.
 Browse saved tests, pin a baseline, compare it with another run, and open the full result.
 
 <p align="center">
-  <img src="./docs/images/readme/cockpit-tour.gif" width="960" alt="Animated speedtest-cli tour through History, baseline comparison, Results, and back to Home">
+  <img src="./docs/images/readme/cockpit-tour.gif" width="960" alt="speedtest-cli screenshot tour through Home, History, baseline comparison, Results, and back to Home">
 </p>
 
 <details>

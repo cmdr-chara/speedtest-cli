@@ -4,6 +4,12 @@ Screenshots and animation are rasterized from **actual application Ratatui cell
 buffers**. They use synthetic offline fixtures, English, and the explicitly chosen
 Graphite palette. The application still inherits the terminal's palette by default.
 
+The current after images and GIF were recaptured from
+[`e1e175e`](https://github.com/cmdr-chara/speedtest-cli/commit/e1e175e24a47f447779f8ea39c545ebcea9aa64a),
+including removal of the top-right measuring badge. The
+[capture workflow](../../../.github/workflows/cockpit-visuals.yml) renders current
+assets; the historical before images remain unchanged.
+
 ## Before and after
 
 Each pair uses the same saved results, live readings, terminal dimensions, palette,
